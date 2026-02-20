@@ -56,7 +56,7 @@ def train():
     vocab_q = Vocabulary()
     vocab_q.load(VOCAB_Q_PATH)
     vocab_a = Vocabulary()
-    vocab_a.load(VOCAB_Q_PATH)
+    vocab_a.load(VOCAB_A_PATH)
 
     # Dataset and Dataloader
     dataset = VQADatasetA(
