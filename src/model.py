@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn 
-import torch.functional as F 
+import torch.nn.functional as F 
 
 
 class SimpleVQAModel(nn.Module):
@@ -38,8 +38,8 @@ class SimpleVQAModel(nn.Module):
         # input: vector (image * question)
         # output: prob of each class (num_class)
         self.classifier = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size), 
-            nn.ReLU()
+            nn.Linear(hidden_size, hidden_size),  # combine with ReLU to learn non-linearity 
+            nn.ReLU(),
             nn.Dropout(0.5), 
             nn.Linear(hidden_size, num_classes) 
         )
@@ -69,5 +69,49 @@ class SimpleVQAModel(nn.Module):
         # HANDLE QUESTION
         embeds = self.embedding(questions) # -> (batch, seq, embed_size)
 
+        # forward the question through LSTM 
+        _, (hidden, cell) = self.lstm(embeds) # take the final state(last hidden)
+        # hidden (num_layers, batch, hidden_size)
+
+        # feature extraction of top layer of LSTM 
+        q_feature = hidden[-1] # (batch, hidden_size)
+
+        # fusion (using hadamard product)
+        fusion = img_feature * q_feature # fusion (batch_size, hidden_size)
+
+        # prediction 
+        logits = self.classifier(fusion)
+
+        return logits
 
         
+        
+        
+        
+# === KHỐI KIỂM TRA NHANH (DEBUG LOCAL) ===
+if __name__ == "__main__":
+    print("🛠️ Đang kiểm tra SimpleVQAModel...")
+    
+    # Giả lập siêu tham số
+    BATCH = 4
+    VOCAB_SIZE = 1000
+    NUM_CLASSES = 3129 # Số lượng câu trả lời thường thấy trong VQA 2.0
+    
+    model = SimpleVQAModel(vocab_size=VOCAB_SIZE, num_classes=NUM_CLASSES)
+    
+    # Giả lập dữ liệu (Dựa theo extract_features.py của bạn đang xuất 14x14)
+    dummy_img = torch.randn(BATCH, 14, 14, 2048) 
+    dummy_ques = torch.randint(0, VOCAB_SIZE, (BATCH, 15)) # Câu hỏi dài 15 từ
+    
+    # Forward Pass
+    output = model(dummy_img, dummy_ques)
+    
+    print("✅ Mạng Nơ-ron đã thông suốt!")
+    print(f" - Image Input shape: {dummy_img.shape}")
+    print(f" - Question Input shape: {dummy_ques.shape}")
+    print(f" - Logits Output shape: {output.shape} (Kỳ vọng: [{BATCH}, {NUM_CLASSES}])")
+
+
+        
+
+

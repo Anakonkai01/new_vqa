@@ -7,7 +7,7 @@ class Vocabulary:
     def __init__(self):
         self.word2idx = {}
         self.idx2word = {}
-        self.idx = 0
+        self.idx = 0 # tracking index 
         
         # 4 Token đặc biệt bắt buộc cho bài toán sinh (Generative)
         self.pad_token = "<pad>"    # Để lấp đầy cho batch bằng nhau
@@ -60,6 +60,9 @@ class Vocabulary:
             result.append(word_id)
         result.append(self.word2idx[self.end_token])
         return result
+
+    def __len__(self): # =)) ao ma 
+        return self.idx
 
     def save(self, path):
         with open(path, 'w') as f:
