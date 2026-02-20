@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, random_split
 import os
 import sys 
 import tqdm
@@ -36,8 +36,8 @@ loss = criterion(logits, targets)
 BATCH_SIZE = 32
 EPOCHS = 10 
 LEARNING_RATE = 1e-3 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-# DEVICE = torch.device('cpu')
+# DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+DEVICE = torch.device('cpu')
 
 
 IMAGE_DIR        = "data/raw/images/train2014"
@@ -67,16 +67,34 @@ def train():
         vocab_a=vocab_a    
     )
     
-    # dataloader (conveyor)
-    dataloader = DataLoader(
-        dataset=dataset,
+    # split data, 90% train, 10% val, manual seed 
+    val_size = int(0.1 * len(dataset))
+    train_size = len(dataset) - val_size
+    generator = torch.Generator().manual_seed(42)
+    train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
+    
+    print(f"Train: {train_size}, val: {val_size}")
+
+    pin_memory = True if torch.cuda.is_available() else False
+    
+    train_loader = DataLoader(
+        train_dataset,
         batch_size=BATCH_SIZE,
-        shuffle=True, 
-        collate_fn=vqa_collate_fn, # function haddle padding
+        shuffle=True,
+        collate_fn=vqa_collate_fn,
         num_workers=4,
-        pin_memory =  True if torch.cuda.is_available() else False
+        pin_memory=pin_memory
     )
 
+    val_loader = DataLoader(
+        val_dataset, 
+        batch_size=BATCH_SIZE,
+        shuffle=False, 
+        collate_fn=vqa_collate_fn,
+        num_workers=4,
+        pin_memory=pin_memory
+    )
+    
     
     # init model, optimize function, loss function 
     
@@ -100,7 +118,7 @@ def train():
         model.train() 
         total_loss = 0 # for tracking 
         
-        for batch_idx, (imgs, questions, answer) in enumerate(dataloader):
+        for batch_idx, (imgs, questions, answer) in enumerate(train_loader):
             # move data to DEVICE 
             imgs = imgs.to(DEVICE)
             questions = questions.to(DEVICE)
@@ -138,15 +156,33 @@ def train():
 
             total_loss += loss.item()
 
-            # print for tracking
-            if batch_idx % 100 == 0:
-                print(f"Epoch [{epoch+1}/{EPOCHS}] | "
-                    f"Batch [{batch_idx}/{len(dataloader)}] | "
-                    f"Loss: {loss.item():.4f}")
-                
-        avg_loss = total_loss / len(dataloader)
-        print(f"Epoch {epoch+1} | Avg Loss: {avg_loss:.4f}")
 
+                
+        avg_train_loss = total_loss / len(train_loader)
+        
+        # VALIDATION
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for imgs, questions, answer in val_loader:
+                imgs = imgs.to(DEVICE)
+                questions = questions.to(DEVICE)
+                answer = answer.to(DEVICE)
+
+                decoder_input = answer[:, :-1]
+                decoder_target = answer[:, 1:]
+
+                logits = model(imgs, questions, decoder_input)
+                vocab_size = logits.size(-1)
+                loss = criterion(
+                    logits.view(-1, vocab_size),
+                    decoder_target.contiguous().view(-1)
+                )
+                val_loss += loss.item()
+
+
+        avg_val_loss = val_loss / len(val_loader)
+        print(f"Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
         # save model 
         torch.save(model.state_dict(), f"checkpoints/model_a_epoch{epoch+1}.pth")
             

@@ -75,33 +75,6 @@ Gradient clipping: max_norm=5.0
 
 ## Bug cần fix ngay khi mở chat mới
 
-### Bug 1 — DEVICE sai (QUAN TRỌNG NHẤT)
-```python
-# train.py dòng ~40
-# Hiện tại: ❌
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-# Sửa thành: ✅
-DEVICE = torch.device('cpu')
-```
-**Lý do:** GPU MX330 detect được nhưng không chạy được → CUDA out of memory crash.
-
-### Bug 2 — vocab_a load sai path
-```python
-# train.py dòng ~61
-# Hiện tại: ❌ (load vocab_q cho cả vocab_a)
-vocab_a.load(VOCAB_Q_PATH)
-
-# Sửa thành: ✅
-vocab_a.load(VOCAB_A_PATH)
-```
-
-### Bug 3 — encoder_questions.py tên file có 's' thừa
-```python
-# vqa_models.py import:
-from models.encoder_questions import QuestionEncoder  # 's' ở cuối
-# File thực tế tên là: encoder_questions.py — OK, khớp rồi
-```
 
 ---
 

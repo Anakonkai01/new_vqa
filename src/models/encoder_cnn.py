@@ -58,6 +58,8 @@ class SimpleCNN(nn.Module):
     
 
     
+
+
     
 # test 
 if __name__ == "__main__":
