@@ -1,12 +1,12 @@
-# 🧠 VQA From Scratch (Visual Question Answering)
+# VQA From Scratch (Visual Question Answering)
 
-> **Status:** 🚧 Developing (Sprint 1)  
+> **Status:** Developing (Sprint 1)  
 > **Author:** [Tên Của Bạn]  
 > **Environment:** Omarchy (Arch Linux) | PyTorch | CUDA  
 
 Dự án xây dựng hệ thống AI có khả năng trả lời câu hỏi dựa trên hình ảnh (VQA), phát triển từ con số 0 để phục vụ mục đích học tập chuyên sâu (Deep Learning, NLP, CV).
 
-## 🎯 Mục Tiêu (Goals)
+## Mục Tiêu (Goals)
 
 1.  **Hiểu sâu bản chất:** Tự code các module cốt lõi (LSTM, Attention, CNN Pipeline) thay vì dùng thư viện ăn sẵn.
 2.  **Kiến trúc linh hoạt:** Xây dựng hệ thống theo dạng Module để dễ dàng nâng cấp từ Simple Model lên Attention Model.
@@ -14,9 +14,9 @@ Dự án xây dựng hệ thống AI có khả năng trả lời câu hỏi dự
 
 ---
 
-## 📅 Development Roadmap (Scrum Board)
+## Development Roadmap (Scrum Board)
 
-### 🟢 Phase 1: The Foundation (Data Pipeline)
+### Phase 1: The Foundation (Data Pipeline)
 *Mục tiêu: Dữ liệu chảy thông suốt từ Raw -> Tensor -> DataLoader.*
 - [ ] **Task 1.1:** Setup project structure (Folder, Symlinks).
 - [ ] **Task 1.2:** Viết Module Vocabulary (`src/vocab.py`) xử lý cả Question & Answer.
@@ -24,14 +24,14 @@ Dự án xây dựng hệ thống AI có khả năng trả lời câu hỏi dự
 - [ ] **Task 1.4:** Viết Script Feature Extraction (`scripts/2_extract_features.py`) - Lưu tensor 3D (14x14).
 - [ ] **Task 1.5:** Viết Dataset Class (`src/dataset.py`) ghép nối tất cả.
 
-### 🟡 Phase 2: The Prototype (Simple LSTM)
+### Phase 2: The Prototype (Simple LSTM)
 *Mục tiêu: "Walking Skeleton" - Model chạy được, loss giảm, chưa cần thông minh.*
 - [ ] **Task 2.1:** Viết Image Encoder (Flatten features).
 - [ ] **Task 2.2:** Viết Question Encoder (LSTM).
 - [ ] **Task 2.3:** Viết Decoder đơn giản (Concat Image + Question -> LSTM).
 - [ ] **Task 2.4:** Training Loop v1 (Overfit trên 1 batch nhỏ để test code).
 
-### 🔴 Phase 3: The Intelligence (Attention Mechanism)
+### Phase 3: The Intelligence (Attention Mechanism)
 *Mục tiêu: Model biết "nhìn" vào đâu khi trả lời.*
 - [ ] **Task 3.1:** Implement Soft Attention Module.
 - [ ] **Task 3.2:** Nâng cấp Decoder để tích hợp Attention.
@@ -55,7 +55,7 @@ Dự án xây dựng hệ thống AI có khả năng trả lời câu hỏi dự
 
 ---
 
-## 📂 Project Structure
+## Project Structure
 
 ```text
 vqa_scratch/
