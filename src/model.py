@@ -23,7 +23,7 @@ class SimpleVQAModel(nn.Module):
 
         # QUESTION ENCODER
         # input idx of word, take from vocab dict 
-        self.embedding = nn.Embedding(vocab_size, embed_size)
+        self.embedding = nn.Embedding(vocab_size, embed_size, padding_idx=0)
         
         # lstm 
         self.lstm = nn.LSTM(
@@ -60,7 +60,7 @@ class SimpleVQAModel(nn.Module):
         # normalize the vector feature because we only care the direction (which contain the context), we don't care the magnitude of the vector 
         # using l2 norm (which divide the vector with l2 norm of vector) 
         # after that, all the vector now have l2 norm = 1 but still contain the direction
-        img_feature = F.normalize(img_feature, p=2, dim=1)
+        img_feature = F.normalize(images, p=2, dim=1)
 
         # mapping from vector feature space to hidden space
         img_feature = self.visual_linear(img_feature)
