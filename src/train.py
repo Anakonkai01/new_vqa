@@ -18,7 +18,7 @@ from vocab import Vocabulary
 BATCH_SIZE = 64 
 EPOCHS = 10 
 LEARNING_RATE = 1e-3 
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu' )
+DEVICE = torch.device('cpu') 
 
 
 
@@ -47,7 +47,7 @@ def train():
         dataset=dataset,
         batch_size=BATCH_SIZE,
         shuffle=True, 
-        collate_fn=vqa_collate_fn(), # function haddle padding
+        collate_fn=vqa_collate_fn, # function haddle padding
         num_workers=4,
         pin_memory =  True if torch.cuda.is_available() else False
     )
@@ -69,7 +69,7 @@ def train():
 
     # training loop 
     print("Training on",DEVICE)
-    for epoch in tqdm(range(EPOCHS)):
+    for epoch in tqdm.tqdm(range(EPOCHS)):
         # switch model to train mode 
         model.train() 
         total_loss = 0 # for tracking 
@@ -110,7 +110,7 @@ def train():
 
         
         
-if __name__ == "main":
+if __name__ == "__main__":
     train()
         
         

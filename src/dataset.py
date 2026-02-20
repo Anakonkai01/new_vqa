@@ -1,5 +1,6 @@
 import torch
 from torch.utils.data import DataLoader, Dataset
+from torch.nn.utils.rnn import pad_sequence
 import h5py
 import json
 from vocab import Vocabulary 
@@ -25,7 +26,7 @@ class VQADataset(Dataset):
         # 3. Xây dựng Hash Map ánh xạ Tên ảnh -> Vị trí (Index) trong file H5
         # Tránh việc phải dùng vòng lặp tìm kiếm tên ảnh mỗi khi load 1 sample
         self.name2idx = {}
-        with h5py.File(self.features_h5_path, 'r') as f:
+        with h5py.File(self.feature_h5_path, 'r') as f:
             h5_ids = f['ids'][:]
             for idx, name_bytes in enumerate(h5_ids):
                 # Giải mã bytes thành chuỗi (ví dụ: b'COCO_train2014_000000123.jpg' -> 'COCO_train2014_000000123.jpg')
@@ -41,7 +42,7 @@ class VQADataset(Dataset):
     def __getitem__(self, idx):
         # Mở file h5py ở lần gọi đầu tiên của mỗi worker
         if self.h5_file is None:
-            self.h5_file = h5py.File(self.features_h5_path, 'r')
+            self.h5_file = h5py.File(self.feature_h5_path, 'r')
 
         # Lấy thông tin thô
         q_info = self.questions[idx]
@@ -72,7 +73,7 @@ class VQADataset(Dataset):
         # Lấy index tương ứng trong file h5 (O(1) lookup)
         h5_idx = self.name2idx.get(img_name, 0)
         
-        # Cắt lấy tensor ảnh (14, 14, 2048)
+        # Cắt lấy tensor ảnh (vector 2048)
         img_tensor = torch.tensor(self.h5_file['features'][h5_idx], dtype=torch.float32)
 
         return img_tensor, q_tensor, ans_tensor

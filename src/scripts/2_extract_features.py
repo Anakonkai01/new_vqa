@@ -84,11 +84,9 @@ class FeatureExtractor(nn.Module):
         # X (batch, 3, 448, 448)
 
         out = self.resnet(X) # this return out (batch, 2048, 14, 14)
-        # (2048 feature channels, 14, 14) 14x14 spatial dimensions
+        # (batch, 2048 feature channels, 14, 14) 14x14 spatial dimensions
 
-        # permute the order for later 
-        
-        out = out.permute(0, 2, 3, 1)
+        out = out.mean(dim=[2, 3]) # -> (batch, 2048)
 
         return out 
     
@@ -125,7 +123,7 @@ def main():
     with h5py.File(output_path, 'w') as f:
         # create empty dataset 
         # chunks = True for optimize fragment (for random access)
-        feat_dset = f.create_dataset('features', (N , 14, 14, 2048), dtype='float32', chunks=True)
+        feat_dset = f.create_dataset('features', (N, 2048), dtype='float32', chunks=True)
 
         
         # hdf5 orginal does not support python string, so we must define it 

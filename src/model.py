@@ -54,7 +54,7 @@ class SimpleVQAModel(nn.Module):
         # process image feature
         # take mean of 2048 features vector 
         # squeeze the spacial dimension from 14x14 or 7x7 to 1 value (mean)
-        img_feature = images.mean(dim=[1,2])  # -> (batch_size, vector feature)
+        # img_feature = images.mean(dim=[1,2])  # -> (batch_size, vector feature)
        
        
         # normalize the vector feature because we only care the direction (which contain the context), we don't care the magnitude of the vector 
