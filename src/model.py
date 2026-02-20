@@ -12,7 +12,7 @@ class SimpleVQAModel(nn.Module):
         
         # IMAGE ENCODER
         # image encoder (ResNet101)
-        # input from ResNet (batch, 7, 7, 2048)
+        # input from ResNet (batch, 2048)
 
         self.visual_linear = nn.Sequential(
             nn.Linear(2048, hidden_size),
@@ -46,7 +46,7 @@ class SimpleVQAModel(nn.Module):
         
     def forward(self, images, questions):
         """  
-        images (batch, 7, 7, 2048)
+        images (batch, 2048)
         question (batch, max_len)
         """
 
@@ -88,30 +88,6 @@ class SimpleVQAModel(nn.Module):
         
         
         
-# === KHỐI KIỂM TRA NHANH (DEBUG LOCAL) ===
-if __name__ == "__main__":
-    print("🛠️ Đang kiểm tra SimpleVQAModel...")
-    
-    # Giả lập siêu tham số
-    BATCH = 4
-    VOCAB_SIZE = 1000
-    NUM_CLASSES = 3129 # Số lượng câu trả lời thường thấy trong VQA 2.0
-    
-    model = SimpleVQAModel(vocab_size=VOCAB_SIZE, num_classes=NUM_CLASSES)
-    
-    # Giả lập dữ liệu (Dựa theo extract_features.py của bạn đang xuất 14x14)
-    dummy_img = torch.randn(BATCH, 14, 14, 2048) 
-    dummy_ques = torch.randint(0, VOCAB_SIZE, (BATCH, 15)) # Câu hỏi dài 15 từ
-    
-    # Forward Pass
-    output = model(dummy_img, dummy_ques)
-    
-    print("✅ Mạng Nơ-ron đã thông suốt!")
-    print(f" - Image Input shape: {dummy_img.shape}")
-    print(f" - Question Input shape: {dummy_ques.shape}")
-    print(f" - Logits Output shape: {output.shape} (Kỳ vọng: [{BATCH}, {NUM_CLASSES}])")
-
-
         
 
 

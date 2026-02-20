@@ -67,7 +67,7 @@ class FeatureExtractor(nn.Module):
         super().__init__()
 
         # download ResNet101 Default weight 
-        resnet = models.resnet101(weight=models.ResNet101_Weights.DEFAULT)
+        resnet = models.resnet101(weights=models.ResNet101_Weights.DEFAULT)
 
         # remove 2 last layers (Avepooling, FC)
         layers = list(resnet.children())[:-2]
@@ -108,7 +108,7 @@ def main():
     # Init Dataset and DataLoader 
     dataset = ImageDataset(IMAGE_DIR)
     loader = DataLoader(dataset, batch_size=BATCH_SIZE, 
-                        shuffle=False, num_workers=8)
+                        shuffle=False, num_workers=4)
 
     
     # Init Model 

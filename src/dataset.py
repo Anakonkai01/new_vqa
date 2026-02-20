@@ -91,7 +91,7 @@ def vqa_collate_fn(batch):
     imgs, questions, answers = zip(*batch)
     
     # Ảnh và Câu trả lời đã có kích thước cố định, chỉ cần xếp chồng (stack) lên nhau
-    # imgs shape -> (Batch, 14, 14, 2048)
+    # imgs shape -> (Batch, 2048) - đã mean 14x14 trong extract_features
     # answers shape -> (Batch)
     imgs_stacked = torch.stack(imgs, dim=0)
     answers_stacked = torch.stack(answers, dim=0)
