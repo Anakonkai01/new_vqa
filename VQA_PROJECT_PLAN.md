@@ -118,36 +118,36 @@ src/
 
 ### Phase 1: Chuẩn bị dữ liệu
 
-| Bước | Việc cần làm | File | Chi tiết |
-|------|-------------|------|----------|
-| 1 | Sửa extract features | `scripts/2_extract_features.py` | Thêm mode lưu spatial features `(N, 196, 2048)` cho Attention. Giữ bản `(N, 2048)` cho No-Attention |
-| 2 | Sửa dataset | `dataset.py` | Answer trả về dạng sequence: `[<start>, "yes", <end>]` → `[1, 42, 2]` thay vì scalar `42` |
-| 3 | Preprocess answers | `scripts/3_preprocess_answers.py` | (Optional) Tiền xử lý answer sequences |
+| Bước | Việc cần làm | File | Trạng thái |
+|------|-------------|------|------------|
+| 1 | Sửa extract features — thêm mode spatial `(N, 196, 2048)` | `scripts/2_extract_features.py` | ⏳ Chưa làm (chỉ cần cho Model C, D) |
+| 2 | Viết lại dataset — answer dạng sequence, load raw image | `dataset.py` | ✅ Hoàn thành |
+| 3 | Tạo dummy data để test pipeline | `create_dummy_data.py` | ✅ Hoàn thành |
 
 ### Phase 2: Xây dựng Models
 
-| Bước | Việc cần làm | File | Chi tiết |
-|------|-------------|------|----------|
-| 4 | CNN Encoder | `models/encoder_cnn.py` | 2 mode: scratch (SimpleCNN) + pretrained (ResNet101). Output: `(batch, 2048)` hoặc `(batch, 196, 2048)` |
-| 5 | Question Encoder | `models/encoder_question.py` | Embedding + LSTM. Output: `(batch, hidden_size)` |
-| 6 | LSTM Decoder (No Attention) | `models/decoder_lstm.py` | Nhận fusion vector làm initial hidden. Sinh tokens lần lượt |
-| 7 | LSTM Decoder (Attention) | `models/decoder_attention.py` | Mỗi bước tính attention over spatial image features rồi mới sinh token |
-| 8 | VQA Wrapper | `models/vqa_model.py` | Gộp encoder + decoder, config chọn variant (A/B/C/D) |
+| Bước | Việc cần làm | File | Trạng thái |
+|------|-------------|------|------------|
+| 4 | CNN Encoder scratch | `models/encoder_cnn.py` | ✅ Hoàn thành — output `(batch, 1024)` |
+| 5 | Question Encoder | `models/encoder_questions.py` | ✅ Hoàn thành — output `(batch, 1024)` |
+| 6 | LSTM Decoder (No Attention) | `models/decoder_lstm.py` | ✅ Hoàn thành — teacher forcing mode |
+| 7 | VQA Wrapper Model A | `models/vqa_models.py` | ✅ Hoàn thành — `VQAModelA` |
+| 8 | LSTM Decoder (Attention) | `models/decoder_attention.py` | ⏳ Chưa làm (Model C, D) |
 
 ### Phase 3: Training
 
-| Bước | Việc cần làm | File | Chi tiết |
-|------|-------------|------|----------|
-| 9 | Sửa training loop | `train.py` | Teacher forcing, CrossEntropyLoss trên từng token, hỗ trợ 4 model configs |
-| 10 | Thêm validation | `train.py` | Validate sau mỗi epoch, early stopping |
+| Bước | Việc cần làm | File | Trạng thái |
+|------|-------------|------|------------|
+| 9 | Training loop Model A | `train.py` | 🔧 Gần xong — còn 1 bug nhỏ (xem devlog) |
+| 10 | Thêm validation loop | `train.py` | ⏳ Chưa làm |
 
 ### Phase 4: Evaluation & So sánh
 
-| Bước | Việc cần làm | File | Chi tiết |
-|------|-------------|------|----------|
-| 11 | Code evaluation | `evaluate.py` | Tính BLEU, METEOR, CIDEr, VQA Accuracy, ROUGE-L |
-| 12 | Code inference | `inference.py` | Beam search / greedy decode, sinh answer cho 1 ảnh + câu hỏi |
-| 13 | So sánh 4 model | `compare.py` | Bảng metrics, biểu đồ, attention heatmap |
+| Bước | Việc cần làm | File | Trạng thái |
+|------|-------------|------|------------|
+| 11 | Code evaluation | `evaluate.py` | ⏳ Chưa làm |
+| 12 | Code inference (greedy/beam search) | `inference.py` | ⏳ Chưa làm |
+| 13 | So sánh 4 model | `compare.py` | ⏳ Chưa làm |
 
 ---
 

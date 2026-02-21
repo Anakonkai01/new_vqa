@@ -1,4 +1,4 @@
-**Bài 2 (7đ):**
+# **Bài 2 (7đ):**
 
 Sử dụng model LSTM và model CNN xây dựng kiến trúc cho bài toán Visual Question Answering.
 
@@ -12,4 +12,5 @@ Xây dựng các loại kiến trúc khác nhau dựa trên các đặc điểm:
 
 2) Train từ đầu và có dùng Pretrained model
 
-Đánh giá các mô hình này dựa vào độ đo nào? Hãy so sánh các mô hình xây dựng ở trên thông qua các độ đo này.
+Đánh giá các mô hình này dựa vào độ đo nào? Hãy so sánh các mô hình xây dựng ở trên thông qua các độ đo này. 
+

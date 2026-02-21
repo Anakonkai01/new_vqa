@@ -2,19 +2,29 @@ import os
 import json
 import h5py
 import numpy as np
+from PIL import Image
 
 def create_dummy_data():
     print("⏳ Đang tạo dữ liệu giả (Dummy Data)...")
     
     # Tạo các thư mục nếu chưa có
     os.makedirs("data/raw/vqa_json", exist_ok=True)
+    os.makedirs("data/raw/images/train2014", exist_ok=True)
     os.makedirs("data/processed", exist_ok=True)
 
     NUM_SAMPLES = 100
 
-    # 1. Tạo file H5 giả (100 bức ảnh giả, shape 14x14x2048)
-    # Dùng numpy để sinh ma trận số thực ngẫu nhiên
-    dummy_features = np.random.randn(NUM_SAMPLES, 14, 14, 2048).astype(np.float32)
+    # 0. Tạo ảnh giả (random noise) cho Model A (CNN scratch load raw images)
+    for i in range(NUM_SAMPLES):
+        img_name = f"COCO_train2014_{i:012d}.jpg"
+        img_path = os.path.join("data/raw/images/train2014", img_name)
+        # Tạo ảnh RGB ngẫu nhiên 224x224
+        dummy_img = np.random.randint(0, 255, (224, 224, 3), dtype=np.uint8)
+        Image.fromarray(dummy_img).save(img_path)
+    print(f"✅ Đã tạo {NUM_SAMPLES} ảnh giả: data/raw/images/train2014/")
+
+    # 1. Tạo file H5 giả — shape (N, 2048) sau khi đã mean pool 14x14
+    dummy_features = np.random.randn(NUM_SAMPLES, 2048).astype(np.float32)
     dummy_ids = [f"COCO_train2014_{i:012d}.jpg".encode('utf-8') for i in range(NUM_SAMPLES)]
 
     with h5py.File("data/processed/train_features.h5", "w") as f:
