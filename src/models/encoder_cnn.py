@@ -11,6 +11,7 @@ Docstring for models.encoder_cnn
 
 
 import torch.nn as nn 
+import torchvision.models as models
 
 # helper function 
 # note: W_out = W_in - kernel + 2 * padding
@@ -59,6 +60,35 @@ class SimpleCNN(nn.Module):
 
     
 
+# Resnet101 
+class ResNetEncoder(nn.Module):
+    def __init__(self, output_size=1024, freeze=True):
+        super().__init__()
+        
+        # load resnet101 pretrain, default weight 
+        resnet = models.resnet101(weights=models.ResNet101_Weights("Default"))
+        layers = list(resnet.children())[:-1] # remove the last layers (fc) 
+        self.resnet = nn.Sequential(*layers)
+
+        # freeze resnet 
+        if freeze: 
+            for param in self.resnet.parameters():
+                param.requires_grad = False 
+                
+        # project to hidden size, output resnet (2048) -> ( hidden_size)
+        self.fc = nn.Linear(2048, output_size)
+
+    def forward(self, x):
+        # x (batch, 3, 224, 224)
+        out = self.resnet(x) # (batch, 2048, 1, 1)
+        out = out.flatten(1) # (batch, 2048)
+        out = self.fc(out) # (batch, hidden_size)
+
+        return out # image feature 
+        
+        
+    
+
 
     
 # test 
@@ -68,3 +98,4 @@ if __name__ == "__main__":
     x = torch.randn(4, 3, 224, 224)
     out = model(x)
     print(out.shape) # expect (4, 1024)
+

@@ -21,7 +21,7 @@ import torch.nn.functional as F
 import sys, os 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from models.encoder_cnn import SimpleCNN
+from models.encoder_cnn import SimpleCNN, ResNetEncoder
 from models.encoder_question import QuestionEncoder
 from models.decoder_lstm import LSTMDecoder
 
@@ -94,16 +94,46 @@ class VQAmodelA(nn.Module):
         
         return logits
 
+    
+    
+    
+# Model B: Resnet101 + no attention 
+class VQAModelB(nn.Module):
+    def __init__(self, vocab_size, answer_vocab_size, 
+                 embed_size=512, hidden_size=1024, num_layers=2, freeze=True):
+        super().__init__()
+
+        # init 2 encoder and 1 decoder 
+        
+        self.num_layers = num_layers # store for layers use in before add to decoder 
+        
+        self.i_encoder = ResNetEncoder(output_size=hidden_size, freeze=freeze)
+        self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
+                                         hidden_size=hidden_size, num_layers=num_layers)
+
+        self.decoder = LSTMDecoder(vocab_size=answer_vocab_size, embed_size=embed_size,
+                                   hidden_size=hidden_size, num_layers=num_layers)
+
+    
+    def forward(self, images, questions, target_seq):
+        # encode
+        img_feature = self.i_encoder(images) # (batch, 1024)
+        img_feature = F.normalize(img_feature, p=2, dim=1) # (batch, 1024)
+        
+        question_feature = self.q_encoder(questions) # (batch, 1024)
+
+        fusion = hadamard_fusion(img_feature, question_feature)
+
+        # decode 
+        h_0 = fusion.unsqueeze(0).repeat(self.num_layers, 1, 1)
+        c_0 = torch.zeros_like(h_0)
+
+        logits = self.decoder((h_0, c_0), target_seq) # (batch, max_seq, answer_vocab_size)
+
+        return logits 
 
         
-# TESTING 
-if __name__ == "__main__":
-    model = VQAmodelA(vocab_size=7000, answer_vocab_size=3000)
-
-    images = torch.randn(4, 3, 224, 224)
-    question = torch.randint(0, 7000, (4, 20))
-    target = torch.randint(0, 3000, (4, 10))
-
-    logits = model(images, question, target)
-
-    print(logits.shape) # expect (4, 10, 3000)
+        
+        
+        
+       
