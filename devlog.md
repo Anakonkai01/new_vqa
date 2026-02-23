@@ -1,137 +1,188 @@
 # Dev Log — VQA Project
 
-## Ngữ cảnh cho chat mới
+## Prompt cho chat mới
 
-**Repo:** https://github.com/Anakonkai01/new_vqa  
-**Branch hiện tại:** `experiment/model-a`  
-**Mục tiêu:** Xây dựng 4 kiến trúc VQA (CNN + LSTM-Decoder), xem chi tiết trong [VQA_PROJECT_PLAN.md](VQA_PROJECT_PLAN.md)
+```
+Đọc kỹ devlog.md và VQA_PROJECT_PLAN.md trước khi làm gì.
+Sau khi đọc xong, tóm tắt lại trạng thái hiện tại để tôi xác nhận bạn đã nẵm đúng ngữ cảnh.
+
+Project VQA PyTorch — 4 kiến trúc (A/B/C/D), CNN+LSTM encoder, LSTM decoder.
+TOÀN BỘ CODE ĐÃ HOÀN CHỈNH. Việc còn lại là TRAIN trên Kaggle rồi về evaluate.
+
+Kaggle: GPU tự động detect qua torch.cuda.is_available().
+
+Phong cách: thầy hướng dẫn — giải thích kỹ, để tôi tự code trừ khi tôi nói "hãy thực hiện".
+```
+
+---
+
+## Cập nhật lần cuối: 2026-02-21 — CODE HOÀN CHỈNH, SẴN SÀNG PUSH
 
 ---
 
 ## Môi trường
 
 - **OS:** Linux
-- **Python:** 3.9 (conda env `d2l`)
-- **GPU:** NVIDIA GeForce MX330 — **KHÔNG tương thích PyTorch CUDA mới** (cuda capability 6.1, PyTorch yêu cầu 7.0+)
-- **→ Phải train trên CPU:** `DEVICE = torch.device('cpu')`
-- **Chạy script:** `python src/train.py` (từ thư mục gốc `/home/anakonkai/Work/Projects/vqa_new`)
+- **Python:** 3.9 (conda env `d2l`) — local dùng env này
+- **GPU local:** NVIDIA GeForce MX330 — KHÔNG dùng được CUDA (sm_61, yêu cầu sm_70+)
+- **DEVICE:** `torch.device('cuda' if torch.cuda.is_available() else 'cpu')` — tự detect
+- **Working dir:** `/home/anakonkai/Work/Projects/vqa_new`
+- **Branch:** `experiment/model-a`
+- **Kaggle:** clone repo → train → download checkpoints/ về local → evaluate/visualize
 
 ---
 
-## Cấu trúc thư mục hiện tại
+## Trạng thái code — TẤT CẢ HOÀN CHỈNH ✅
 
 ```
 src/
 ├── models/
-│   ├── encoder_cnn.py          ✅ SimpleCNN — output (batch, 1024)
-│   ├── encoder_questions.py    ✅ QuestionEncoder — output (batch, 1024)
-│   ├── decoder_lstm.py         ✅ LSTMDecoder — teacher forcing mode
-│   └── vqa_models.py           ✅ VQAModelA — wrapper gộp 3 thành phần
-├── scripts/
-│   ├── 1_build_vocab.py        ✅ build vocab_questions.json + vocab_answers.json
-│   └── 2_extract_features.py   ✅ extract ResNet101 features → h5 (chỉ dùng cho Model B, D)
-├── dataset.py                  ✅ VQADatasetA — load raw image, answer dạng sequence
-├── vocab.py                    ✅ Vocabulary class với <pad>=0, <start>=1, <end>=2, <unk>=3
-└── train.py                    🔧 Gần xong — xem bug bên dưới
-
-create_dummy_data.py            ✅ Tạo dummy data để test pipeline (100 samples)
-VQA_PROJECT_PLAN.md             ✅ Full roadmap 4 models
+│   ├── encoder_cnn.py        ✅ SimpleCNN, SimpleCNNSpatial, ResNetEncoder, ResNetSpatialEncoder
+│   ├── encoder_question.py   ✅ QuestionEncoder — LSTM, output (batch, 1024)
+│   ├── decoder_lstm.py       ✅ LSTMDecoder — teacher forcing
+│   ├── decoder_attention.py  ✅ BahdanauAttention + LSTMDecoderWithAttention
+│   └── vqa_models.py         ✅ VQAmodelA, VQAModelB, VQAModelC, VQAModelD
+├── dataset.py                ✅ VQADatasetA + vqa_collate_fn
+├── vocab.py                  ✅ Vocabulary class
+├── train.py                  ✅ MODEL_TYPE config, factory fn, history JSON, auto DEVICE
+├── inference.py              ✅ greedy_decode (A/B) + greedy_decode_with_attention (C/D)
+├── evaluate.py               ✅ --model_type, Exact Match + BLEU-1/2/3/4 + METEOR
+├── compare.py                ✅ so sánh 4 model, bảng kết quả
+├── plot_curves.py            ✅ vẽ training curves từ history JSON
+└── visualize.py              ✅ attention heatmap cho C/D
 ```
 
 ---
 
-## Kiến trúc Model A (đã implement)
+## Kiến trúc 4 Models
 
-```
-Input: ảnh (batch, 3, 224, 224) + câu hỏi (batch, max_q_len)
+| Model | CNN Encoder | Decoder | CNN Output | Test |
+|-------|-------------|---------|------------|------|
+| A | SimpleCNN (scratch) | LSTMDecoder (no attn) | (batch, 1024) | ✅ (2,9,50) |
+| B | ResNetEncoder (pretrained, frozen) | LSTMDecoder (no attn) | (batch, 1024) | logic OK |
+| C | SimpleCNNSpatial (scratch) | LSTMDecoderWithAttention | (batch, 49, 1024) | ✅ (2,9,50) |
+| D | ResNetSpatialEncoder (pretrained, frozen) | LSTMDecoderWithAttention | (batch, 49, 1024) | logic OK |
 
-SimpleCNN:
-  5x conv_block (Conv→BN→ReLU→MaxPool)
-  3→64→128→256→512→1024 channels
-  AdaptiveAvgPool2d(1) → flatten → Linear(1024, hidden=1024)
-  Output: (batch, 1024)
-
-QuestionEncoder:
-  Embedding(vocab_q_size, 512) + LSTM(512→1024, layers=2)
-  Output: hidden[-1] → (batch, 1024)
-
-Fusion: img_feature * q_feature (Hadamard) → (batch, 1024)
-
-LSTMDecoder (Teacher Forcing):
-  h_0 = fusion.unsqueeze(0).repeat(2, 1, 1)  # (2, batch, 1024)
-  c_0 = zeros_like(h_0)
-  Input: answer[:, :-1] = [<start>, w1, w2]
-  Target: answer[:, 1:]  = [w1, w2, <end>]
-  Output: logits (batch, seq_len, vocab_a_size)
-
-Loss: CrossEntropyLoss(ignore_index=0)
-      logits.view(-1, vocab_size) vs decoder_target.contiguous().view(-1)
-
-Optimizer: Adam lr=1e-3
-Gradient clipping: max_norm=5.0
-```
+B và D cần ResNet101 weights (~170MB, cache `~/.cache/torch`) — download lần đầu chạy.
 
 ---
 
-## Bug cần fix ngay khi mở chat mới
+## Chi tiết quan trọng
 
+### train.py
+- `MODEL_TYPE = 'A'` ở config — đổi thành B/C/D để train model khác
+- `DEVICE` tự detect GPU/CPU — không cần sửa khi chạy Kaggle
+- Lưu checkpoint: `checkpoints/model_a_epoch1.pth`, ..., `model_a_epoch10.pth`
+- Lưu history: `checkpoints/history_model_a.json` — cập nhật sau **mỗi epoch**
 
----
+### inference.py
+- A/B: `greedy_decode(model, img_tensor, q_tensor, vocab_a)`
+- C/D: `greedy_decode_with_attention(model, img_tensor, q_tensor, vocab_a)`
+- `get_model(type, q_size, a_size)` — factory function, dùng chung với evaluate/compare
 
-## Việc cần làm tiếp theo (theo thứ tự)
-
-### Ngay lập tức
-1. Fix Bug 1 + Bug 2 trong `train.py`
-2. Chạy `python create_dummy_data.py` để tạo dummy data
-3. Chạy `python src/scripts/1_build_vocab.py` để build vocab (nếu chưa có `data/processed/vocab_*.json`)
-4. Chạy `python src/train.py` → verify pipeline chạy được trên dummy data
-
-### Sau khi train chạy được
-5. Viết `src/evaluate.py` — tính BLEU, VQA Accuracy
-6. Viết `src/inference.py` — greedy decode để sinh answer từ ảnh + câu hỏi
-7. Implement Model B (Pretrained ResNet, No Attention) — thêm class vào `vqa_models.py`
-8. Implement Model C (Scratch CNN + Attention)
-9. Implement Model D (Pretrained + Attention)
-10. Viết `src/compare.py` — so sánh 4 model
-
----
-
-## Dữ liệu
-
-**Dummy data** (để test pipeline):
+### evaluate.py
 ```bash
+python src/evaluate.py --model_type A
+python src/evaluate.py --model_type C --checkpoint checkpoints/model_c_epoch5.pth
+python src/evaluate.py --model_type B --num_samples 100
+```
+Output: Exact Match, BLEU-1/2/3/4, METEOR
+
+### compare.py
+```bash
+python src/compare.py                     # cả 4 model epoch 10
+python src/compare.py --epoch 5
+python src/compare.py --models A,C --num_samples 50
+```
+Model nào thiếu checkpoint → tự động SKIP thay vì crash.
+
+### plot_curves.py
+```bash
+python src/plot_curves.py                 # vẽ cả 4 model
+python src/plot_curves.py --models A,C --output results/curves.png
+```
+Đọc `checkpoints/history_model_*.json` → lưu `checkpoints/training_curves.png`
+
+### visualize.py (chỉ C và D)
+```bash
+python src/visualize.py --model_type C
+python src/visualize.py --model_type D --epoch 5 --sample_idx 3
+```
+Attention heatmap (jet) chồng lên ảnh cho từng token → lưu `checkpoints/attn_model_c.png`
+
+---
+
+## Kỹ thuật quan trọng
+
+- **Class tên:** `VQAmodelA` (chữ m thường) — tên cũ, giữ nguyên không đổi
+- **File:** `encoder_question.py` (không có 's') — tên file thực tế
+- **ResNet weights:** `models.ResNet101_Weights.DEFAULT` — KHÔNG phải string `"Default"`
+- **Vocab:** `<pad>=0, <start>=1, <end>=2, <unk>=3`
+- **Train/val split:** 90/10, `manual_seed=42` — phải nhất quán train.py ↔ evaluate.py
+- **Teacher forcing:** `answer[:, :-1]` input, `answer[:, 1:]` target
+- **Attention input:** lstm `input_size = embed_size + hidden_size` (ghép embed + context)
+- **ignore_index=0:** CrossEntropyLoss không tính loss trên `<pad>`
+- **`[:-1]` vs `[:-2]`:** ResNet `[:-1]` giữ avgpool (1×1), `[:-2]` giữ spatial (7×7)
+- **contiguous().view(-1):** cần sau tensor slice để reshape an toàn
+
+---
+
+## Workflow Kaggle
+
+```bash
+# 1. Clone
+git clone https://github.com/Anakonkai01/new_vqa && cd new_vqa
+
+# 2. Cài dependencies
+pip install torch torchvision nltk matplotlib pillow tqdm
+
+# 3. Build data (hoặc dùng real COCO data)
 python create_dummy_data.py
-# Tạo: data/raw/images/train2014/ (100 ảnh 224x224 random)
-#       data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json
-#       data/raw/vqa_json/v2_mscoco_train2014_annotations.json
-#       data/processed/train_features.h5
+python src/scripts/1_build_vocab.py
+
+# 4. Train — đổi MODEL_TYPE trong train.py rồi chạy
+# MODEL_TYPE = 'A'
+python src/train.py
+# MODEL_TYPE = 'B'
+python src/train.py
+# MODEL_TYPE = 'C'
+python src/train.py
+# MODEL_TYPE = 'D'
+python src/train.py
+
+# 5. Download toàn bộ thư mục checkpoints/ về local
+
+# 6. Evaluate và visualize (local)
+python src/compare.py
+python src/plot_curves.py
+python src/visualize.py --model_type C
+python src/visualize.py --model_type D
 ```
 
-**Real data** (cần download, ~13GB):
+---
+
+## Dữ liệu thực
+
 ```bash
+# Download COCO train2014 (~13GB)
 wget http://images.cocodataset.org/zips/train2014.zip
 unzip train2014.zip -d data/raw/images/
+
+# Build vocab và features
+python src/scripts/1_build_vocab.py
 ```
 
 ---
 
-## Những điều đã học (để giải thích lại nếu cần)
+## Những điều đã học
 
-- **padding=1 + kernel=3:** Giữ nguyên spatial size sau Conv
-- **AdaptiveAvgPool2d(1):** Squeeze spatial 7×7 → 1×1 để flatten thành vector
-- **Teacher Forcing:** Dùng ground truth token làm input bước tiếp thay vì predict của bước trước
-- **`target[:, :-1]` vs `target[:, 1:]`:** Shift 1 bước — input và label offset nhau 1 token
-- **`contiguous().view(-1)`:** Cần thiết sau slice để reshape an toàn
-- **`c_0 = zeros`:** Cell state khởi tạo trắng, chỉ h_0 mang context ảnh + câu hỏi
-- **2 vocab riêng (vocab_q, vocab_a):** vocab_a nhỏ hơn, chỉ chứa từ trong answers, decoder hiệu quả hơn
-- **`ignore_index=0`:** Không tính loss trên `<pad>` token
-- **gradient clipping `max_norm=5.0`:** LSTM hay bị exploding gradient
-
----
-
-## Ghi chú kỹ thuật
-
-- File `encoder_questions.py` (có chữ 's') — đặt tên hơi khác convention nhưng vẫn chạy được
-- `VQAModelA` trong `vqa_models.py` — tên class có chữ 'A' để phân biệt với Model B, C, D sau này
-- Vocab đã có `<start>=1`, `<end>=2` → `numericalize()` tự thêm vào cả question lẫn answer
-- CNN scratch chỉ có 2GB VRAM trên MX330 → **bắt buộc dùng CPU**
+- Teacher Forcing: `answer[:, :-1]` input, `answer[:, 1:]` target — shift 1 bước
+- `random_split` với `manual_seed(42)` — train.py và evaluate.py PHẢI dùng cùng seed
+- `model.eval()` + `torch.no_grad()` — bắt buộc cho validation/inference
+- Bahdanau Attention: query=hidden_state, key=value=image_regions → context=weighted sum
+- `[:-1]` vs `[:-2]` ResNet: giữ avgpool (1×1) vs giữ spatial feature map (7×7)
+- `Conv2d(kernel=1)` = Linear áp độc lập lên từng vùng spatial
+- `squeeze(1)` không phải `squeeze()` — tránh squeeze nhầm batch dim
+- `contiguous().view(-1)` — cần sau tensor slice để reshape an toàn
+- `matplotlib.use('Agg')` — headless server/Kaggle không cần display
+- History JSON ghi sau mỗi epoch — data không mất nếu training bị ngắt

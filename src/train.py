@@ -3,13 +3,14 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, random_split
 import os
-import sys 
+import sys
+import json
 import tqdm
 sys.path.append(os.path.dirname(__file__))
 
 # Import modules
 from dataset import VQADatasetA, vqa_collate_fn
-from models.vqa_models import VQAmodelA
+from models.vqa_models import VQAmodelA, VQAModelB, VQAModelC, VQAModelD
 from vocab import Vocabulary
 
 
@@ -31,13 +32,29 @@ loss = criterion(logits, targets)
 
 
 
-# Configurations Hyperparameters 
+# Configurations Hyperparameters
+
+MODEL_TYPE = 'A'   # đổi thành 'B', 'C', 'D' để train model khác
 
 BATCH_SIZE = 32
-EPOCHS = 10 
-LEARNING_RATE = 1e-3 
-# DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-DEVICE = torch.device('cpu')
+EPOCHS = 10
+LEARNING_RATE = 1e-3
+# Tự động dùng GPU nếu có (Kaggle), fallback về CPU (local MX330 không tương thích)
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+
+def get_model(model_type, vocab_q_size, vocab_a_size):
+    """Factory function: trả về model tương ứng với MODEL_TYPE."""
+    if model_type == 'A':
+        return VQAmodelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+    elif model_type == 'B':
+        return VQAModelB(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+    elif model_type == 'C':
+        return VQAModelC(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+    elif model_type == 'D':
+        return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D.")
 
 
 IMAGE_DIR        = "data/raw/images/train2014"
@@ -99,10 +116,8 @@ def train():
     # init model, optimize function, loss function 
     
     # MODEL
-    model = VQAmodelA(
-        vocab_size=len(vocab_q),
-        answer_vocab_size=len(vocab_a)
-    ).to(DEVICE)
+    model = get_model(MODEL_TYPE, len(vocab_q), len(vocab_a)).to(DEVICE)
+    print(f"Model type: {MODEL_TYPE}")
 
     # ignore idx = 0, do not compute loss on <PAD> token
     # LOSS  (CrossEntropy loss )
@@ -111,8 +126,12 @@ def train():
     # OPTIMIZER (Adam)
     optimizer = optim.Adam(params=model.parameters(), lr=LEARNING_RATE)
 
-    # training loop 
-    print("Training on",DEVICE)
+    # history dict — lưu loss từng epoch để plot sau
+    history = {'train_loss': [], 'val_loss': []}
+    history_path = f"checkpoints/history_model_{MODEL_TYPE.lower()}.json"
+
+    # training loop
+    print("Training on", DEVICE)
     for epoch in tqdm.tqdm(range(EPOCHS)):
         # switch model to train mode 
         model.train() 
@@ -183,8 +202,16 @@ def train():
 
         avg_val_loss = val_loss / len(val_loader)
         print(f"Epoch {epoch+1} | Train Loss: {avg_train_loss:.4f} | Val Loss: {avg_val_loss:.4f}")
-        # save model 
-        torch.save(model.state_dict(), f"checkpoints/model_a_epoch{epoch+1}.pth")
+
+        # lưu history và cập nhật JSON sau mỗi epoch
+        # → nếu training bị dừng giữa chừng trên Kaggle, data không bị mất
+        history['train_loss'].append(avg_train_loss)
+        history['val_loss'].append(avg_val_loss)
+        with open(history_path, 'w') as f:
+            json.dump(history, f, indent=2)
+
+        # save checkpoint
+        torch.save(model.state_dict(), f"checkpoints/model_{MODEL_TYPE.lower()}_epoch{epoch+1}.pth")
             
 
         

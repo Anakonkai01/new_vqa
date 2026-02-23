@@ -10,8 +10,21 @@ import os, sys, json
 sys.path.append(os.path.dirname(__file__))
 
 
-from models.vqa_models import VQAmodelA, hadamard_fusion
+from models.vqa_models import VQAmodelA, VQAModelB, VQAModelC, VQAModelD, hadamard_fusion
 from vocab import Vocabulary
+
+
+def get_model(model_type, vocab_q_size, vocab_a_size):
+    if model_type == 'A':
+        return VQAmodelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+    elif model_type == 'B':
+        return VQAModelB(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+    elif model_type == 'C':
+        return VQAModelC(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+    elif model_type == 'D':
+        return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D.")
 
 
 def greedy_decode(model, image_tensor, question_tensor, vocab_a,
@@ -67,17 +80,66 @@ def greedy_decode(model, image_tensor, question_tensor, vocab_a,
         words = [vocab_a.idx2word.get(i, '<unk>') for i in result]
 
         return ' '.join(words)
-        
+
+
+def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
+                                 max_len=20, device='cpu'):
+    """
+    Dùng cho Model C và D (có Bahdanau attention).
+    image_tensor : (3, 224, 224)
+    question_tensor: (max_q_len)
+    return: string answer
+    """
+    with torch.no_grad():
+        img      = image_tensor.unsqueeze(0).to(device)       # (1, 3, 224, 224)
+        question = question_tensor.unsqueeze(0).to(device)    # (1, max_q_len)
+
+        # encode
+        img_features  = model.i_encoder(img)                  # (1, 49, 1024) — giữ spatial
+        img_features  = F.normalize(img_features, p=2, dim=-1)
+        question_feat = model.q_encoder(question)             # (1, 1024)
+
+        # tạo vector đại diện cho ảnh bằng mean của các vùng spatial
+        img_mean = img_features.mean(dim=1)                   # (1, 1024)
+
+        fusion = hadamard_fusion(img_mean, question_feat)     # (1, 1024)
+
+        # chuẩn bị hidden state ban đầu
+        h_0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (num_layers, 1, 1024)
+        c_0 = torch.zeros_like(h_0)
+        hidden = (h_0, c_0)
+
+        start_idx = vocab_a.word2idx['<start>']
+        end_idx   = vocab_a.word2idx['<end>']
+
+        token  = torch.tensor([[start_idx]], dtype=torch.long).to(device)  # (1, 1)
+        result = []
+
+        for _ in range(max_len):
+            # decode_step trả về (logit, hidden_mới, alpha)
+            # img_features truyền vào mỗi bước để attention tính context
+            logit, hidden, alpha = model.decoder.decode_step(token, hidden, img_features)
+            pred = logit.argmax(dim=-1).item()
+
+            if pred == end_idx:
+                break
+
+            result.append(pred)
+            token = torch.tensor([[pred]], dtype=torch.long).to(device)
+
+        words = [vocab_a.idx2word.get(i, '<unk>') for i in result]
+        return ' '.join(words)
 
 
 if __name__ == "__main__":
     from PIL import Image
     from torchvision import transforms
 
+    MODEL_TYPE    = 'A'   # đổi thành 'B', 'C', 'D' để chạy model khác
     DEVICE        = 'cpu'
     VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
     VOCAB_A_PATH  = "data/processed/vocab_answers.json"
-    CHECKPOINT    = "checkpoints/model_a_epoch10.pth"
+    CHECKPOINT    = f"checkpoints/model_{MODEL_TYPE.lower()}_epoch10.pth"
     IMAGE_DIR     = "data/raw/images/train2014"
     QUESTION_JSON = "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
 
@@ -86,7 +148,7 @@ if __name__ == "__main__":
     vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
 
     # Load model
-    model = VQAmodelA(vocab_size=len(vocab_q), answer_vocab_size=len(vocab_a))
+    model = get_model(MODEL_TYPE, len(vocab_q), len(vocab_a))
     model.load_state_dict(torch.load(CHECKPOINT, map_location=DEVICE))
 
     # Load 1 sample
@@ -108,6 +170,12 @@ if __name__ == "__main__":
     img_tensor = transform(Image.open(img_path).convert("RGB"))
     q_tensor   = torch.tensor(vocab_q.numericalize(q_text), dtype=torch.long)
 
-    answer = greedy_decode(model, img_tensor, q_tensor, vocab_a, device=DEVICE)
+    # chọn đúng decode function theo model type
+    if MODEL_TYPE in ('A', 'B'):
+        answer = greedy_decode(model, img_tensor, q_tensor, vocab_a, device=DEVICE)
+    else:
+        answer = greedy_decode_with_attention(model, img_tensor, q_tensor, vocab_a, device=DEVICE)
+
+    print(f"Model    : {MODEL_TYPE}")
     print(f"Question : {q_text}")
     print(f"Predicted: {answer}")
