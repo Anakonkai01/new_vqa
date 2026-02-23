@@ -9,7 +9,6 @@ Sau khi đọc xong, tóm tắt lại trạng thái hiện tại để tôi xác
 Project VQA PyTorch — 4 kiến trúc (A/B/C/D), CNN+LSTM encoder, LSTM decoder.
 TOÀN BỘ CODE ĐÃ HOÀN CHỈNH. Việc còn lại là TRAIN trên Kaggle rồi về evaluate.
 
-Môi trường local: /home/anakonkai/miniconda3/envs/d2l/bin/python (3.9), CPU only (MX330 không tương thích CUDA).
 Kaggle: GPU tự động detect qua torch.cuda.is_available().
 
 Phong cách: thầy hướng dẫn — giải thích kỹ, để tôi tự code trừ khi tôi nói "hãy thực hiện".
