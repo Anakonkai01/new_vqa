@@ -107,14 +107,18 @@ def main():
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
     vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
 
-    # recreate val split — cùng seed với train.py
-    dataset    = VQADatasetA(IMAGE_DIR, QUESTION_JSON, ANNOTATION_JSON, vocab_q, vocab_a)
-    val_size   = int(VAL_RATIO * len(dataset))
-    train_size = len(dataset) - val_size
-    generator  = torch.Generator().manual_seed(SPLIT_SEED)
-    _, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
+    # Dùng val set chính thức VQA 2.0 (val2014)
+    val_dataset = VQADatasetA(
+        image_dir=VAL_IMAGE_DIR,
+        question_json_path=VAL_QUESTION_JSON,
+        annotations_json_path=VAL_ANNOTATION_JSON,
+        vocab_q=vocab_q,
+        vocab_a=vocab_a,
+        split='val2014',
+        max_samples=args.num_samples
+    )
 
-    n = args.num_samples or len(val_dataset)
+    n = len(val_dataset)
     print(f"Comparing models: {model_types} | epoch={args.epoch} | samples={n}")
 
     results = {}

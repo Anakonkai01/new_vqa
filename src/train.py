@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader
 import os
 import sys
 import json
@@ -57,11 +57,22 @@ def get_model(model_type, vocab_q_size, vocab_a_size):
         raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D.")
 
 
-IMAGE_DIR        = "data/raw/images/train2014"
-QUESTION_JSON    = "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
-ANNOTATION_JSON  = "data/raw/vqa_json/v2_mscoco_train2014_annotations.json"
-VOCAB_Q_PATH     = "data/processed/vocab_questions.json"
-VOCAB_A_PATH     = "data/processed/vocab_answers.json"
+# ── Training set (train2014) ─────────────────────────────────────
+TRAIN_IMAGE_DIR    = "data/raw/images/train2014"
+TRAIN_QUESTION_JSON= "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
+TRAIN_ANNOTATION_JSON = "data/raw/vqa_json/v2_mscoco_train2014_annotations.json"
+
+# ── Validation set chính thức VQA 2.0 (val2014) ──────────────────
+VAL_IMAGE_DIR      = "data/raw/images/val2014"
+VAL_QUESTION_JSON  = "data/raw/vqa_json/v2_OpenEnded_mscoco_val2014_questions.json"
+VAL_ANNOTATION_JSON= "data/raw/vqa_json/v2_mscoco_val2014_annotations.json"
+
+VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
+VOCAB_A_PATH  = "data/processed/vocab_answers.json"
+
+# Giới hạn số sample (None = dùng toàn bộ). Đổi thành số (ví dụ 10000) để test nhanh.
+MAX_TRAIN_SAMPLES = None
+MAX_VAL_SAMPLES   = None
 
 
 def train():
@@ -75,22 +86,28 @@ def train():
     vocab_a = Vocabulary()
     vocab_a.load(VOCAB_A_PATH)
 
-    # Dataset and Dataloader
-    dataset = VQADatasetA(
-        image_dir=IMAGE_DIR, 
-        question_json_path=QUESTION_JSON,
-        annotations_json_path=ANNOTATION_JSON,
+    # ── Dataset chính thức VQA 2.0 — train và val tách biệt ────────────
+    train_dataset = VQADatasetA(
+        image_dir=TRAIN_IMAGE_DIR,
+        question_json_path=TRAIN_QUESTION_JSON,
+        annotations_json_path=TRAIN_ANNOTATION_JSON,
         vocab_q=vocab_q,
-        vocab_a=vocab_a    
+        vocab_a=vocab_a,
+        split='train2014',
+        max_samples=MAX_TRAIN_SAMPLES
     )
-    
-    # split data, 90% train, 10% val, manual seed 
-    val_size = int(0.1 * len(dataset))
-    train_size = len(dataset) - val_size
-    generator = torch.Generator().manual_seed(42)
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
-    
-    print(f"Train: {train_size}, val: {val_size}")
+
+    val_dataset = VQADatasetA(
+        image_dir=VAL_IMAGE_DIR,
+        question_json_path=VAL_QUESTION_JSON,
+        annotations_json_path=VAL_ANNOTATION_JSON,
+        vocab_q=vocab_q,
+        vocab_a=vocab_a,
+        split='val2014',
+        max_samples=MAX_VAL_SAMPLES
+    )
+
+    print(f"Train: {len(train_dataset)} | Val: {len(val_dataset)}")
 
     pin_memory = True if torch.cuda.is_available() else False
     

@@ -41,11 +41,16 @@ def vqa_collate_fn(batch):
 
 class VQADatasetA(Dataset):
     def __init__(self, image_dir, question_json_path,
-                 annotations_json_path, vocab_q, vocab_a):
-        
+                 annotations_json_path, vocab_q, vocab_a,
+                 split='train2014', max_samples=None):
+        """
+        split      : 'train2014' hoặc 'val2014' — dùng để tạo đúng tên file ảnh
+        max_samples: giới hạn số sample (tiện khi test nhanh trên Kaggle)
+        """
         self.image_dir = image_dir
-        self.vocab_q = vocab_q
-        self.vocab_a = vocab_a
+        self.vocab_q   = vocab_q
+        self.vocab_a   = vocab_a
+        self.split     = split        # 'train2014' | 'val2014'
 
         # transform: resize to 224, normalize according imagenet 
         self.transform = transforms.Compose([
@@ -57,14 +62,18 @@ class VQADatasetA(Dataset):
             )
         ])
 
-        # read question into ram 
+        # load questions
         with open(question_json_path, 'r') as f:
             self.questions = json.load(f)['questions']
 
-        # build dict: question_id -> answer_text 
-        with open(annotations_json_path, 'r') as f: 
+        # giới hạn số sample nếu có (hữu ích khi test pipeline nhanh)
+        if max_samples is not None:
+            self.questions = self.questions[:max_samples]
+
+        # build dict: question_id -> answer_text
+        with open(annotations_json_path, 'r') as f:
             annotations = json.load(f)['annotations']
-            
+
         self.qid2ans = {ann['question_id']: ann['multiple_choice_answer'] for ann in annotations}
         
     
@@ -86,8 +95,9 @@ class VQADatasetA(Dataset):
         a_indices = self.vocab_a.numericalize(a_text)
         a_tensor = torch.tensor(a_indices, dtype=torch.long)
 
-        # 3. process image 
-        img_name = f"COCO_train2014_{img_id:012d}.jpg" # format spcifier (0 mean padding using 0, 12 is len of character, d is integer)
+        # 3. process image
+        # tên file phụ thuộc split: COCO_train2014_... hoặc COCO_val2014_...
+        img_name = f"COCO_{self.split}_{img_id:012d}.jpg"
         img_path = os.path.join(self.image_dir, img_name)
         image = Image.open(img_path).convert("RGB")
         img_tensor = self.transform(image)

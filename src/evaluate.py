@@ -1,5 +1,4 @@
 import torch
-from torch.utils.data import random_split
 import os, sys, argparse, tqdm
 import nltk
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
@@ -15,17 +14,13 @@ from models.vqa_models import VQAmodelA, VQAModelB, VQAModelC, VQAModelD
 from vocab import Vocabulary
 from inference import greedy_decode, greedy_decode_with_attention, get_model
 
-# ── Config (giống train.py) ──────────────────────────
-DEVICE          = 'cpu'
-MODEL_TYPE      = 'A'   # default, bị ghi đè bởi --model_type arg
-CHECKPOINT      = f"checkpoints/model_{MODEL_TYPE.lower()}_epoch10.pth"
-IMAGE_DIR       = "data/raw/images/train2014"
-QUESTION_JSON   = "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
-ANNOTATION_JSON = "data/raw/vqa_json/v2_mscoco_train2014_annotations.json"
-VOCAB_Q_PATH    = "data/processed/vocab_questions.json"
-VOCAB_A_PATH    = "data/processed/vocab_answers.json"
-SPLIT_SEED      = 42   # must be the same with train.py
-VAL_RATIO       = 0.1  # must be the same with train.py
+# ── Config ────────────────────────────────────────────────
+DEVICE             = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+VAL_IMAGE_DIR      = "data/raw/images/val2014"
+VAL_QUESTION_JSON  = "data/raw/vqa_json/v2_OpenEnded_mscoco_val2014_questions.json"
+VAL_ANNOTATION_JSON= "data/raw/vqa_json/v2_mscoco_val2014_annotations.json"
+VOCAB_Q_PATH       = "data/processed/vocab_questions.json"
+VOCAB_A_PATH       = "data/processed/vocab_answers.json"
 
 def decode_tensor(a_tensor, vocab_a):
     special = {
@@ -36,7 +31,7 @@ def decode_tensor(a_tensor, vocab_a):
     words = [vocab_a.idx2word[int(i)] for i in a_tensor if int(i) not in special]
     return ' '.join(words)
 
-def evaluate(model_type=MODEL_TYPE, checkpoint=None, num_samples=None):
+def evaluate(model_type='A', checkpoint=None, num_samples=None):
     # checkpoint tự động theo model_type nếu không chỉ định
     if checkpoint is None:
         checkpoint = f"checkpoints/model_{model_type.lower()}_epoch10.pth"
@@ -44,12 +39,16 @@ def evaluate(model_type=MODEL_TYPE, checkpoint=None, num_samples=None):
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
     vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
 
-    # Recreate val split — PHẢI cùng seed với train.py
-    dataset    = VQADatasetA(IMAGE_DIR, QUESTION_JSON, ANNOTATION_JSON, vocab_q, vocab_a)
-    val_size   = int(VAL_RATIO * len(dataset))
-    train_size = len(dataset) - val_size
-    generator  = torch.Generator().manual_seed(SPLIT_SEED)
-    _, val_dataset = random_split(dataset, [train_size, val_size], generator=generator)
+    # Dùng val set chính thức VQA 2.0 (val2014)
+    val_dataset = VQADatasetA(
+        image_dir=VAL_IMAGE_DIR,
+        question_json_path=VAL_QUESTION_JSON,
+        annotations_json_path=VAL_ANNOTATION_JSON,
+        vocab_q=vocab_q,
+        vocab_a=vocab_a,
+        split='val2014',
+        max_samples=num_samples   # giới hạn ở đây — tiết kiệm RAM khi load
+    )
 
     model = get_model(model_type, len(vocab_q), len(vocab_a))
     model.load_state_dict(torch.load(checkpoint, map_location=DEVICE))
@@ -66,7 +65,7 @@ def evaluate(model_type=MODEL_TYPE, checkpoint=None, num_samples=None):
     bleu3_total   = 0.0
     bleu4_total   = 0.0
     meteor_total  = 0.0
-    n             = num_samples or len(val_dataset)
+    n             = len(val_dataset)   # đã giới hạn bằng max_samples khi khởi tạo dataset
 
     print(f"Evaluating Model {model_type} | checkpoint: {checkpoint}")
     for i in tqdm.tqdm(range(n)):
