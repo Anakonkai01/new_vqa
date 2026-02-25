@@ -10,13 +10,13 @@ import os, sys, json
 sys.path.append(os.path.dirname(__file__))
 
 
-from models.vqa_models import VQAmodelA, VQAModelB, VQAModelC, VQAModelD, hadamard_fusion
+from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, hadamard_fusion
 from vocab import Vocabulary
 
 
 def get_model(model_type, vocab_q_size, vocab_a_size):
     if model_type == 'A':
-        return VQAmodelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
     elif model_type == 'B':
         return VQAModelB(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
     elif model_type == 'C':
@@ -85,7 +85,7 @@ def greedy_decode(model, image_tensor, question_tensor, vocab_a,
 def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
                                  max_len=20, device='cpu'):
     """
-    Dùng cho Model C và D (có Bahdanau attention).
+    For Model C and D (with Bahdanau attention).
     image_tensor : (3, 224, 224)
     question_tensor: (max_q_len)
     return: string answer
@@ -95,16 +95,16 @@ def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
         question = question_tensor.unsqueeze(0).to(device)    # (1, max_q_len)
 
         # encode
-        img_features  = model.i_encoder(img)                  # (1, 49, 1024) — giữ spatial
+        img_features  = model.i_encoder(img)                  # (1, 49, 1024) -- keeps spatial
         img_features  = F.normalize(img_features, p=2, dim=-1)
         question_feat = model.q_encoder(question)             # (1, 1024)
 
-        # tạo vector đại diện cho ảnh bằng mean của các vùng spatial
+        # build image representation as mean of spatial regions
         img_mean = img_features.mean(dim=1)                   # (1, 1024)
 
         fusion = hadamard_fusion(img_mean, question_feat)     # (1, 1024)
 
-        # chuẩn bị hidden state ban đầu
+        # initialize decoder hidden state
         h_0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (num_layers, 1, 1024)
         c_0 = torch.zeros_like(h_0)
         hidden = (h_0, c_0)
@@ -116,8 +116,8 @@ def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
         result = []
 
         for _ in range(max_len):
-            # decode_step trả về (logit, hidden_mới, alpha)
-            # img_features truyền vào mỗi bước để attention tính context
+            # decode_step returns (logit, new_hidden, alpha)
+            # img_features passed at each step so attention can compute context
             logit, hidden, alpha = model.decoder.decode_step(token, hidden, img_features)
             pred = logit.argmax(dim=-1).item()
 
@@ -129,6 +129,109 @@ def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
 
         words = [vocab_a.idx2word.get(i, '<unk>') for i in result]
         return ' '.join(words)
+
+
+def batch_greedy_decode(model, img_tensors, q_tensors, vocab_a,
+                        max_len=20, device='cpu'):
+    """
+    Batch greedy decode for models A/B (no attention).
+
+    img_tensors : (B, 3, 224, 224)
+    q_tensors   : (B, max_q_len)
+    returns     : list of B answer strings
+    """
+    with torch.no_grad():
+        B    = img_tensors.size(0)
+        imgs = img_tensors.to(device)
+        qs   = q_tensors.to(device)
+
+        img_feat = model.i_encoder(imgs)               # (B, hidden)
+        img_feat = F.normalize(img_feat, p=2, dim=1)
+        q_feat   = model.q_encoder(qs)                 # (B, hidden)
+        fusion   = hadamard_fusion(img_feat, q_feat)
+
+        h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (layers, B, hidden)
+        c = torch.zeros_like(h)
+        hidden = (h, c)
+
+        start_idx = vocab_a.word2idx['<start>']
+        end_idx   = vocab_a.word2idx['<end>']
+
+        token    = torch.full((B, 1), start_idx, dtype=torch.long, device=device)
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
+        results  = [[] for _ in range(B)]
+
+        for _ in range(max_len):
+            embed  = model.decoder.embedding(token)             # (B, 1, embed)
+            output, hidden = model.decoder.lstm(embed, hidden)  # (B, 1, hidden)
+            logit  = model.decoder.fc(output.squeeze(1))        # (B, vocab)
+            preds  = logit.argmax(dim=-1)                       # (B,)
+
+            for i in range(B):
+                if not finished[i]:
+                    p = preds[i].item()
+                    if p == end_idx:
+                        finished[i] = True
+                    else:
+                        results[i].append(p)
+
+            if finished.all():
+                break
+
+            token = preds.unsqueeze(1)  # (B, 1)
+
+        return [' '.join(vocab_a.idx2word.get(i, '<unk>') for i in r) for r in results]
+
+
+def batch_greedy_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
+                                       max_len=20, device='cpu'):
+    """
+    Batch greedy decode for models C/D (Bahdanau attention).
+
+    img_tensors : (B, 3, 224, 224)
+    q_tensors   : (B, max_q_len)
+    returns     : list of B answer strings
+    """
+    with torch.no_grad():
+        B    = img_tensors.size(0)
+        imgs = img_tensors.to(device)
+        qs   = q_tensors.to(device)
+
+        img_features = model.i_encoder(imgs)                    # (B, 49, hidden)
+        img_features = F.normalize(img_features, p=2, dim=-1)
+        q_feat       = model.q_encoder(qs)                      # (B, hidden)
+        img_mean     = img_features.mean(dim=1)                 # (B, hidden)
+        fusion       = hadamard_fusion(img_mean, q_feat)
+
+        h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)
+        c = torch.zeros_like(h)
+        hidden = (h, c)
+
+        start_idx = vocab_a.word2idx['<start>']
+        end_idx   = vocab_a.word2idx['<end>']
+
+        token    = torch.full((B, 1), start_idx, dtype=torch.long, device=device)
+        finished = torch.zeros(B, dtype=torch.bool, device=device)
+        results  = [[] for _ in range(B)]
+
+        for _ in range(max_len):
+            logit, hidden, _ = model.decoder.decode_step(token, hidden, img_features)
+            preds = logit.argmax(dim=-1)  # (B,)
+
+            for i in range(B):
+                if not finished[i]:
+                    p = preds[i].item()
+                    if p == end_idx:
+                        finished[i] = True
+                    else:
+                        results[i].append(p)
+
+            if finished.all():
+                break
+
+            token = preds.unsqueeze(1)  # (B, 1)
+
+        return [' '.join(vocab_a.idx2word.get(i, '<unk>') for i in r) for r in results]
 
 
 if __name__ == "__main__":
@@ -171,7 +274,7 @@ if __name__ == "__main__":
     img_tensor = transform(Image.open(img_path).convert("RGB"))
     q_tensor   = torch.tensor(vocab_q.numericalize(q_text), dtype=torch.long)
 
-    # chọn đúng decode function theo model type
+    # select decode function based on model type
     if MODEL_TYPE in ('A', 'B'):
         answer = greedy_decode(model, img_tensor, q_tensor, vocab_a, device=DEVICE)
     else:

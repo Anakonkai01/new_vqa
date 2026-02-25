@@ -1,29 +1,29 @@
 """
-LSTMDecoder với Bahdanau (Additive) Attention — dùng cho Model C và D
+LSTM Decoder with Bahdanau (Additive) Attention — used for Model C and D
 
 ──────────────────────────────────────────────────────
-VẤN ĐỀ CỦA MODEL A/B (No Attention):
-  - CNN nén toàn bộ ảnh thành 1 vector (batch, 1024)
-  - Vector đó chỉ dùng để khởi tạo h_0 — decoder không nhìn lại ảnh nữa
-  - Khi sinh token thứ 5, decoder không biết cần nhìn vào vùng nào của ảnh
+PROBLEM WITH MODEL A/B (No Attention):
+  - CNN compresses the entire image into 1 vector (batch, 1024)
+  - That vector is only used to initialize h_0 — the decoder never looks at the image again
+  - When generating token 5, the decoder has no way to know which image region to focus on
 
-GIẢI PHÁP — ATTENTION:
-  - CNN giữ spatial: (batch, 49, 1024) — 49 vùng ảnh 7×7
-  - Mỗi bước decode, tính "vùng nào quan trọng" dựa trên hidden state hiện tại
-  - Tạo context vector = weighted sum của 49 vùng
-  - Ghép context vào input của LSTM bước đó
+SOLUTION — ATTENTION:
+  - CNN keeps spatial info: (batch, 49, 1024) — 49 image regions from a 7x7 grid
+  - At each decode step, compute "which regions matter" based on the current hidden state
+  - Build a context vector = weighted sum of the 49 regions
+  - Concatenate context with the token embedding as LSTM input
 
 ──────────────────────────────────────────────────────
-BAHDANAU ATTENTION (1 bước decode):
+BAHDANAU ATTENTION (one decode step):
 
   1. energy = tanh( W_h(hidden) + W_img(image_regions) )
              shape: (batch, 49, attn_dim)
 
-  2. alpha  = softmax( v(energy) )     ← attention weights, tổng = 1
+  2. alpha  = softmax( v(energy) )     <- attention weights, sum = 1
               shape: (batch, 49)
 
   3. context = sum(alpha * image_regions, dim=1)
-               shape: (batch, hidden_size)   ← weighted sum các vùng ảnh
+               shape: (batch, hidden_size)   <- weighted sum of image regions
 
   4. lstm input = concat(embed, context)
                   shape: (batch, 1, embed_size + hidden_size)
@@ -33,11 +33,11 @@ BAHDANAU ATTENTION (1 bước decode):
   6. logit = fc(output)
 
 ──────────────────────────────────────────────────────
-TRONG VQA:
-  - Query  = decoder hidden state (cái decoder đang "nghĩ" đến)
-  - Key    = image regions (49 vùng ảnh)
-  - Value  = image regions (Key = Value trong Bahdanau)
-  - Output = context vector (tổng hợp info từ vùng ảnh liên quan)
+IN VQA TERMS:
+  - Query  = decoder hidden state (what the decoder is currently "thinking about")
+  - Key    = image regions (49 spatial regions)
+  - Value  = image regions (Key == Value in Bahdanau)
+  - Output = context vector (aggregated info from the relevant image regions)
 """
 
 import torch
@@ -47,9 +47,9 @@ import torch.nn.functional as F
 
 class BahdanauAttention(nn.Module):
     """
-    Tính attention weights và context vector cho 1 bước decode.
+    Computes attention weights and context vector for one decode step.
 
-    Công thức:
+    Formula:
         energy = tanh(W_h(hidden) + W_img(img_features))  # (batch, 49, attn_dim)
         alpha  = softmax(v(energy))                        # (batch, 49)
         context = (alpha.unsqueeze(2) * img_features).sum(1)  # (batch, hidden_size)
@@ -58,46 +58,45 @@ class BahdanauAttention(nn.Module):
     def __init__(self, hidden_size, attn_dim=512):
         super().__init__()
 
-        # W_h: project decoder hidden → attn_dim
-        # hidden_size: chiều của decoder hidden state (num_layers, batch, hidden)
-        # Chỉ lấy layer cuối → (batch, hidden_size)
+        # W_h: project decoder hidden -> attn_dim
+        # We take only the last layer's hidden state -> (batch, hidden_size)
         self.W_h = nn.Linear(hidden_size, attn_dim)
 
-        # W_img: project mỗi vùng ảnh → attn_dim
+        # W_img: project each image region -> attn_dim
         self.W_img = nn.Linear(hidden_size, attn_dim)
 
-        # v: project attn_dim → scalar score cho mỗi vùng
+        # v: project attn_dim -> scalar score per region
         self.v = nn.Linear(attn_dim, 1, bias=False)
 
     def forward(self, hidden, img_features):
         """
-        hidden      : (batch, hidden_size) — hidden state layer cuối của decoder
-        img_features: (batch, 49, hidden_size) — spatial features từ CNN
+        hidden      : (batch, hidden_size) -- last-layer hidden state of the decoder
+        img_features: (batch, 49, hidden_size) -- spatial features from CNN
 
         returns:
           context : (batch, hidden_size)
-          alpha   : (batch, 49) — attention weights để visualize sau này
+          alpha   : (batch, 49) -- attention weights (useful for visualization)
         """
 
-        # Project hidden: (batch, hidden_size) → (batch, attn_dim)
-        # unsqueeze(1) để broadcast với img_features (batch, 49, attn_dim)
+        # Project hidden: (batch, hidden_size) -> (batch, attn_dim)
+        # unsqueeze(1) to broadcast over img_features (batch, 49, attn_dim)
         h_proj = self.W_h(hidden).unsqueeze(1)        # (batch, 1, attn_dim)
 
-        # Project từng vùng ảnh: (batch, 49, hidden_size) → (batch, 49, attn_dim)
+        # Project each image region: (batch, 49, hidden_size) -> (batch, 49, attn_dim)
         img_proj = self.W_img(img_features)            # (batch, 49, attn_dim)
 
-        # Cộng 2 phép chiếu → broadcast: (batch, 1, attn_dim) + (batch, 49, attn_dim)
-        # = (batch, 49, attn_dim)
+        # Sum the two projections via broadcast: (batch, 1, attn_dim) + (batch, 49, attn_dim)
+        # -> (batch, 49, attn_dim)
         energy = torch.tanh(h_proj + img_proj)         # (batch, 49, attn_dim)
 
-        # v cho ra 1 scalar mỗi vùng → squeeze chiều cuối
+        # v produces one scalar per region -> squeeze last dim
         scores = self.v(energy).squeeze(-1)            # (batch, 49)
 
-        # Softmax → attention weights, tổng = 1
+        # Softmax -> attention weights (sum to 1)
         alpha = F.softmax(scores, dim=1)               # (batch, 49)
 
-        # Context = weighted sum: nhân alpha với img_features rồi sum qua 49 vùng
-        # alpha.unsqueeze(2): (batch, 49, 1) — để broadcast với (batch, 49, hidden_size)
+        # Context = weighted sum: multiply alpha with img_features and sum over 49 regions
+        # alpha.unsqueeze(2): (batch, 49, 1) to broadcast with (batch, 49, hidden_size)
         context = (alpha.unsqueeze(2) * img_features).sum(dim=1)  # (batch, hidden_size)
 
         return context, alpha
@@ -105,13 +104,13 @@ class BahdanauAttention(nn.Module):
 
 class LSTMDecoderWithAttention(nn.Module):
     """
-    LSTM Decoder với Bahdanau Attention.
+    LSTM Decoder with Bahdanau Attention.
 
-    Khác LSTMDecoder (no attention) ở chỗ:
-      - LSTM input = concat(embed, context) thay vì chỉ embed
-        → input_size = embed_size + hidden_size
-      - Mỗi bước decode gọi BahdanauAttention để tạo context vector mới
-      - Có thêm method decode_step() cho inference (autoregressive)
+    Differences from LSTMDecoder (no attention):
+      - LSTM input = concat(embed, context) instead of just embed
+        -> input_size = embed_size + hidden_size
+      - At each decode step, BahdanauAttention is called to produce a new context vector
+      - Added decode_step() method for autoregressive inference
     """
 
     def __init__(self, vocab_size, embed_size, hidden_size, num_layers,
@@ -121,16 +120,16 @@ class LSTMDecoderWithAttention(nn.Module):
         self.hidden_size = hidden_size
         self.num_layers  = num_layers
 
-        # Embedding như cũ
+        # Embedding (same as LSTMDecoder)
         self.embedding = nn.Embedding(vocab_size, embed_size, padding_idx=0)
 
         # Attention module
         self.attention = BahdanauAttention(hidden_size, attn_dim)
 
         # LSTM: input_size = embed_size + hidden_size
-        # (ghép embed token với context vector)
+        # (token embedding concatenated with context vector)
         self.lstm = nn.LSTM(
-            input_size=embed_size + hidden_size,  # ← điểm khác so với LSTMDecoder
+            input_size=embed_size + hidden_size,  # <- key difference from LSTMDecoder
             hidden_size=hidden_size,
             num_layers=num_layers,
             batch_first=True,
@@ -142,66 +141,60 @@ class LSTMDecoderWithAttention(nn.Module):
 
     def forward(self, encoder_hidden, img_features, target_seq):
         """
-        Training mode — Teacher Forcing: chạy toàn bộ sequence 1 lần
-        (vẫn cần loop vì attention cần hidden state của từng bước)
+        Training mode — Teacher Forcing: runs the full sequence in one pass
+        (still requires a loop because attention depends on the previous hidden state)
 
-        encoder_hidden: (num_layers, batch, hidden_size) — từ fusion như Model A/B
-        img_features  : (batch, 49, hidden_size) — spatial CNN output
-        target_seq    : (batch, max_len) — [<start>, w1, w2, ...]
+        encoder_hidden: (num_layers, batch, hidden_size) -- from fusion (same as Model A/B)
+        img_features  : (batch, 49, hidden_size) -- spatial CNN output
+        target_seq    : (batch, max_len) -- [<start>, w1, w2, ...]
 
         returns: logits (batch, max_len, vocab_size)
         """
-        batch_size = target_seq.size(0)
-        max_len    = target_seq.size(1)
-
-        # Embed toàn bộ sequence trước
+        # Embed the full sequence upfront
+        max_len = target_seq.size(1)
         embeds = self.dropout(self.embedding(target_seq))  # (batch, max_len, embed_size)
 
-        # Khởi tạo hidden từ encoder (giống Model A/B)
-        hidden = encoder_hidden  # (num_layers, batch, hidden_size) tuple (h, c)
+        # Initialize hidden from encoder (same as Model A/B)
+        hidden = encoder_hidden  # tuple (h, c), each (num_layers, batch, hidden_size)
 
         logits_list = []
 
-        # Loop từng bước — cần thiết vì attention phụ thuộc hidden bước trước
+        # Step-by-step loop required because attention depends on the previous hidden state
         for t in range(max_len):
-            # embed của token tại bước t
             embed_t = embeds[:, t, :]             # (batch, embed_size)
 
-            # Lấy hidden state layer cuối để tính attention
-            # hidden là tuple (h, c), h shape (num_layers, batch, hidden_size)
-            h_top = hidden[0][-1]                 # (batch, hidden_size), take the last layers (num_layers)
+            # Take the last layer's hidden state to compute attention
+            h_top = hidden[0][-1]                 # (batch, hidden_size)
 
-            # Tính context vector từ attention
+            # Compute context vector via attention
             context, _ = self.attention(h_top, img_features)  # (batch, hidden_size)
 
-            # Ghép embed với context
+            # Concatenate token embedding with context vector
             lstm_input = torch.cat([embed_t, context], dim=1)  # (batch, embed+hidden)
             lstm_input = lstm_input.unsqueeze(1)               # (batch, 1, embed+hidden)
 
-            # 1 bước LSTM
-            output, hidden = self.lstm(lstm_input, hidden)
-            # output: (batch, 1, hidden_size)
+            # Single LSTM step
+            output, hidden = self.lstm(lstm_input, hidden)     # output: (batch, 1, hidden_size)
 
-            # Project ra vocab
             logit = self.fc(output.squeeze(1))    # (batch, vocab_size)
             logits_list.append(logit)
 
-        # Stack tất cả bước lại
+        # Stack all steps
         logits = torch.stack(logits_list, dim=1)  # (batch, max_len, vocab_size)
         return logits
 
     def decode_step(self, token, hidden, img_features):
         """
-        Inference mode — 1 bước autoregressive (dùng trong inference.py)
+        Inference mode — one autoregressive step (used in inference.py)
 
-        token       : (batch, 1) — token hiện tại
+        token       : (batch, 1) -- current token
         hidden      : tuple (h, c), h shape (num_layers, batch, hidden_size)
         img_features: (batch, 49, hidden_size)
 
         returns:
           logit  : (batch, vocab_size)
-          hidden : tuple mới sau bước này
-          alpha  : (batch, 49) — attention weights (để visualize nếu cần)
+          hidden : updated tuple after this step
+          alpha  : (batch, 49) -- attention weights (useful for visualization)
         """
         embed  = self.dropout(self.embedding(token))  # (batch, 1, embed_size)
         h_top  = hidden[0][-1]                         # (batch, hidden_size)
@@ -236,14 +229,14 @@ if __name__ == "__main__":
         num_layers=NUM_LAYERS
     )
 
-    # Giả lập encoder_hidden (h, c) từ fusion
+    # Simulate encoder_hidden (h, c) from fusion
     h = torch.zeros(NUM_LAYERS, BATCH, HIDDEN_SIZE)
     c = torch.zeros(NUM_LAYERS, BATCH, HIDDEN_SIZE)
 
-    # Giả lập spatial image features từ CNN
+    # Simulate spatial image features from CNN
     img_features = torch.randn(BATCH, NUM_REGIONS, HIDDEN_SIZE)
 
-    # Giả lập target sequence (teacher forcing)
+    # Simulate target sequence (teacher forcing)
     target = torch.randint(0, VOCAB_SIZE, (BATCH, MAX_LEN))
 
     # Forward
