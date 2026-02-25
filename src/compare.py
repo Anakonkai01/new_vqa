@@ -17,7 +17,7 @@ from vocab import Vocabulary
 from inference import greedy_decode, greedy_decode_with_attention, get_model
 
 # ── Config (must match evaluate.py paths) ─────────────────────
-DEVICE             = 'cpu'
+DEVICE             = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 VAL_IMAGE_DIR      = "data/raw/images/val2014"
 VAL_QUESTION_JSON  = "data/raw/vqa_json/v2_OpenEnded_mscoco_val2014_questions.json"
 VAL_ANNOTATION_JSON= "data/raw/vqa_json/v2_mscoco_val2014_annotations.json"
@@ -43,7 +43,7 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset, num_sam
         return None
 
     model = get_model(model_type, len(vocab_q), len(vocab_a))
-    model.load_state_dict(torch.load(checkpoint, map_location=DEVICE))
+    model.load_state_dict(torch.load(checkpoint, map_location=lambda storage, loc: storage))
     model.eval()
 
     decode_fn = greedy_decode_with_attention if model_type in ('C', 'D') else greedy_decode
