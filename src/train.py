@@ -36,7 +36,7 @@ loss = criterion(logits, targets)
 
 MODEL_TYPE = 'A'   # đổi thành 'B', 'C', 'D' để train model khác
 
-BATCH_SIZE = 32
+BATCH_SIZE = 64
 EPOCHS = 10
 LEARNING_RATE = 1e-3
 # Tự động dùng GPU nếu có (Kaggle), fallback về CPU (local MX330 không tương thích)
