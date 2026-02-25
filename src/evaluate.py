@@ -16,6 +16,8 @@ from inference import (
     get_model,
     batch_greedy_decode,
     batch_greedy_decode_with_attention,
+    batch_beam_search_decode,
+    batch_beam_search_decode_with_attention,
 )
 
 # CONFIGURATION
@@ -35,7 +37,7 @@ def decode_tensor(a_tensor, vocab_a):
     words = [vocab_a.idx2word[int(i)] for i in a_tensor if int(i) not in special]
     return ' '.join(words)
 
-def evaluate(model_type='A', checkpoint=None, num_samples=None):
+def evaluate(model_type='A', checkpoint=None, num_samples=None, beam_width=1):
     if checkpoint is None:
         checkpoint = f"checkpoints/model_{model_type.lower()}_epoch10.pth"
 
@@ -69,7 +71,15 @@ def evaluate(model_type='A', checkpoint=None, num_samples=None):
     model.eval()
 
     use_attention = model_type in ('C', 'D')
-    decode_fn     = batch_greedy_decode_with_attention if use_attention else batch_greedy_decode
+    if beam_width > 1:
+        decode_fn = (
+            batch_beam_search_decode_with_attention if use_attention
+            else batch_beam_search_decode
+        )
+        decode_kwargs = dict(beam_width=beam_width)
+    else:
+        decode_fn     = batch_greedy_decode_with_attention if use_attention else batch_greedy_decode
+        decode_kwargs = {}
 
     val_loader = DataLoader(
         val_dataset, batch_size=64, shuffle=False,
@@ -85,7 +95,7 @@ def evaluate(model_type='A', checkpoint=None, num_samples=None):
 
     with torch.no_grad():
         for imgs, questions, answers in tqdm.tqdm(val_loader, desc="Evaluating"):
-            preds = decode_fn(model, imgs, questions, vocab_a, device=DEVICE)
+            preds = decode_fn(model, imgs, questions, vocab_a, device=DEVICE, **decode_kwargs)
             all_predictions.extend(preds)
             for a_tensor in answers:
                 all_gt_strings.append(decode_tensor(a_tensor, vocab_a))
@@ -124,6 +134,7 @@ def evaluate(model_type='A', checkpoint=None, num_samples=None):
     print(f"Model        : {model_type}")
     print(f"Checkpoint   : {checkpoint}")
     print(f"Samples      : {n}")
+    print(f"Decode Mode  : {'beam (width=' + str(beam_width) + ')' if beam_width > 1 else 'greedy'}")
     print(f"{'-'*50}")
     print(f"VQA Accuracy : {vqa_acc_total/n*100:.2f}%")
     print(f"Exact Match  : {exact_match/n*100:.2f}%")
@@ -152,7 +163,10 @@ if __name__ == "__main__":
     parser.add_argument('--checkpoint',  type=str, default=None,
                         help='Path to checkpoint. Default: checkpoints/model_X_epoch10.pth')
     parser.add_argument('--num_samples', type=int, default=None)
+    parser.add_argument('--beam_width',  type=int, default=1,
+                        help='Beam width for decoding. 1 = greedy (default), >1 = beam search')
     args = parser.parse_args()
 
-    evaluate(model_type=args.model_type, checkpoint=args.checkpoint, num_samples=args.num_samples)
+    evaluate(model_type=args.model_type, checkpoint=args.checkpoint,
+             num_samples=args.num_samples, beam_width=args.beam_width)
 

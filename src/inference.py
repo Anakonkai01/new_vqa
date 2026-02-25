@@ -234,6 +234,159 @@ def batch_greedy_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
         return [' '.join(vocab_a.idx2word.get(i, '<unk>') for i in r) for r in results]
 
 
+# ── Beam Search ────────────────────────────────────────────────────────────────
+#
+# Greedy decode always picks the single highest-prob token at each step.
+# Beam search keeps the top-k (beam_width) candidate sequences at every step, then
+# returns the one with the highest length-normalised log-probability.
+#
+# Why it helps:
+#   Greedy: "yes" → score = log P("yes")
+#   Beam-3: keeps {"yes", "no", "there is"} → compares P(full sequence) of all 3
+#
+# length normalisation: score / len(sequence)  – prevents short answers winning by default
+# ──────────────────────────────────────────────────────────────────────────────
+
+def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
+                       beam_width=5, max_len=20, device='cpu'):
+    """
+    Single-sample beam search for models A/B (no attention).
+
+    img_tensor : (3, 224, 224)
+    q_tensor   : (max_q_len,)
+    returns    : best answer string
+    """
+    with torch.no_grad():
+        img = img_tensor.unsqueeze(0).to(device)
+        q   = q_tensor.unsqueeze(0).to(device)
+
+        img_feat = F.normalize(model.i_encoder(img), p=2, dim=1)  # (1, hidden)
+        q_feat   = model.q_encoder(q)                              # (1, hidden)
+        fusion   = hadamard_fusion(img_feat, q_feat)
+
+        h0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)   # (L, 1, hidden)
+        c0 = torch.zeros_like(h0)
+
+        start_idx = vocab_a.word2idx['<start>']
+        end_idx   = vocab_a.word2idx['<end>']
+
+        # Each beam: (cumulative_log_score, token_ids, h, c)
+        beams     = [(0.0, [start_idx], h0, c0)]
+        completed = []
+
+        for _ in range(max_len):
+            if not beams:
+                break
+            candidates = []
+            for log_score, tokens, bh, bc in beams:
+                if tokens[-1] == end_idx:
+                    completed.append((log_score, tokens))
+                    continue
+                tok  = torch.tensor([[tokens[-1]]], dtype=torch.long, device=device)
+                emb  = model.decoder.embedding(tok)                    # (1, 1, embed)
+                out, (nh, nc) = model.decoder.lstm(emb, (bh, bc))     # (1, 1, hidden)
+                lp   = F.log_softmax(model.decoder.fc(out.squeeze(1))[0], dim=-1)  # (vocab,)
+                topk_vals, topk_ids = lp.topk(beam_width)
+                for v, idx in zip(topk_vals.tolist(), topk_ids.tolist()):
+                    candidates.append((log_score + v, tokens + [idx], nh, nc))
+
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            beams = candidates[:beam_width]
+
+        for log_score, tokens, _, _ in beams:
+            completed.append((log_score, tokens))
+
+        if not completed:
+            return ''
+
+        # Length-normalised: divide by sequence length to avoid bias toward short answers
+        completed.sort(key=lambda x: x[0] / max(len(x[1]) - 1, 1), reverse=True)
+        best  = completed[0][1][1:]   # strip <start>
+        words = [vocab_a.idx2word.get(t, '<unk>') for t in best if t != end_idx]
+        return ' '.join(words)
+
+
+def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
+                                      beam_width=5, max_len=20, device='cpu'):
+    """
+    Single-sample beam search for models C/D (Bahdanau attention).
+
+    img_tensor : (3, 224, 224)
+    q_tensor   : (max_q_len,)
+    returns    : best answer string
+    """
+    with torch.no_grad():
+        img = img_tensor.unsqueeze(0).to(device)
+        q   = q_tensor.unsqueeze(0).to(device)
+
+        img_features = F.normalize(model.i_encoder(img), p=2, dim=-1)  # (1, 49, hidden)
+        q_feat       = model.q_encoder(q)                               # (1, hidden)
+        img_mean     = img_features.mean(dim=1)                         # (1, hidden)
+        fusion       = hadamard_fusion(img_mean, q_feat)
+
+        h0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)
+        c0 = torch.zeros_like(h0)
+
+        start_idx = vocab_a.word2idx['<start>']
+        end_idx   = vocab_a.word2idx['<end>']
+
+        beams     = [(0.0, [start_idx], h0, c0)]
+        completed = []
+
+        for _ in range(max_len):
+            if not beams:
+                break
+            candidates = []
+            for log_score, tokens, bh, bc in beams:
+                if tokens[-1] == end_idx:
+                    completed.append((log_score, tokens))
+                    continue
+                tok            = torch.tensor([[tokens[-1]]], dtype=torch.long, device=device)
+                logit, (nh, nc), _ = model.decoder.decode_step(tok, (bh, bc), img_features)
+                lp             = F.log_softmax(logit[0], dim=-1)  # (vocab,)
+                topk_vals, topk_ids = lp.topk(beam_width)
+                for v, idx in zip(topk_vals.tolist(), topk_ids.tolist()):
+                    candidates.append((log_score + v, tokens + [idx], nh, nc))
+
+            candidates.sort(key=lambda x: x[0], reverse=True)
+            beams = candidates[:beam_width]
+
+        for log_score, tokens, _, _ in beams:
+            completed.append((log_score, tokens))
+
+        if not completed:
+            return ''
+
+        completed.sort(key=lambda x: x[0] / max(len(x[1]) - 1, 1), reverse=True)
+        best  = completed[0][1][1:]   # strip <start>
+        words = [vocab_a.idx2word.get(t, '<unk>') for t in best if t != end_idx]
+        return ' '.join(words)
+
+
+def batch_beam_search_decode(model, img_tensors, q_tensors, vocab_a,
+                             beam_width=5, max_len=20, device='cpu'):
+    """Batch wrapper for beam_search_decode (models A/B)."""
+    return [
+        beam_search_decode(
+            model, img_tensors[i], q_tensors[i], vocab_a,
+            beam_width=beam_width, max_len=max_len, device=device
+        )
+        for i in range(img_tensors.size(0))
+    ]
+
+
+def batch_beam_search_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
+                                            beam_width=5, max_len=20, device='cpu'):
+    """Batch wrapper for beam_search_decode_with_attention (models C/D)."""
+    return [
+        beam_search_decode_with_attention(
+            model, img_tensors[i], q_tensors[i], vocab_a,
+            beam_width=beam_width, max_len=max_len, device=device
+        )
+        for i in range(img_tensors.size(0))
+    ]
+
+
 if __name__ == "__main__":
     from PIL import Image
     from torchvision import transforms

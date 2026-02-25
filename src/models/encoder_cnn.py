@@ -112,6 +112,26 @@ class ResNetEncoder(nn.Module):
         # project to hidden size, output resnet (2048) -> ( hidden_size)
         self.fc = nn.Linear(2048, output_size)
 
+    def unfreeze_top_layers(self):
+        """
+        Selective fine-tuning: keep early layers frozen (generic features),
+        unfreeze layer3 + layer4 (high-level semantics) + projection fc.
+        ResNet children: 0=conv1 1=bn1 2=relu 3=maxpool 4=layer1 5=layer2
+                         6=layer3 7=layer4 8=avgpool
+        """
+        for param in self.resnet.parameters():
+            param.requires_grad = False          # start with everything frozen
+        for child in list(self.resnet.children())[6:]:  # layer3, layer4, avgpool
+            for param in child.parameters():
+                param.requires_grad = True
+        for param in self.fc.parameters():
+            param.requires_grad = True
+
+    def backbone_params(self):
+        """Return params belonging to the pretrained backbone (for differential LR)."""
+        return [p for child in list(self.resnet.children())[6:]
+                for p in child.parameters() if p.requires_grad]
+
     def forward(self, x):
         # x (batch, 3, 224, 224)
         out = self.resnet(x) # (batch, 2048, 1, 1)
@@ -146,6 +166,25 @@ class ResNetSpatialEncoder(nn.Module):
         # Project each region: 2048 -> output_size
         # Conv2d(kernel=1) = Linear applied independently over each of the 49 regions
         self.proj = nn.Conv2d(2048, output_size, kernel_size=1)
+
+    def unfreeze_top_layers(self):
+        """
+        Selective fine-tuning: freeze early layers, unfreeze layer3 + layer4.
+        ResNet children (without avgpool+fc): 0=conv1 1=bn1 2=relu 3=maxpool
+                                              4=layer1 5=layer2 6=layer3 7=layer4
+        """
+        for param in self.resnet.parameters():
+            param.requires_grad = False
+        for child in list(self.resnet.children())[6:]:  # layer3, layer4
+            for param in child.parameters():
+                param.requires_grad = True
+        for param in self.proj.parameters():
+            param.requires_grad = True
+
+    def backbone_params(self):
+        """Return params belonging to the pretrained backbone (for differential LR)."""
+        return [p for child in list(self.resnet.children())[6:]
+                for p in child.parameters() if p.requires_grad]
 
     def forward(self, x):
         # x: (batch, 3, 224, 224)

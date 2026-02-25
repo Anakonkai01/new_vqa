@@ -16,7 +16,8 @@ sys.path.append(os.path.dirname(__file__))
 
 from dataset import VQADataset, vqa_collate_fn
 from vocab import Vocabulary
-from inference import get_model, batch_greedy_decode, batch_greedy_decode_with_attention
+from inference import get_model, batch_greedy_decode, batch_greedy_decode_with_attention, \
+    batch_beam_search_decode, batch_beam_search_decode_with_attention
 
 # ── Config (must match evaluate.py paths) ─────────────────────
 DEVICE             = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -38,7 +39,7 @@ def decode_tensor(a_tensor, vocab_a):
 
 
 def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset,
-                       qid_to_all_answers, question_ids, num_samples):
+                       qid_to_all_answers, question_ids, num_samples, beam_width=1):
     checkpoint = f"checkpoints/model_{model_type.lower()}_epoch{epoch}.pth"
 
     if not os.path.exists(checkpoint):
@@ -50,7 +51,13 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset,
     model.to(DEVICE)
     model.eval()
 
-    decode_fn = batch_greedy_decode_with_attention if model_type in ('C', 'D') else batch_greedy_decode
+    use_attention = model_type in ('C', 'D')
+    if beam_width > 1:
+        decode_fn     = batch_beam_search_decode_with_attention if use_attention else batch_beam_search_decode
+        decode_kwargs = dict(beam_width=beam_width)
+    else:
+        decode_fn     = batch_greedy_decode_with_attention if use_attention else batch_greedy_decode
+        decode_kwargs = {}
 
     val_loader = DataLoader(
         val_dataset, batch_size=64, shuffle=False,
@@ -63,7 +70,7 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset,
 
     with torch.no_grad():
         for imgs, questions, answers in tqdm.tqdm(val_loader, desc=f"Model {model_type}", leave=False):
-            preds = decode_fn(model, imgs, questions, vocab_a, device=DEVICE)
+            preds = decode_fn(model, imgs, questions, vocab_a, device=DEVICE, **decode_kwargs)
             all_predictions.extend(preds)
             for a_tensor in answers:
                 all_gt_strings.append(decode_tensor(a_tensor, vocab_a))
@@ -149,6 +156,8 @@ def main():
                         help='Limit evaluation to N samples for speed')
     parser.add_argument('--models',      type=str, default='A,B,C,D',
                         help='Comma-separated list of models to compare (default: A,B,C,D)')
+    parser.add_argument('--beam_width',  type=int, default=1,
+                        help='Beam width for decoding. 1 = greedy (default), >1 = beam search')
     args = parser.parse_args()
 
     model_types = [m.strip().upper() for m in args.models.split(',')]
@@ -178,13 +187,14 @@ def main():
     question_ids = [q['question_id'] for q in val_dataset.questions]
 
     n = len(val_dataset)
-    print(f"Comparing models: {model_types} | epoch={args.epoch} | samples={n}")
+    print(f"Comparing models: {model_types} | epoch={args.epoch} | samples={n} | decode={'beam (w=' + str(args.beam_width) + ')' if args.beam_width > 1 else 'greedy'}")
 
     results = {}
     for model_type in model_types:
         results[model_type] = evaluate_one_model(
             model_type, args.epoch, vocab_q, vocab_a, val_dataset,
-            qid_to_all_answers, question_ids, args.num_samples
+            qid_to_all_answers, question_ids, args.num_samples,
+            beam_width=args.beam_width
         )
 
     print_table(results)
