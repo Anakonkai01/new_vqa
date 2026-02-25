@@ -9,7 +9,7 @@ import tqdm
 sys.path.append(os.path.dirname(__file__))
 
 # Import modules
-from dataset import VQADatasetA, vqa_collate_fn
+from dataset import VQADataset, vqa_collate_fn
 from models.vqa_models import VQAmodelA, VQAModelB, VQAModelC, VQAModelD
 from vocab import Vocabulary
 
@@ -87,7 +87,7 @@ def train():
     vocab_a.load(VOCAB_A_PATH)
 
     # ── Dataset chính thức VQA 2.0 — train và val tách biệt ────────────
-    train_dataset = VQADatasetA(
+    train_dataset = VQADataset(
         image_dir=TRAIN_IMAGE_DIR,
         question_json_path=TRAIN_QUESTION_JSON,
         annotations_json_path=TRAIN_ANNOTATION_JSON,
@@ -97,7 +97,7 @@ def train():
         max_samples=MAX_TRAIN_SAMPLES
     )
 
-    val_dataset = VQADatasetA(
+    val_dataset = VQADataset(
         image_dir=VAL_IMAGE_DIR,
         question_json_path=VAL_QUESTION_JSON,
         annotations_json_path=VAL_ANNOTATION_JSON,

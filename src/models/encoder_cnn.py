@@ -94,7 +94,7 @@ class SimpleCNNSpatial(nn.Module):
         return out  # (batch, 49, output_size) — 49 regional features
 
 
-# Resnet101 
+# Resnet101 for model C: without attention
 class ResNetEncoder(nn.Module):
     def __init__(self, output_size=1024, freeze=True):
         super().__init__()

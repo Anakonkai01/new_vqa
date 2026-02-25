@@ -169,7 +169,7 @@ class LSTMDecoderWithAttention(nn.Module):
 
             # Lấy hidden state layer cuối để tính attention
             # hidden là tuple (h, c), h shape (num_layers, batch, hidden_size)
-            h_top = hidden[0][-1]                 # (batch, hidden_size)
+            h_top = hidden[0][-1]                 # (batch, hidden_size), take the last layers (num_layers)
 
             # Tính context vector từ attention
             context, _ = self.attention(h_top, img_features)  # (batch, hidden_size)

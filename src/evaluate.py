@@ -9,12 +9,12 @@ sys.path.append(os.path.dirname(__file__))
 nltk.download('wordnet', quiet=True)
 nltk.download('omw-1.4', quiet=True)
 
-from dataset import VQADatasetA
+from dataset import VQADataset
 from models.vqa_models import VQAmodelA, VQAModelB, VQAModelC, VQAModelD
 from vocab import Vocabulary
 from inference import greedy_decode, greedy_decode_with_attention, get_model
 
-# ── Config ────────────────────────────────────────────────
+# CONFIGURATION
 DEVICE             = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 VAL_IMAGE_DIR      = "data/raw/images/val2014"
 VAL_QUESTION_JSON  = "data/raw/vqa_json/v2_OpenEnded_mscoco_val2014_questions.json"
@@ -40,7 +40,7 @@ def evaluate(model_type='A', checkpoint=None, num_samples=None):
     vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
 
     # Dùng val set chính thức VQA 2.0 (val2014)
-    val_dataset = VQADatasetA(
+    val_dataset = VQADataset(
         image_dir=VAL_IMAGE_DIR,
         question_json_path=VAL_QUESTION_JSON,
         annotations_json_path=VAL_ANNOTATION_JSON,

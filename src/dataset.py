@@ -1,9 +1,9 @@
-"""  
-dataset class do: 
-input: idx 
-output: 1 sample (image_tensor, question_tensor, answer_tensor)
+"""
+Dataset class:
+  Input : index
+  Output: 1 sample (image_tensor, question_tensor, answer_tensor)
 
-Model A: cnn scratch no attention -> load raw images 
+Loads raw images and encodes questions/answers to index tensors.
 """
 
 
@@ -21,16 +21,16 @@ import os
 # helper function 
 # collate function 
 def vqa_collate_fn(batch):
-    """  
-    haddle batch that has len of each sequence different with eachother 
-    pad_sequence auto find the longest sequence in batch  and pad zeros for short sequence  
+    """
+    Handle batches with variable-length sequences.
+    pad_sequence finds the longest sequence in the batch and zero-pads shorter ones.
     """
 
-    imgs, questions, answers = zip(*batch) # unzip batch 
+    imgs, questions, answers = zip(*batch)  # unzip batch
 
-    # imgs does not need to process so stack (according to batch) it normally 
+    # Stack image tensors along the batch dimension
     imgs_stacked = torch.stack(imgs, dim=0)
-    # pad sequence question and answer in batch 
+    # Pad question and answer sequences to equal length within the batch
     questions_padded = pad_sequence(questions, batch_first=True)
     answer_padded = pad_sequence(answers, batch_first=True)
 
@@ -39,13 +39,13 @@ def vqa_collate_fn(batch):
 
 
 
-class VQADatasetA(Dataset):
+class VQADataset(Dataset):
     def __init__(self, image_dir, question_json_path,
                  annotations_json_path, vocab_q, vocab_a,
                  split='train2014', max_samples=None):
         """
-        split      : 'train2014' hoặc 'val2014' — dùng để tạo đúng tên file ảnh
-        max_samples: giới hạn số sample (tiện khi test nhanh trên Kaggle)
+        split      : 'train2014' or 'val2014' — used to construct the correct image filename
+        max_samples: limit the number of samples (useful for quick pipeline testing)
         """
         self.image_dir = image_dir
         self.vocab_q   = vocab_q
@@ -66,7 +66,7 @@ class VQADatasetA(Dataset):
         with open(question_json_path, 'r') as f:
             self.questions = json.load(f)['questions']
 
-        # giới hạn số sample nếu có (hữu ích khi test pipeline nhanh)
+        # Limit number of samples if specified (useful for fast pipeline testing)
         if max_samples is not None:
             self.questions = self.questions[:max_samples]
 
@@ -91,12 +91,12 @@ class VQADatasetA(Dataset):
         q_tensor = torch.tensor(q_indices, dtype=torch.long) # int 
 
         # 2. process annotations to indices tensor
-        a_text = self.qid2ans.get(q_id, "") # "" mean if does not found the key, return default ""
+        a_text = self.qid2ans.get(q_id, "")  # return empty string if key not found
         a_indices = self.vocab_a.numericalize(a_text)
         a_tensor = torch.tensor(a_indices, dtype=torch.long)
 
         # 3. process image
-        # tên file phụ thuộc split: COCO_train2014_... hoặc COCO_val2014_...
+        # filename depends on split: COCO_train2014_... or COCO_val2014_...
         img_name = f"COCO_{self.split}_{img_id:012d}.jpg"
         img_path = os.path.join(self.image_dir, img_name)
         image = Image.open(img_path).convert("RGB")
