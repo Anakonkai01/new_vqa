@@ -31,7 +31,7 @@ from inference import get_model, greedy_decode
 from models.vqa_models import hadamard_fusion
 
 # ── Config ───────────────────────────────────────────────────────
-DEVICE          = 'cpu'
+DEVICE          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 IMAGE_DIR       = "data/raw/images/train2014"
 QUESTION_JSON   = "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
 VOCAB_Q_PATH    = "data/processed/vocab_questions.json"
@@ -212,7 +212,8 @@ if __name__ == "__main__":
 
     # load model
     model = get_model(args.model_type, len(vocab_q), len(vocab_a))
-    model.load_state_dict(torch.load(checkpoint, map_location=DEVICE))
+    model.load_state_dict(torch.load(checkpoint, map_location=lambda storage, loc: storage))
+    model.to(DEVICE)
     model.eval()
 
     # load sample

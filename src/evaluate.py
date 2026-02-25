@@ -51,10 +51,11 @@ def evaluate(model_type='A', checkpoint=None, num_samples=None):
     )
 
     model = get_model(model_type, len(vocab_q), len(vocab_a))
-    model.load_state_dict(torch.load(checkpoint, map_location=DEVICE))
+    model.load_state_dict(torch.load(checkpoint, map_location=lambda storage, loc: storage))
+    model.to(DEVICE)
     model.eval()
 
-    # chọn decode function theo model type
+    # choose decode function based on model type
     use_attention = model_type in ('C', 'D')
     decode_fn = greedy_decode_with_attention if use_attention else greedy_decode
 

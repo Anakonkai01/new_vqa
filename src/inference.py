@@ -135,8 +135,8 @@ if __name__ == "__main__":
     from PIL import Image
     from torchvision import transforms
 
-    MODEL_TYPE    = 'A'   # đổi thành 'B', 'C', 'D' để chạy model khác
-    DEVICE        = 'cpu'
+    MODEL_TYPE    = 'A'   # change to 'B', 'C', 'D' to run other models
+    DEVICE        = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
     VOCAB_A_PATH  = "data/processed/vocab_answers.json"
     CHECKPOINT    = f"checkpoints/model_{MODEL_TYPE.lower()}_epoch10.pth"
@@ -149,7 +149,8 @@ if __name__ == "__main__":
 
     # Load model
     model = get_model(MODEL_TYPE, len(vocab_q), len(vocab_a))
-    model.load_state_dict(torch.load(CHECKPOINT, map_location=DEVICE))
+    model.load_state_dict(torch.load(CHECKPOINT, map_location=lambda storage, loc: storage))
+    model.to(DEVICE)
 
     # Load 1 sample
     transform = transforms.Compose([
