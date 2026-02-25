@@ -38,6 +38,21 @@ Reshape 3D logits to 2D before computing loss:
 # Configurations / Hyperparameters
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+# ── A100 / Ampere+ optimizations ──────────────────────────────────────
+if torch.cuda.is_available():
+    # Auto-tune conv algorithms for fixed input sizes (faster after warm-up)
+    torch.backends.cudnn.benchmark = True
+    # TF32 for matmul & convolutions — near-FP32 accuracy, ~2× faster on Ampere+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+
+
+def _supports_bf16():
+    """Check if GPU supports BFloat16 (Ampere+ = compute capability >= 8.0)."""
+    if not torch.cuda.is_available():
+        return False
+    return torch.cuda.get_device_capability()[0] >= 8
+
 
 def get_model(model_type, vocab_q_size, vocab_a_size):
     """Factory function: return the model corresponding to model_type."""
@@ -144,7 +159,8 @@ MAX_VAL_SAMPLES   = None
 
 def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           scheduled_sampling=False, ss_k=5,
-          finetune_cnn=False, cnn_lr_factor=0.1):
+          finetune_cnn=False, cnn_lr_factor=0.1,
+          num_workers=4):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -179,8 +195,10 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         batch_size=batch_size,
         shuffle=True,
         collate_fn=vqa_collate_fn,
-        num_workers=4,
-        pin_memory=pin_memory
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=4 if num_workers > 0 else None,
     )
 
     val_loader = DataLoader(
@@ -188,8 +206,10 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         batch_size=batch_size,
         shuffle=False,
         collate_fn=vqa_collate_fn,
-        num_workers=4,
-        pin_memory=pin_memory
+        num_workers=num_workers,
+        pin_memory=pin_memory,
+        persistent_workers=(num_workers > 0),
+        prefetch_factor=4 if num_workers > 0 else None,
     )
 
     model     = get_model(model_type, len(vocab_q), len(vocab_a)).to(DEVICE)
@@ -221,9 +241,16 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         optimizer, mode='min', factor=0.5, patience=2
     )
 
-    # Mixed precision — enabled only on CUDA
-    use_amp = torch.cuda.is_available()
-    scaler  = GradScaler(enabled=use_amp)
+    # Mixed precision — BF16 on Ampere+ (A100, etc.), FP16 elsewhere
+    use_amp  = torch.cuda.is_available()
+    use_bf16 = use_amp and _supports_bf16()
+    amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
+    # GradScaler not needed for BF16 (wider dynamic range), still used for FP16
+    scaler = GradScaler(enabled=(use_amp and not use_bf16))
+    if use_bf16:
+        print("AMP: BFloat16 (Ampere+ detected — no GradScaler needed)")
+    elif use_amp:
+        print("AMP: Float16 + GradScaler")
 
     history      = {'train_loss': [], 'val_loss': []}
     history_path = f"checkpoints/history_model_{model_type.lower()}.json"
@@ -266,7 +293,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
             optimizer.zero_grad()
 
-            with autocast(enabled=use_amp):
+            with autocast(enabled=use_amp, dtype=amp_dtype):
                 if scheduled_sampling:
                     # Inverse-sigmoid epsilon decay: higher k = slower decay
                     # epoch 0 -> epsilon~1 (mostly GT), last epoch -> epsilon lowers
@@ -303,7 +330,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                 decoder_input  = answer[:, :-1]
                 decoder_target = answer[:, 1:]
 
-                with autocast(enabled=use_amp):
+                with autocast(enabled=use_amp, dtype=amp_dtype):
                     logits     = model(imgs, questions, decoder_input)
                     vocab_size = logits.size(-1)
                     loss = criterion(
@@ -371,11 +398,14 @@ if __name__ == "__main__":
                         help='Unfreeze ResNet layer3+layer4 for fine-tuning (models B/D only)')
     parser.add_argument('--cnn_lr_factor', type=float, default=0.1,
                         help='LR multiplier for backbone params when fine-tuning (default: 0.1)')
+    parser.add_argument('--num_workers', type=int, default=4,
+                        help='DataLoader worker processes (default: 4, recommend 8 for A100)')
     args = parser.parse_args()
     train(model_type=args.model, epochs=args.epochs, lr=args.lr,
           batch_size=args.batch_size, resume=args.resume,
           scheduled_sampling=args.scheduled_sampling, ss_k=args.ss_k,
-          finetune_cnn=args.finetune_cnn, cnn_lr_factor=args.cnn_lr_factor)
+          finetune_cnn=args.finetune_cnn, cnn_lr_factor=args.cnn_lr_factor,
+          num_workers=args.num_workers)
         
         
         
