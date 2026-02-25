@@ -3,29 +3,26 @@ compare.py — Evaluate all 4 models on the same val split, print comparison tab
 
 Usage:
     python src/compare.py
-    python src/compare.py --epoch 5           # dùng epoch cụ thể
-    python src/compare.py --num_samples 50    # chỉ chạy 50 samples cho nhanh
+    python src/compare.py --epoch 5           # use a specific epoch
+    python src/compare.py --num_samples 50    # only run 50 samples for speed
 """
 
 import torch
-from torch.utils.data import random_split
 import os, sys, argparse, tqdm
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 sys.path.append(os.path.dirname(__file__))
 
-from dataset import VQADatasetA
+from dataset import VQADataset
 from vocab import Vocabulary
 from inference import greedy_decode, greedy_decode_with_attention, get_model
 
-# ── Config (phải khớp train.py) ───────────────────────────────
-DEVICE          = 'cpu'
-IMAGE_DIR       = "data/raw/images/train2014"
-QUESTION_JSON   = "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
-ANNOTATION_JSON = "data/raw/vqa_json/v2_mscoco_train2014_annotations.json"
-VOCAB_Q_PATH    = "data/processed/vocab_questions.json"
-VOCAB_A_PATH    = "data/processed/vocab_answers.json"
-SPLIT_SEED      = 42
-VAL_RATIO       = 0.1
+# ── Config (must match evaluate.py paths) ─────────────────────
+DEVICE             = 'cpu'
+VAL_IMAGE_DIR      = "data/raw/images/val2014"
+VAL_QUESTION_JSON  = "data/raw/vqa_json/v2_OpenEnded_mscoco_val2014_questions.json"
+VAL_ANNOTATION_JSON= "data/raw/vqa_json/v2_mscoco_val2014_annotations.json"
+VOCAB_Q_PATH       = "data/processed/vocab_questions.json"
+VOCAB_A_PATH       = "data/processed/vocab_answers.json"
 
 
 def decode_tensor(a_tensor, vocab_a):
@@ -108,7 +105,7 @@ def main():
     vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
 
     # Dùng val set chính thức VQA 2.0 (val2014)
-    val_dataset = VQADatasetA(
+    val_dataset = VQADataset(
         image_dir=VAL_IMAGE_DIR,
         question_json_path=VAL_QUESTION_JSON,
         annotations_json_path=VAL_ANNOTATION_JSON,
