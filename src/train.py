@@ -264,9 +264,23 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         print(f"Resuming from: {resume}")
         ckpt = torch.load(resume, map_location=lambda storage, loc: storage)
         model.load_state_dict(ckpt['model_state_dict'])
-        optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-        scheduler.load_state_dict(ckpt['scheduler_state_dict'])
-        scaler.load_state_dict(ckpt['scaler_state_dict'])
+
+        # Optimizer/scheduler state can only be restored when the number of
+        # parameter groups matches.  Phase transitions (e.g. Phase 1 → 2)
+        # change the optimizer layout (frozen → unfreeze adds a param group),
+        # so we skip restoring optimizer/scheduler in that case and start
+        # with a fresh optimizer + the new LR from CLI args.
+        saved_groups = len(ckpt['optimizer_state_dict']['param_groups'])
+        current_groups = len(optimizer.param_groups)
+        if saved_groups == current_groups:
+            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+            scaler.load_state_dict(ckpt['scaler_state_dict'])
+            print("  Optimizer & scheduler state restored.")
+        else:
+            print(f"  Optimizer layout changed ({saved_groups} → {current_groups} param groups) "
+                  f"— using fresh optimizer with current LR settings.")
+
         start_epoch   = ckpt['epoch']          # last completed epoch
         best_val_loss = ckpt['best_val_loss']
         history       = ckpt.get('history', history)
