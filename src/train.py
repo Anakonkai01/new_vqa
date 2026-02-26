@@ -380,12 +380,16 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         with open(history_path, 'w') as f:
             json.dump(history, f, indent=2)
 
-        # Save per-epoch checkpoint (useful for resume / comparison)
-        torch.save(model.state_dict(), f"checkpoints/model_{model_type.lower()}_epoch{epoch+1}.pth")
+        # ── Checkpoint saving (storage-efficient) ─────────────────
+        # comparison_epochs: epochs where we run compare.py (end of each phase)
+        # Only keep per-epoch checkpoints at these milestones.
+        # resume + best checkpoints are always overwritten (1 file each).
+        comparison_epochs = {10, 15, 20}
+        current_epoch = epoch + 1
 
-        # Save full resume checkpoint (model + optimizer + scheduler + scaler + metadata)
+        # Always save resume checkpoint (overwritten each epoch — 1 file per model)
         resume_ckpt = {
-            'epoch':                epoch + 1,
+            'epoch':                current_epoch,
             'model_state_dict':     model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
             'scheduler_state_dict': scheduler.state_dict(),
@@ -395,7 +399,12 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         }
         torch.save(resume_ckpt, f"checkpoints/model_{model_type.lower()}_resume.pth")
 
-        # Save best checkpoint separately
+        # Save per-epoch checkpoint ONLY at comparison milestones
+        if current_epoch in comparison_epochs:
+            torch.save(model.state_dict(), f"checkpoints/model_{model_type.lower()}_epoch{current_epoch}.pth")
+            print(f"  Saved milestone checkpoint: epoch {current_epoch}")
+
+        # Save best checkpoint separately (overwritten — 1 file per model)
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             es_counter = 0
