@@ -42,9 +42,16 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset,
                        qid_to_all_answers, question_ids, num_samples, beam_width=1):
     checkpoint = f"checkpoints/model_{model_type.lower()}_epoch{epoch}.pth"
 
+    # Fallback to best checkpoint if epoch-specific one doesn't exist
+    # (happens when early stopping ended training before this milestone)
     if not os.path.exists(checkpoint):
-        print(f"  [SKIP] {checkpoint} not found.")
-        return None
+        best_ckpt = f"checkpoints/model_{model_type.lower()}_best.pth"
+        if os.path.exists(best_ckpt):
+            print(f"  [INFO] {checkpoint} not found, using {best_ckpt} (early stopping fallback)")
+            checkpoint = best_ckpt
+        else:
+            print(f"  [SKIP] {checkpoint} not found (no best checkpoint either).")
+            return None
 
     model = get_model(model_type, len(vocab_q), len(vocab_a))
     model.load_state_dict(torch.load(checkpoint, map_location=lambda storage, loc: storage))

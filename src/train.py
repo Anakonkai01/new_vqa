@@ -429,6 +429,15 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                 print(f"  Val loss did not improve ({es_counter}/{early_stopping_patience})")
                 if es_counter >= early_stopping_patience:
                     print(f"  Early stopping triggered after {epoch+1} epochs.")
+                    # Save best model as the next unsaved milestone so
+                    # compare.py can still find a checkpoint for this phase.
+                    target_epoch = start_epoch + epochs
+                    milestone_path = f"checkpoints/model_{model_type.lower()}_epoch{target_epoch}.pth"
+                    best_path = f"checkpoints/model_{model_type.lower()}_best.pth"
+                    if not os.path.exists(milestone_path) and os.path.exists(best_path):
+                        import shutil
+                        shutil.copy2(best_path, milestone_path)
+                        print(f"  Copied best checkpoint → {milestone_path} (for compare.py)")
                     break
 
 
