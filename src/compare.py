@@ -8,13 +8,16 @@ Usage:
 """
 
 import torch
-import os, sys, argparse, tqdm
+import os, sys, json, argparse, tqdm
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+from nltk.translate.meteor_score import meteor_score as nltk_meteor
+from torch.utils.data import DataLoader
 sys.path.append(os.path.dirname(__file__))
 
-from dataset import VQADataset
+from dataset import VQADataset, vqa_collate_fn
 from vocab import Vocabulary
-from inference import greedy_decode, greedy_decode_with_attention, get_model
+from inference import get_model, batch_greedy_decode, batch_greedy_decode_with_attention, \
+    batch_beam_search_decode, batch_beam_search_decode_with_attention
 
 # ── Config (must match evaluate.py paths) ─────────────────────
 DEVICE             = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -35,7 +38,8 @@ def decode_tensor(a_tensor, vocab_a):
     return ' '.join(words)
 
 
-def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset, num_samples):
+def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset,
+                       qid_to_all_answers, question_ids, num_samples, beam_width=1):
     checkpoint = f"checkpoints/model_{model_type.lower()}_epoch{epoch}.pth"
 
     if not os.path.exists(checkpoint):
@@ -47,45 +51,100 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset, num_sam
     model.to(DEVICE)
     model.eval()
 
-    decode_fn = greedy_decode_with_attention if model_type in ('C', 'D') else greedy_decode
+    use_attention = model_type in ('C', 'D')
+    if beam_width > 1:
+        decode_fn     = batch_beam_search_decode_with_attention if use_attention else batch_beam_search_decode
+        decode_kwargs = dict(beam_width=beam_width)
+    else:
+        decode_fn     = batch_greedy_decode_with_attention if use_attention else batch_greedy_decode
+        decode_kwargs = {}
 
-    smoothie    = SmoothingFunction().method1
+    val_loader = DataLoader(
+        val_dataset, batch_size=64, shuffle=False,
+        collate_fn=vqa_collate_fn, num_workers=2
+    )
+
+    smoothie        = SmoothingFunction().method1
+    all_predictions = []
+    all_gt_strings  = []
+
+    with torch.no_grad():
+        for imgs, questions, answers in tqdm.tqdm(val_loader, desc=f"Model {model_type}", leave=False):
+            preds = decode_fn(model, imgs, questions, vocab_a, device=DEVICE, **decode_kwargs)
+            all_predictions.extend(preds)
+            for a_tensor in answers:
+                all_gt_strings.append(decode_tensor(a_tensor, vocab_a))
+
+    n           = len(all_predictions)
     exact_match = 0
+    vqa_acc     = 0.0
     bleu1_total = 0.0
-    n           = num_samples or len(val_dataset)
+    bleu2_total = 0.0
+    bleu3_total = 0.0
+    bleu4_total = 0.0
+    meteor_total = 0.0
 
-    for i in tqdm.tqdm(range(n), desc=f"Model {model_type}", leave=False):
-        img_tensor, q_tensor, a_tensor = val_dataset[i]
+    for idx, (pred_str, gt_str) in enumerate(zip(all_predictions, all_gt_strings)):
+        pred_clean = pred_str.strip().lower()
+        gt_clean   = gt_str.strip().lower()
 
-        gt_str   = decode_tensor(a_tensor, vocab_a)
-        pred_str = decode_fn(model, img_tensor, q_tensor, vocab_a, device=DEVICE)
-
-        if pred_str.strip() == gt_str.strip():
+        if pred_clean == gt_clean:
             exact_match += 1
+
+        qid         = question_ids[idx]
+        all_answers = qid_to_all_answers.get(qid, [gt_clean])
+        match_count = sum(1 for a in all_answers if a == pred_clean)
+        vqa_acc += min(match_count / 3.0, 1.0)
 
         gt_words   = gt_str.split() or ['<unk>']
         pred_words = pred_str.split() or ['<unk>']
-        bleu1_total += sentence_bleu([gt_words], pred_words,
-                                     weights=(1, 0, 0, 0),
-                                     smoothing_function=smoothie)
+        bleu1_total  += sentence_bleu([gt_words], pred_words,
+                                      weights=(1, 0, 0, 0),
+                                      smoothing_function=smoothie)
+        bleu2_total  += sentence_bleu([gt_words], pred_words,
+                                      weights=(0.5, 0.5, 0, 0),
+                                      smoothing_function=smoothie)
+        bleu3_total  += sentence_bleu([gt_words], pred_words,
+                                      weights=(0.33, 0.33, 0.33, 0),
+                                      smoothing_function=smoothie)
+        bleu4_total  += sentence_bleu([gt_words], pred_words,
+                                      weights=(0.25, 0.25, 0.25, 0.25),
+                                      smoothing_function=smoothie)
+        meteor_total += nltk_meteor([gt_words], pred_words)
 
     return {
-        'exact_match': exact_match / n * 100,
-        'bleu1':       bleu1_total / n,
-        'checkpoint':  checkpoint,
-        'n':           n,
+        'vqa_accuracy': vqa_acc / n * 100,
+        'exact_match':  exact_match / n * 100,
+        'bleu1':        bleu1_total / n,
+        'bleu2':        bleu2_total / n,
+        'bleu3':        bleu3_total / n,
+        'bleu4':        bleu4_total / n,
+        'meteor':       meteor_total / n,
+        'checkpoint':   checkpoint,
+        'n':            n,
     }
 
 
 def print_table(results):
+    header = f"{'Model':<8} {'VQA Acc':>9} {'Exact':>8} {'BLEU-1':>8} {'BLEU-2':>8} {'BLEU-3':>8} {'BLEU-4':>8} {'METEOR':>8}  Checkpoint"
     print()
-    print(f"{'Model':<8} {'Exact Match':>12} {'BLEU-1':>10}  Checkpoint")
-    print("-" * 70)
+    print(header)
+    print("-" * len(header))
     for model_type, r in sorted(results.items()):
         if r is None:
-            print(f"{model_type:<8} {'N/A':>12} {'N/A':>10}  (checkpoint missing)")
+            print(f"{model_type:<8} {'N/A':>9} {'N/A':>8} {'N/A':>8} {'N/A':>8} {'N/A':>8} {'N/A':>8} {'N/A':>8}  (checkpoint missing)")
         else:
-            print(f"{model_type:<8} {r['exact_match']:>11.2f}% {r['bleu1']:>10.4f}  {r['checkpoint']}")
+            print(
+                f"{model_type:<8}"
+                f" {r['vqa_accuracy']:>8.2f}%"
+                f" {r['exact_match']:>7.2f}%"
+                f" {r['bleu1']:>8.4f}"
+                f" {r['bleu2']:>8.4f}"
+                f" {r['bleu3']:>8.4f}"
+                f" {r['bleu4']:>8.4f}"
+                f" {r['meteor']:>8.4f}"
+                f"  {r['checkpoint']}"
+            )
     print()
 
 
@@ -97,15 +156,17 @@ def main():
                         help='Limit evaluation to N samples for speed')
     parser.add_argument('--models',      type=str, default='A,B,C,D',
                         help='Comma-separated list of models to compare (default: A,B,C,D)')
+    parser.add_argument('--beam_width',  type=int, default=1,
+                        help='Beam width for decoding. 1 = greedy (default), >1 = beam search')
     args = parser.parse_args()
 
     model_types = [m.strip().upper() for m in args.models.split(',')]
 
-    # load vocab
+    # Load vocab
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
     vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
 
-    # Dùng val set chính thức VQA 2.0 (val2014)
+    # Official VQA 2.0 val split
     val_dataset = VQADataset(
         image_dir=VAL_IMAGE_DIR,
         question_json_path=VAL_QUESTION_JSON,
@@ -116,13 +177,24 @@ def main():
         max_samples=args.num_samples
     )
 
+    # Load all 10 human annotations per question for VQA accuracy
+    with open(VAL_ANNOTATION_JSON, 'r') as f:
+        raw_annotations = json.load(f)['annotations']
+    qid_to_all_answers = {
+        ann['question_id']: [a['answer'].lower().strip() for a in ann['answers']]
+        for ann in raw_annotations
+    }
+    question_ids = [q['question_id'] for q in val_dataset.questions]
+
     n = len(val_dataset)
-    print(f"Comparing models: {model_types} | epoch={args.epoch} | samples={n}")
+    print(f"Comparing models: {model_types} | epoch={args.epoch} | samples={n} | decode={'beam (w=' + str(args.beam_width) + ')' if args.beam_width > 1 else 'greedy'}")
 
     results = {}
     for model_type in model_types:
         results[model_type] = evaluate_one_model(
-            model_type, args.epoch, vocab_q, vocab_a, val_dataset, args.num_samples
+            model_type, args.epoch, vocab_q, vocab_a, val_dataset,
+            qid_to_all_answers, question_ids, args.num_samples,
+            beam_width=args.beam_width
         )
 
     print_table(results)

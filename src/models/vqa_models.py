@@ -1,17 +1,13 @@
-"""   
-wrapper model 
-CNN Encoder      → img_feature  (batch, hidden_size)
-Question Encoder → q_feature    (batch, hidden_size)
-         ↓
-    FUSION = img_feature * q_feature  (Hadamard)
-         ↓
-    Tạo initial hidden state cho Decoder
-         ↓
-LSTM Decoder → logits  (batch, seq_len, vocab_size)
-
-
-
-
+"""
+Wrapper model:
+  CNN Encoder      -> img_feature  (batch, hidden_size)
+  Question Encoder -> q_feature    (batch, hidden_size)
+           |
+      FUSION = img_feature * q_feature  (Hadamard element-wise product)
+           |
+      Create initial hidden state for Decoder
+           |
+  LSTM Decoder -> logits  (batch, seq_len, vocab_size)
 """
 
 
@@ -42,15 +38,15 @@ def hadamard_fusion(img_feature, q_feature):
 
 
 
-# Model A: no attention + scratch cnn
-class VQAmodelA(nn.Module):
+# Model A: no attention + scratch CNN
+class VQAModelA(nn.Module):
     def __init__(self, vocab_size, answer_vocab_size,
                  embed_size=512, hidden_size=1024, num_layers=2):
         super().__init__()
 
         self.num_layers = num_layers 
         
-        # init 3 model 
+        # Initialize image encoder, question encoder, and decoder
         self.i_encoder = SimpleCNN(output_size=hidden_size)
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
                                          hidden_size=hidden_size, num_layers=num_layers)
@@ -67,29 +63,23 @@ class VQAmodelA(nn.Module):
         return: logits (batch, max_a_len, answer_vocab_size)
         """
 
-        # encode image 
-        img_feature = self.i_encoder(images) # (batch, hidden_size)
-        img_feature = F.normalize(img_feature, p=2, dim=1) # normalize cause we don't about magnitude, we care direction 
-        
-        # encode question 
-        q_feature = self.q_encoder(questions) # (batch, hidden_size)
-        
-        
-        # hadamard fusion 
-        fusion = hadamard_fusion(img_feature, q_feature) 
+        # encode image
+        img_feature = self.i_encoder(images)  # (batch, hidden_size)
+        img_feature = F.normalize(img_feature, p=2, dim=1)  # L2 normalize: direction matters, not magnitude
 
-        
-        # create initial hidden for decoder 
-        """ 
-        because decoder lstm need (h_0, c_0) tuple, each has shape (num_layers, batch, hidden_size)
-        """
-        h_0 = fusion.unsqueeze(0) 
+        # encode question
+        q_feature = self.q_encoder(questions)  # (batch, hidden_size)
+
+        # Hadamard fusion
+        fusion = hadamard_fusion(img_feature, q_feature)
+
+        # Create initial hidden state for decoder.
+        # LSTM expects (h_0, c_0) tuple, each shape (num_layers, batch, hidden_size)
+        h_0 = fusion.unsqueeze(0)
         h_0 = h_0.repeat(self.num_layers, 1, 1)
-        c_0 = torch.zeros_like(h_0) # convention almost paper about image captioning/ vqa 
-        
+        c_0 = torch.zeros_like(h_0)  # zero-init cell state (standard practice)
 
-        
-        # decode 
+        # decode
         logits = self.decoder((h_0, c_0), target_seq)
         # (batch, max_a_len, answer_a_vocab_size)
         
@@ -98,15 +88,13 @@ class VQAmodelA(nn.Module):
     
     
     
-# Model B: Resnet101 + no attention 
+# Model B: ResNet101 + no attention
 class VQAModelB(nn.Module):
-    def __init__(self, vocab_size, answer_vocab_size, 
+    def __init__(self, vocab_size, answer_vocab_size,
                  embed_size=512, hidden_size=1024, num_layers=2, freeze=True):
         super().__init__()
 
-        # init 2 encoder and 1 decoder 
-        
-        self.num_layers = num_layers # store for layers use in before add to decoder 
+        self.num_layers = num_layers  # stored for use when building initial hidden state
         
         self.i_encoder = ResNetEncoder(output_size=hidden_size, freeze=freeze)
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
@@ -134,7 +122,7 @@ class VQAModelB(nn.Module):
         return logits
 
 
-# Model C: SimpleCNN Spatial + Bahdanau Attention + LSTMDecoder
+# Model C: SimpleCNN Spatial + Bahdanau Attention + LSTM Decoder
 class VQAModelC(nn.Module):
     def __init__(self, vocab_size, answer_vocab_size,
                  embed_size=512, hidden_size=1024, num_layers=2, attn_dim=512):
@@ -142,15 +130,15 @@ class VQAModelC(nn.Module):
 
         self.num_layers = num_layers
 
-        # CNN giữ spatial 7×7=49 vùng → output (batch, 49, hidden_size)
-        # Khác Model A: không mean pool, decoder sẽ attend vào 49 vùng này
+        # CNN preserves spatial 7x7=49 regions -> output (batch, 49, hidden_size)
+        # Unlike Model A: no mean pool; decoder attends over all 49 regions
         self.i_encoder = SimpleCNNSpatial(output_size=hidden_size)
 
-        # Question encoder giống hệt A/B
+        # Question encoder — identical to A/B
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
                                          hidden_size=hidden_size, num_layers=num_layers)
 
-        # Decoder có attention — nhận thêm img_features mỗi bước
+        # Decoder with attention — receives img_features at every decode step
         self.decoder = LSTMDecoderWithAttention(
             vocab_size=answer_vocab_size,
             embed_size=embed_size,
@@ -167,37 +155,37 @@ class VQAModelC(nn.Module):
 
         returns: logits (batch, max_a_len, answer_vocab_size)
         """
-        # ── Encode image ────────────────────────────────────────────────
-        # Model A/B: (batch, hidden)   ← 1 vector duy nhất
-        # Model C  : (batch, 49, hidden) ← 49 vùng, giữ spatial
+        # ── Encode image ──────────────────────────────────────────
+        # Model A/B: (batch, hidden)      <- single global vector
+        # Model C  : (batch, 49, hidden)  <- 49 spatial regions
         img_features = self.i_encoder(images)  # (batch, 49, hidden_size)
 
-        # Normalize từng vùng (L2 norm theo chiều hidden)
+        # L2 normalize each region independently
         img_features = F.normalize(img_features, p=2, dim=-1)
 
-        # ── Encode question ─────────────────────────────────────────────
+        # ── Encode question ────────────────────────────────────────
         q_feature = self.q_encoder(questions)  # (batch, hidden_size)
 
-        # ── Fusion để khởi tạo h_0 ──────────────────────────────────────
-        # Lấy mean của 49 vùng để tạo 1 vector đại diện cho ảnh
-        # Dùng để khởi tạo h_0 giống A/B — attention sẽ tinh chỉnh sau
+        # ── Build h_0 via fusion ───────────────────────────────────
+        # Mean-pool the 49 regions into one representative image vector
+        # (attention will refine which region to focus on at each decode step)
         img_mean = img_features.mean(dim=1)    # (batch, hidden_size)
         fusion   = hadamard_fusion(img_mean, q_feature)  # (batch, hidden_size)
 
         h_0 = fusion.unsqueeze(0).repeat(self.num_layers, 1, 1)  # (num_layers, batch, hidden)
         c_0 = torch.zeros_like(h_0)
 
-        # ── Decode với attention ─────────────────────────────────────────
-        # Truyền thêm img_features (49 vùng) để decoder attend vào từng bước
+        # ── Decode with attention ──────────────────────────────────
+        # Pass full img_features (49 regions) so attention can attend at each step
         logits = self.decoder((h_0, c_0), img_features, target_seq)
         # (batch, max_a_len, answer_vocab_size)
 
         return logits
 
 
-# Model D: ResNet101 Spatial (pretrained, frozen) + Bahdanau Attention + LSTMDecoder
-# Giống Model C về mọi mặt — chỉ đổi SimpleCNNSpatial → ResNetSpatialEncoder
-# ResNet pretrained → feature chất lượng cao hơn scratch CNN
+# Model D: ResNet101 Spatial (pretrained, frozen) + Bahdanau Attention + LSTM Decoder
+# Same architecture as Model C — only difference: SimpleCNNSpatial -> ResNetSpatialEncoder
+# Pretrained ResNet produces higher-quality features than a scratch CNN
 class VQAModelD(nn.Module):
     def __init__(self, vocab_size, answer_vocab_size,
                  embed_size=512, hidden_size=1024, num_layers=2,
@@ -206,14 +194,14 @@ class VQAModelD(nn.Module):
 
         self.num_layers = num_layers
 
-        # ResNet101 pretrained, bỏ avgpool+fc, giữ spatial (batch, 49, hidden_size)
+        # ResNet101 pretrained, avgpool+fc removed, keeps spatial (batch, 49, hidden_size)
         self.i_encoder = ResNetSpatialEncoder(output_size=hidden_size, freeze=freeze_cnn)
 
-        # Question encoder — giống hệt A/B/C
+        # Question encoder — identical to A/B/C
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
                                          hidden_size=hidden_size, num_layers=num_layers)
 
-        # Decoder với attention — giống hệt Model C
+        # Decoder with attention — identical to Model C
         self.decoder = LSTMDecoderWithAttention(
             vocab_size=answer_vocab_size,
             embed_size=embed_size,
@@ -229,19 +217,19 @@ class VQAModelD(nn.Module):
         target_seq: (batch, max_a_len)
         returns   : logits (batch, max_a_len, answer_vocab_size)
         """
-        # ResNet spatial: (batch, 49, hidden_size) — pretrained features
+        # ResNet spatial: (batch, 49, hidden_size) — high-quality pretrained features
         img_features = self.i_encoder(images)
         img_features = F.normalize(img_features, p=2, dim=-1)
 
         q_feature = self.q_encoder(questions)  # (batch, hidden_size)
 
-        # Mean pool 49 vùng → 1 vector để khởi tạo h_0
+        # Mean-pool 49 regions -> 1 vector to initialize h_0
         img_mean = img_features.mean(dim=1)    # (batch, hidden_size)
         fusion   = hadamard_fusion(img_mean, q_feature)
 
         h_0 = fusion.unsqueeze(0).repeat(self.num_layers, 1, 1)
         c_0 = torch.zeros_like(h_0)
 
-        # Decode với attention — truyền đủ 49 vùng
+        # Decode with attention — pass all 49 regions
         logits = self.decoder((h_0, c_0), img_features, target_seq)
         return logits

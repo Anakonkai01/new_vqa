@@ -60,14 +60,14 @@ class SimpleCNN(nn.Module):
 
     
 
-# SIMPLE CNN — SPATIAL (dùng cho Model C — Attention)
-# Khác SimpleCNN ở chỗ: KHÔNG mean pool về (1,1)
-# Giữ nguyên spatial 7×7 = 49 vùng → decoder có thể attend vào từng vùng
+# SIMPLE CNN — SPATIAL (used for Model C — Attention)
+# Unlike SimpleCNN: does NOT mean-pool to (1,1)
+# Keeps all spatial 7x7 = 49 regions so the decoder can attend over them
 class SimpleCNNSpatial(nn.Module):
     def __init__(self, output_size=1024):
         super().__init__()
 
-        # Giống SimpleCNN — 5 conv_block
+        # Same backbone as SimpleCNN — 5 conv_block layers
         self.features = nn.Sequential(
             conv_block(3, 64),
             conv_block(64, 128),
@@ -76,8 +76,8 @@ class SimpleCNNSpatial(nn.Module):
             conv_block(512, 1024),
         )
 
-        # Project từng vùng: 1024 → output_size
-        # Conv2d(kernel=1) tương đương Linear áp lên từng pixel độc lập
+        # Project each region: 1024 -> output_size
+        # Conv2d(kernel=1) is equivalent to a Linear applied independently to each spatial position
         self.proj = nn.Conv2d(1024, output_size, kernel_size=1)
 
     def forward(self, x):
@@ -85,8 +85,8 @@ class SimpleCNNSpatial(nn.Module):
         out = self.features(x)      # (batch, 1024, 7, 7)
         out = self.proj(out)        # (batch, output_size, 7, 7)
 
-        # Flatten spatial: 7×7 = 49 vùng
-        # permute để đưa spatial về cuối → (batch, 49, output_size)
+        # Flatten spatial: 7x7 = 49 regions
+        # permute to move spatial dim last -> (batch, 49, output_size)
         batch = out.size(0)
         out = out.flatten(2)        # (batch, output_size, 49)
         out = out.permute(0, 2, 1)  # (batch, 49, output_size)
@@ -112,6 +112,26 @@ class ResNetEncoder(nn.Module):
         # project to hidden size, output resnet (2048) -> ( hidden_size)
         self.fc = nn.Linear(2048, output_size)
 
+    def unfreeze_top_layers(self):
+        """
+        Selective fine-tuning: keep early layers frozen (generic features),
+        unfreeze layer3 + layer4 (high-level semantics) + projection fc.
+        ResNet children: 0=conv1 1=bn1 2=relu 3=maxpool 4=layer1 5=layer2
+                         6=layer3 7=layer4 8=avgpool
+        """
+        for param in self.resnet.parameters():
+            param.requires_grad = False          # start with everything frozen
+        for child in list(self.resnet.children())[6:]:  # layer3, layer4, avgpool
+            for param in child.parameters():
+                param.requires_grad = True
+        for param in self.fc.parameters():
+            param.requires_grad = True
+
+    def backbone_params(self):
+        """Return params belonging to the pretrained backbone (for differential LR)."""
+        return [p for child in list(self.resnet.children())[6:]
+                for p in child.parameters() if p.requires_grad]
+
     def forward(self, x):
         # x (batch, 3, 224, 224)
         out = self.resnet(x) # (batch, 2048, 1, 1)
@@ -125,17 +145,17 @@ class ResNetEncoder(nn.Module):
 
 
     
-# ResNet101 Spatial — dùng cho Model D (Pretrained + Attention)
-# Khác ResNetEncoder: KHÔNG dùng avgpool cuối → giữ spatial 7×7=49 vùng
-# ResNet101 gồm: conv1→bn1→relu→maxpool → layer1→2→3→4 → avgpool → fc
-# [:-2] bỏ avgpool VÀ fc → output là feature map (batch, 2048, 7, 7)
+# ResNet101 Spatial — used for Model D (Pretrained + Attention)
+# Unlike ResNetEncoder: does NOT use final avgpool -> keeps spatial 7x7=49 regions
+# ResNet101 structure: conv1->bn1->relu->maxpool -> layer1->2->3->4 -> avgpool -> fc
+# [:-2] removes avgpool AND fc -> output is feature map (batch, 2048, 7, 7)
 class ResNetSpatialEncoder(nn.Module):
     def __init__(self, output_size=1024, freeze=True):
         super().__init__()
 
         resnet = models.resnet101(weights=models.ResNet101_Weights.DEFAULT)
 
-        # Bỏ avgpool và fc (2 layer cuối) → giữ spatial feature map
+        # Remove avgpool and fc (last 2 layers) -> keep spatial feature map
         layers = list(resnet.children())[:-2]  # output: (batch, 2048, 7, 7)
         self.resnet = nn.Sequential(*layers)
 
@@ -143,9 +163,28 @@ class ResNetSpatialEncoder(nn.Module):
             for param in self.resnet.parameters():
                 param.requires_grad = False
 
-        # Project từng vùng: 2048 → output_size
-        # Conv2d(kernel=1) = Linear áp độc lập lên từng trong 49 vùng
+        # Project each region: 2048 -> output_size
+        # Conv2d(kernel=1) = Linear applied independently over each of the 49 regions
         self.proj = nn.Conv2d(2048, output_size, kernel_size=1)
+
+    def unfreeze_top_layers(self):
+        """
+        Selective fine-tuning: freeze early layers, unfreeze layer3 + layer4.
+        ResNet children (without avgpool+fc): 0=conv1 1=bn1 2=relu 3=maxpool
+                                              4=layer1 5=layer2 6=layer3 7=layer4
+        """
+        for param in self.resnet.parameters():
+            param.requires_grad = False
+        for child in list(self.resnet.children())[6:]:  # layer3, layer4
+            for param in child.parameters():
+                param.requires_grad = True
+        for param in self.proj.parameters():
+            param.requires_grad = True
+
+    def backbone_params(self):
+        """Return params belonging to the pretrained backbone (for differential LR)."""
+        return [p for child in list(self.resnet.children())[6:]
+                for p in child.parameters() if p.requires_grad]
 
     def forward(self, x):
         # x: (batch, 3, 224, 224)

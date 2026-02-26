@@ -1,11 +1,11 @@
 """
-visualize.py — Visualize attention heatmap cho Model C và D.
+visualize.py — Visualize attention heatmaps for Model C and D.
 
-Với mỗi token được sinh ra, decoder attention tính alpha (batch, 49) là
-phân phối trọng số trên 49 vùng ảnh (7x7 grid). File này:
-  1. Chạy greedy decode theo từng bước
-  2. Thu alpha tại mỗi bước
-  3. Vẽ heatmap chồng lên ảnh gốc cho từng token
+For each generated token, the decoder attention computes alpha (batch, 49),
+a weight distribution over 49 image regions (7x7 grid). This script:
+  1. Runs greedy decode step by step
+  2. Collects alpha at each step
+  3. Overlays attention heatmaps on the original image for each token
 
 Usage:
     python src/visualize.py --model_type C
@@ -48,7 +48,7 @@ def get_transform():
 
 
 def denormalize(tensor):
-    """Chuyển tensor ảnh đã normalize về [0,1] để hiển thị."""
+    """Convert normalized image tensor back to [0,1] range for display."""
     mean = torch.tensor([0.485, 0.456, 0.406]).view(3, 1, 1)
     std  = torch.tensor([0.229, 0.224, 0.225]).view(3, 1, 1)
     return (tensor * std + mean).clamp(0, 1).permute(1, 2, 0).numpy()
@@ -57,10 +57,10 @@ def denormalize(tensor):
 def decode_with_attention_steps(model, image_tensor, question_tensor,
                                 vocab_a, max_len=20, device='cpu'):
     """
-    Chạy greedy decode từng bước, thu thập alpha (attention weights) tại mỗi bước.
+    Run greedy decode step by step, collecting alpha (attention weights) at each step.
     Returns:
         tokens : list of predicted token strings
-        alphas : list of (49,) numpy arrays — attention map mỗi bước
+        alphas : list of (49,) numpy arrays — attention map per step
     """
     with torch.no_grad():
         img      = image_tensor.unsqueeze(0).to(device)
@@ -102,32 +102,32 @@ def decode_with_attention_steps(model, image_tensor, question_tensor,
 def visualize_attention(model, image_tensor, original_image, question_text,
                         vocab_a, output_path, device='cpu'):
     """
-    Vẽ ảnh gốc + attention heatmap cho từng token được sinh ra.
+    Draw the original image + per-token attention heatmaps.
     """
     tokens, alphas = decode_with_attention_steps(
         model, image_tensor, None, vocab_a, device=device
     )
 
-    # fallback: nếu model không có attention (A/B) thì không visualize
+    # fallback: if model has no attention (A/B), skip visualization
     if not alphas:
-        print("Model này không có attention hoặc không sinh được token nào.")
+        print("This model does not have attention or no tokens were generated.")
         return
 
     n_tokens  = len(tokens)
     img_np    = denormalize(image_tensor)   # (224, 224, 3)
 
-    # 1 cột ảnh gốc + n_tokens cột heatmap
+    # 1 column for original image + n_tokens columns for heatmaps
     n_cols = n_tokens + 1
     fig, axes = plt.subplots(1, n_cols, figsize=(3 * n_cols, 3.5))
 
-    # ảnh gốc
+    # original image
     axes[0].imshow(img_np)
     axes[0].set_title("Original", fontsize=9)
     axes[0].axis('off')
 
-    # heatmap từng bước
+    # per-token heatmaps
     for i, (word, alpha) in enumerate(zip(tokens, alphas)):
-        # alpha: (49,) → reshape (7, 7) → upsample lên (224, 224)
+        # alpha: (49,) -> reshape (7, 7) -> upsample to (224, 224)
         attn_map = alpha.reshape(7, 7)
         attn_map = (attn_map - attn_map.min()) / (attn_map.max() - attn_map.min() + 1e-8)
         attn_up  = np.array(Image.fromarray((attn_map * 255).astype(np.uint8)).resize(
@@ -148,9 +148,9 @@ def visualize_attention(model, image_tensor, original_image, question_text,
     plt.close()
 
 
-# ── patch decode_with_attention_steps để nhận q_tensor ──────────
+# ── wrapper to pass question_tensor into decode_with_attention_steps ─────────
 def _decode_wrapper(model, image_tensor, question_tensor, vocab_a, device='cpu'):
-    """Wrapper khớp với signature trong visualize_attention."""
+    """Wrapper matching the signature expected by visualize_attention."""
     with torch.no_grad():
         img      = image_tensor.unsqueeze(0).to(device)
         question = question_tensor.unsqueeze(0).to(device)
@@ -191,10 +191,10 @@ if __name__ == "__main__":
 
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_type', type=str, default='C', choices=['C', 'D'],
-                        help='Chỉ C và D có attention')
+                        help='Only C and D have attention')
     parser.add_argument('--epoch',      type=int, default=10)
     parser.add_argument('--sample_idx', type=int, default=0,
-                        help='Index của sample trong question JSON')
+                        help='Index of the sample in the question JSON')
     parser.add_argument('--output',     type=str, default=None,
                         help='Output path (default: checkpoints/attn_model_X.png)')
     args = parser.parse_args()
@@ -203,7 +203,7 @@ if __name__ == "__main__":
     checkpoint = f"checkpoints/model_{args.model_type.lower()}_epoch{args.epoch}.pth"
 
     if not os.path.exists(checkpoint):
-        print(f"Checkpoint không tồn tại: {checkpoint}")
+        print(f"Checkpoint not found: {checkpoint}")
         sys.exit(1)
 
     # load vocab
@@ -233,7 +233,7 @@ if __name__ == "__main__":
     tokens, alphas = _decode_wrapper(model, img_tensor, q_tensor, vocab_a, device=DEVICE)
 
     if not alphas:
-        print("Không decode được token nào.")
+        print("No tokens were decoded.")
         sys.exit(1)
 
     img_np    = denormalize(img_tensor)

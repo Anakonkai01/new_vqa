@@ -1,15 +1,15 @@
 """
-plot_curves.py — Đọc history JSON của các model đã train, vẽ training curves.
+plot_curves.py — Read training history JSON files and plot learning curves.
 
-Mỗi lần train, train.py lưu:
+After each training run, train.py saves:
     checkpoints/history_model_a.json
     checkpoints/history_model_b.json
     checkpoints/history_model_c.json
     checkpoints/history_model_d.json
 
 Usage:
-    python src/plot_curves.py                      # vẽ tất cả model có history
-    python src/plot_curves.py --models A,C         # chỉ vẽ A và C
+    python src/plot_curves.py                      # plot all models with history
+    python src/plot_curves.py --models A,C         # plot only A and C
     python src/plot_curves.py --output results/curves.png
 """
 
@@ -18,10 +18,10 @@ import sys
 import json
 import argparse
 import matplotlib
-matplotlib.use('Agg')   # không cần display server (Kaggle/headless)
+matplotlib.use('Agg')   # no display server needed (Kaggle / headless)
 import matplotlib.pyplot as plt
 
-# màu sắc cho 4 model
+# colors for 4 models
 MODEL_COLORS = {'A': '#1f77b4', 'B': '#ff7f0e', 'C': '#2ca02c', 'D': '#d62728'}
 MODEL_LABELS = {
     'A': 'Model A (Scratch, No Attn)',
@@ -61,7 +61,7 @@ def plot_curves(model_types, output_path):
         any_plotted = True
 
     if not any_plotted:
-        print("Không có history file nào được tìm thấy. Hãy train model trước.")
+        print("No history files found. Please train a model first.")
         return
 
     for ax, title in [(ax_train, 'Training Loss'), (ax_val, 'Validation Loss')]:
