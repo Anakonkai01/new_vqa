@@ -123,9 +123,9 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
             logit, hidden, _ = model.decoder.decode_step(tok, hidden, img_features)
             # logit: (B, vocab), hidden: updated (h, c)
         else:
-            emb        = model.decoder.dropout(model.decoder.embedding(tok))  # (B, 1, embed)
-            out, hidden = model.decoder.lstm(emb, hidden)                      # (B, 1, H)
-            logit      = model.decoder.fc(out.squeeze(1))                      # (B, vocab)
+            emb        = model.decoder.embedding(tok)            # (B, 1, embed)
+            out, hidden = model.decoder.lstm(emb, hidden)        # (B, 1, H)
+            logit      = model.decoder.fc(out.squeeze(1))        # (B, vocab)
 
         logits_list.append(logit)
 
