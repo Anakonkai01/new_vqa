@@ -1,9 +1,9 @@
 # VQA System — Software Documentation
 
-**Phiên bản:** 1.0.0  
-**Ngày:** 2026-02-23  
+**Phiên bản:** 2.0.0  
+**Ngày cập nhật:** 2025-06-26  
 **Repository:** https://github.com/Anakonkai01/new_vqa  
-**Branch chính:** `experiment/model-a`
+**Branch:** `main`
 
 ---
 
@@ -15,12 +15,16 @@
 4. [Cài đặt & môi trường](#4-cài-đặt--môi-trường)
 5. [Mô tả dữ liệu](#5-mô-tả-dữ-liệu)
 6. [Mô tả module](#6-mô-tả-module)
-7. [API Reference](#7-api-reference)
-8. [Pipeline thực thi](#8-pipeline-thực-thi)
-9. [Cấu hình hyperparameters](#9-cấu-hình-hyperparameters)
-10. [Hướng dẫn sử dụng](#10-hướng-dẫn-sử-dụng)
-11. [Kết quả đánh giá (template)](#11-kết-quả-đánh-giá-template)
-12. [Ghi chú kỹ thuật](#12-ghi-chú-kỹ-thuật)
+7. [Training Pipeline — 3 Phases](#7-training-pipeline--3-phases)
+8. [Anti-Overfitting](#8-anti-overfitting)
+9. [GPU Optimizations](#9-gpu-optimizations)
+10. [Evaluation & Metrics](#10-evaluation--metrics)
+11. [Inference & Decoding](#11-inference--decoding)
+12. [Google Drive Integration](#12-google-drive-integration)
+13. [CLI Reference](#13-cli-reference)
+14. [API Reference — Tensor Shapes](#14-api-reference--tensor-shapes)
+15. [Checkpoint Strategy](#15-checkpoint-strategy)
+16. [Ghi chú kỹ thuật](#16-ghi-chú-kỹ-thuật)
 
 ---
 
@@ -28,34 +32,55 @@
 
 ### 1.1 Mục tiêu
 
-Hệ thống **Visual Question Answering (VQA)** nhận đầu vào là một ảnh và một câu hỏi tự nhiên, sinh ra câu trả lời dạng văn bản (generative) sử dụng kiến trúc CNN + LSTM-Decoder.
+Hệ thống **Visual Question Answering (VQA)** nhận đầu vào là một ảnh và một câu hỏi tự nhiên, **sinh ra** câu trả lời token-by-token sử dụng kiến trúc CNN Encoder + LSTM Question Encoder + LSTM Decoder (generative approach).
 
 ```
-Input:  [Ảnh] + [Câu hỏi dạng text]
-Output: [Câu trả lời dạng text — sinh ra token-by-token]
+Input:  [Ảnh COCO] + [Câu hỏi tự nhiên]
+Output: [Câu trả lời — sinh ra token-by-token bởi LSTM Decoder]
 ```
 
 ### 1.2 Phạm vi
 
-Dự án triển khai và so sánh **4 biến thể kiến trúc** dựa trên 2 trục:
+Dự án triển khai và **so sánh công bằng** 4 biến thể kiến trúc dựa trên 2 trục:
 
-| Trục | Lựa chọn |
-|------|----------|
-| CNN Image Encoder | Train từ đầu (Scratch) vs Pretrained ResNet101 |
-| Decoder Strategy | Không có Attention vs Có Bahdanau Attention |
+| Trục | Lựa chọn A | Lựa chọn B |
+|------|-----------|-----------|
+| CNN Image Encoder | Train từ đầu (Scratch) | Pretrained ResNet101 |
+| Decoder Strategy | Không có Attention | Có Bahdanau Attention |
 
-### 1.3 Dataset
+### 1.3 4 Kiến trúc
 
-- **Nguồn:** VQA v2 (Visual QA Challenge) — COCO-based
-- **Train set:** `v2_OpenEnded_mscoco_train2014_questions.json` + `v2_mscoco_train2014_annotations.json`
-- **Ảnh:** MS-COCO `train2014` (~82,783 ảnh, ~13GB)
-- **Vocabulary:** Top-K câu trả lời thường gặp nhất
+| Model | Image Encoder | Attention | Decoder |
+|-------|--------------|-----------|---------|
+| **A** | SimpleCNN (scratch, 5 conv blocks) | Không | LSTMDecoder |
+| **B** | ResNet101 (pretrained, frozen→unfreeze) | Không | LSTMDecoder |
+| **C** | SimpleCNNSpatial (scratch, 49 regions) | Bahdanau | LSTMDecoderWithAttention |
+| **D** | ResNetSpatialEncoder (pretrained, 49 regions) | Bahdanau | LSTMDecoderWithAttention |
+
+### 1.4 Dataset
+
+- **Nguồn:** VQA v2.0 (Visual QA Challenge) — MS-COCO based
+- **Train:** ~443K question-answer pairs trên COCO train2014 (~82K ảnh)
+- **Val:** ~214K question-answer pairs trên COCO val2014 (~40K ảnh)
+- **Format:** JSON files cho questions + annotations, JPEG ảnh
+
+### 1.5 Training Strategy
+
+3-phase progressive training, tất cả 4 models cùng điều kiện:
+
+| Phase | Epochs | Kỹ thuật | LR |
+|-------|--------|----------|-----|
+| 1 — Baseline | 10 | Teacher Forcing, ResNet frozen | 1e-3 |
+| 2 — Fine-tune | 5 | Unfreeze ResNet L3+L4 (B/D), continue (A/C) | 5e-4 |
+| 3 — Scheduled Sampling | 5 | Dần thay GT bằng model prediction | 2e-4 |
+
+**Tổng: 20 epochs/model**, batch_size thống nhất xuyên suốt.
 
 ---
 
 ## 2. Kiến trúc hệ thống
 
-### 2.1 Tổng quan pipeline
+### 2.1 Tổng quan Pipeline
 
 ```
 ┌────────────────────────────────────────────────────────────────────┐
@@ -68,59 +93,77 @@ Dự án triển khai và so sánh **4 biến thể kiến trúc** dựa trên 2
 │         │                         │                                │
 │  ┌──────▼───────┐        ┌────────▼─────────┐                     │
 │  │ CNN ENCODER  │        │ QUESTION ENCODER │                     │
-│  │  (A/B/C/D)   │        │  (LSTM Encoder)  │                     │
+│  │ (A/B/C/D)   │        │  (LSTM Encoder)  │                     │
 │  └──────┬───────┘        └────────┬─────────┘                     │
 │         │                         │                                │
-│  No Attn│ (batch, 1024)           │ (batch, 1024)                  │
-│  ───────┼─────────────────────────┤                                │
-│         │          HADAMARD FUSION│= img ⊙ q                      │
-│         │         (batch, 1024)   │                                │
-│         │                         │                                │
-│  Attn   │ (batch, 49, 1024)       │                                │
-│  ───────┼─────────────────────────┤                                │
-│         │      mean(dim=1) → 1024 │                                │
-│         │      HADAMARD FUSION    │                                │
+│      img_feat               q_feat (B, 1024)                      │
 │         │                         │                                │
 │         └──────────┬──────────────┘                                │
-│                    │  (batch, 1024) = initial hidden h_0           │
+│                    │                                               │
+│            HADAMARD FUSION = img ⊙ q                              │
+│                    │                                               │
+│                    │  (B, 1024) → h_0 initial hidden state        │
 │            ┌───────▼────────┐                                      │
-│            │  LSTM DECODER  │ ← teacher forcing during training    │
-│            │  (A/B: no attn)│   autoregressive during inference    │
-│            │  (C/D: + attn) │                                      │
+│            │  LSTM DECODER  │ ← teacher forcing (train)            │
+│            │  A/B: no attn  │   autoregressive  (inference)        │
+│            │  C/D: + attn   │   scheduled sampling (Phase 3)       │
 │            └───────┬────────┘                                      │
 │                    │                                               │
-│            (batch, seq_len, vocab_size)                            │
+│            (B, seq_len, vocab_size)                                │
 │                    │                                               │
 │            ┌───────▼────────┐                                      │
-│            │     OUTPUT     │ = predicted answer tokens            │
+│            │  ANSWER OUTPUT │ = predicted answer tokens            │
 │            └────────────────┘                                      │
 └────────────────────────────────────────────────────────────────────┘
 ```
 
-### 2.2 Chi tiết 4 kiến trúc
+### 2.2 CNN Output Shapes
 
-| Model | Image Encoder | Decoder | CNN Output Shape | Đặc điểm |
-|-------|--------------|---------|-----------------|----------|
-| **A** | `SimpleCNN` (scratch) | `LSTMDecoder` | `(batch, 1024)` | Baseline đơn giản nhất |
-| **B** | `ResNetEncoder` (pretrained, frozen) | `LSTMDecoder` | `(batch, 1024)` | Feature chất lượng cao |
-| **C** | `SimpleCNNSpatial` (scratch) | `LSTMDecoderWithAttention` | `(batch, 49, 1024)` | Học attention từ đầu |
-| **D** | `ResNetSpatialEncoder` (pretrained, frozen) | `LSTMDecoderWithAttention` | `(batch, 49, 1024)` | Mạnh nhất lý thuyết |
+| Model | Encoder | Output Shape | Mô tả |
+|-------|---------|-------------|-------|
+| A | SimpleCNN | `(B, 1024)` | 1 global vector, 5 conv blocks → AdaptiveAvgPool → Linear |
+| B | ResNetEncoder | `(B, 1024)` | ResNet101 `[:-1]` → avgpool → Linear(2048→1024) |
+| C | SimpleCNNSpatial | `(B, 49, 1024)` | 5 conv blocks → Conv2d(k=1) → 7×7=49 regions |
+| D | ResNetSpatialEncoder | `(B, 49, 1024)` | ResNet101 `[:-2]` → Conv2d(k=1) → 49 regions |
 
-### 2.3 Bahdanau Attention (Model C và D)
+### 2.3 Bahdanau Attention (Model C & D)
+
+Tại mỗi decode step `t`:
 
 ```
-Tại mỗi bước decoding t:
+query   = h_t                  (B, hidden)      ← decoder hidden state hiện tại
+keys    = img_features         (B, 49, hidden)   ← 49 vùng ảnh
+values  = img_features         (B, 49, hidden)
 
-  query   = h_t               (batch, hidden_size)    ← hidden state hiện tại
-  keys    = img_features       (batch, 49, hidden_size) ← 49 vùng ảnh
-  values  = img_features       (batch, 49, hidden_size)
+energy  = tanh(W_h(h_t) + W_img(img_features))   → (B, 49, attn_dim)
+scores  = v(energy)                               → (B, 49)
+alpha   = softmax(scores)                         → (B, 49)
+context = Σ(α_i × img_region_i)                   → (B, hidden)
 
-  energy  = tanh(W_h(h_t) + W_img(img_features))     (batch, 49, attn_dim)
-  scores  = v(energy)                                 (batch, 49)
-  alpha   = softmax(scores)                           (batch, 49)
-  context = Σ(alpha_i * img_regions_i)                (batch, hidden_size)
+lstm_input = concat(embed_t, context)             → (B, embed + hidden)
+```
 
-  lstm_input = concat(embed_t, context)               (batch, embed_size + hidden_size)
+`alpha` lưu lại để visualize attention heatmap — reshape `(49,)` → `(7, 7)` → upsample lên ảnh.
+
+### 2.4 Hadamard Fusion
+
+```python
+fusion = img_feature * q_feature   # element-wise multiplication
+```
+
+Kết hợp image và question features. Với attention models (C/D), `img_feature = mean(49 regions)` trước khi fusion.
+
+### 2.5 Teacher Forcing
+
+Trong training, decoder nhận ground-truth token thay vì tự sinh:
+
+```
+answer tensor   : [<start>, w1, w2, w3, <end>]
+
+decoder_input   : answer[:, :-1] = [<start>, w1, w2, w3]
+decoder_target  : answer[:, 1:]  = [w1, w2, w3, <end>]
+
+Loss = CrossEntropy(logits, target), ignore_index=0 (<pad>)
 ```
 
 ---
@@ -132,53 +175,53 @@ vqa_new/
 ├── data/
 │   ├── raw/
 │   │   ├── images/
-│   │   │   └── train2014/               # COCO images (~13GB)
+│   │   │   ├── train2014/                   # COCO train images (~82K ảnh)
+│   │   │   └── val2014/                     # COCO val images (~40K ảnh)
 │   │   └── vqa_json/
 │   │       ├── v2_OpenEnded_mscoco_train2014_questions.json
 │   │       ├── v2_mscoco_train2014_annotations.json
 │   │       ├── v2_OpenEnded_mscoco_val2014_questions.json
 │   │       └── v2_mscoco_val2014_annotations.json
 │   └── processed/
-│       ├── vocab_questions.json         # question vocabulary
-│       └── vocab_answers.json           # answer vocabulary
+│       ├── vocab_questions.json             # question vocabulary
+│       └── vocab_answers.json               # answer vocabulary
 │
-├── checkpoints/                         # saved model weights + history
-│   ├── model_a_epoch{n}.pth
-│   ├── model_b_epoch{n}.pth
-│   ├── model_c_epoch{n}.pth
-│   ├── model_d_epoch{n}.pth
-│   ├── history_model_a.json             # train/val loss per epoch
-│   ├── history_model_b.json
-│   ├── history_model_c.json
-│   ├── history_model_d.json
-│   ├── training_curves.png              # output của plot_curves.py
-│   ├── attn_model_c.png                 # output của visualize.py
-│   └── attn_model_d.png
+├── checkpoints/                             # saved model weights + outputs
+│   ├── model_{a,b,c,d}_resume.pth           # resume checkpoint (overwritten each epoch)
+│   ├── model_{a,b,c,d}_best.pth             # best val loss checkpoint
+│   ├── model_{a,b,c,d}_epoch{10,15,20}.pth  # milestone checkpoints
+│   ├── history_model_{a,b,c,d}.json         # train/val loss per epoch
+│   ├── training_curves.png                  # output of plot_curves.py
+│   ├── attn_model_{c,d}.png                 # attention heatmaps
+│   ├── qualitative_analysis.png             # ví dụ dự đoán đúng/sai
+│   └── error_analysis_by_type.png           # accuracy by question type
 │
 ├── src/
 │   ├── models/
-│   │   ├── encoder_cnn.py               # 4 CNN image encoder classes
-│   │   ├── encoder_question.py          # LSTM question encoder
-│   │   ├── decoder_lstm.py              # LSTM decoder (no attention)
-│   │   ├── decoder_attention.py         # Bahdanau attention + LSTM decoder
-│   │   └── vqa_models.py                # 4 VQA wrapper models (A/B/C/D)
+│   │   ├── encoder_cnn.py                   # SimpleCNN, SimpleCNNSpatial,
+│   │   │                                    # ResNetEncoder, ResNetSpatialEncoder
+│   │   ├── encoder_question.py              # QuestionEncoder (LSTM)
+│   │   ├── decoder_lstm.py                  # LSTMDecoder (no attention) + dropout
+│   │   ├── decoder_attention.py             # BahdanauAttention + LSTMDecoderWithAttention
+│   │   └── vqa_models.py                    # VQAModelA/B/C/D wrappers + hadamard_fusion
 │   ├── scripts/
-│   │   ├── 1_build_vocab.py             # xây dựng vocabulary từ dữ liệu
-│   │   └── 2_extract_features.py        # (optional) pre-extract CNN features
-│   ├── dataset.py                       # VQADatasetA + vqa_collate_fn
-│   ├── vocab.py                         # Vocabulary class
-│   ├── train.py                         # training loop
-│   ├── inference.py                     # greedy decode (test 1 sample)
-│   ├── evaluate.py                      # đánh giá trên val set
-│   ├── compare.py                       # so sánh 4 model cùng lúc
-│   ├── plot_curves.py                   # vẽ training/val loss curves
-│   └── visualize.py                     # attention heatmap cho C/D
+│   │   ├── 1_build_vocab.py                 # build vocab from training data
+│   │   └── 2_extract_features.py            # (optional) pre-extract CNN features
+│   ├── dataset.py                           # VQADataset + vqa_collate_fn + augmentation
+│   ├── vocab.py                             # Vocabulary class (word2idx, idx2word)
+│   ├── train.py                             # 3-phase training loop, SS, resume, anti-overfit
+│   ├── inference.py                         # greedy decode, beam search, batch decode
+│   ├── evaluate.py                          # VQA Accuracy, EM, BLEU-1/2/3/4, METEOR
+│   ├── compare.py                           # side-by-side comparison table
+│   ├── plot_curves.py                       # training/val loss curves
+│   └── visualize.py                         # attention heatmap visualization
 │
-├── create_dummy_data.py                 # tạo dummy data để test pipeline
-├── devlog.md                            # dev log + context cho chat AI
-├── VQA_PROJECT_PLAN.md                  # kế hoạch dự án ban đầu
-├── DOCUMENTATION.md                     # file này
-└── README.md
+├── vqa_colab.ipynb                          # Colab notebook (full pipeline)
+├── create_dummy_data.py                     # dummy data for pipeline testing
+├── DOCUMENTATION.md                         # this file
+├── VQA_PROJECT_PLAN.md                      # project plan
+├── devlog.md                                # development log
+└── README.md                                # assignment requirements
 ```
 
 ---
@@ -187,48 +230,35 @@ vqa_new/
 
 ### 4.1 Yêu cầu hệ thống
 
-| Thành phần | Yêu cầu |
-|------------|---------|
-| Python | 3.9+ |
-| PyTorch | ≥ 1.12 (sm_70+ cho CUDA, hoặc CPU) |
-| RAM | ≥ 8GB |
-| Disk | ≥ 15GB (cho COCO dataset) |
-| GPU (optional) | NVIDIA sm_70+ (Kaggle T4/P100) |
+| Thành phần | Tối thiểu | Khuyến nghị (Colab) |
+|------------|-----------|-------------------|
+| Python | 3.9+ | 3.10+ |
+| PyTorch | ≥ 2.0 | 2.x (CUDA 12+) |
+| GPU | Bất kỳ NVIDIA sm_70+ | A100 / H100 |
+| VRAM | ≥ 8 GB | ≥ 40 GB |
+| Disk | ≥ 20 GB | Colab local + Drive |
 
-> ⚠️ **NVIDIA MX330 (sm_61) không tương thích CUDA với PyTorch ≥ 1.12.** Dùng CPU local hoặc Kaggle/Colab.
-
-### 4.2 Cài đặt dependencies
+### 4.2 Cài đặt
 
 ```bash
-# Tạo conda environment
-conda create -n vqa python=3.9
-conda activate vqa
-
-# PyTorch (CPU)
-pip install torch torchvision
-
-# Các thư viện khác
-pip install nltk matplotlib pillow tqdm
-
-# Download NLTK data (cần cho METEOR metric)
+pip install torch torchvision nltk tqdm matplotlib Pillow
 python -c "import nltk; nltk.download('wordnet'); nltk.download('omw-1.4')"
 ```
 
 ### 4.3 Chuẩn bị dữ liệu
 
-**Option A — Dummy data (test pipeline nhanh):**
+**Trên Google Colab (khuyến nghị):**
 ```bash
-python create_dummy_data.py
-python src/scripts/1_build_vocab.py
-```
+# Clone repo
+git clone https://github.com/Anakonkai01/new_vqa.git && cd new_vqa
 
-**Option B — Real COCO data:**
-```bash
-# Download ảnh (~13GB)
-wget http://images.cocodataset.org/zips/train2014.zip
-unzip train2014.zip -d data/raw/images/
+# Tải data từ Kaggle
+pip install -q kaggle
+kaggle datasets download -d bishoyabdelmassieh/vqa-20-images -p datasets --unzip
+kaggle datasets download -d hongnhnnguyntrn/vqa-2-0-val2014 -p datasets --unzip
+kaggle datasets download -d hongnhnnguyntrn/vqa2-0-data-json -p datasets --unzip
 
-# VQA annotations đặt vào data/raw/vqa_json/
+# Sắp xếp vào cấu trúc project (xem notebook cell chi tiết)
 # Build vocab
 python src/scripts/1_build_vocab.py
 ```
@@ -247,41 +277,38 @@ python src/scripts/1_build_vocab.py
 | `<unk>` | 3 | Token không có trong vocab |
 | word_i | 4+ | Các token thực tế |
 
-Vocab được lưu dưới dạng JSON:
-```json
-{
-  "word2idx": {"<pad>": 0, "<start>": 1, ...},
-  "idx2word": {"0": "<pad>", "1": "<start>", ...}
-}
+**Ngưỡng:**
+- Question vocab: từ xuất hiện ≥ 3 lần
+- Answer vocab: câu trả lời xuất hiện ≥ 5 lần
+
+### 5.2 Dataset Class — `VQADataset`
+
+```python
+VQADataset(image_dir, question_json_path, annotations_json_path,
+           vocab_q, vocab_a, split='train2014', max_samples=None, augment=False)
 ```
 
-### 5.2 Dataset class — `VQADatasetA`
+- Load ảnh on-the-fly (không pre-extract features)
+- `split='train2014'|'val2014'` — xác định prefix filename (`COCO_train2014_...` vs `COCO_val2014_...`)
+- `augment=True`: RandomHorizontalFlip(0.5) + ColorJitter (chỉ dùng cho train)
+- `max_samples`: giới hạn số samples (test pipeline nhanh)
 
 ```
 __getitem__(idx) → (img_tensor, q_tensor, a_tensor)
-  img_tensor : FloatTensor (3, 224, 224) — normalized [0.485,0.456,0.406] ± [0.229,0.224,0.225]
-  q_tensor   : LongTensor  (max_q_len,)  — numericalized question tokens
-  a_tensor   : LongTensor  (max_a_len,)  — [<start>, w1, w2, ..., <end>]
+  img_tensor : FloatTensor (3, 224, 224) — ImageNet normalized
+  q_tensor   : LongTensor  (max_q_len,)
+  a_tensor   : LongTensor  (max_a_len,) — [<start>, w1, ..., <end>]
 ```
 
-### 5.3 Train / Validation Split
+### 5.3 Collate Function
 
-- **Tỉ lệ:** 90% train / 10% validation
-- **Seed:** `manual_seed(42)` — **phải nhất quán** giữa `train.py` và `evaluate.py`
-- **Lý do:** Đảm bảo val set trong evaluate.py chính xác là tập model chưa thấy khi train
+`vqa_collate_fn` xử lý variable-length sequences:
+- Images: `torch.stack` (cùng shape 3×224×224)
+- Questions & Answers: `pad_sequence` với `<pad>=0`
 
-### 5.4 Teacher Forcing
+### 5.4 Train / Val Split
 
-Trong training, decoder nhận ground-truth token thay vì token tự sinh ra:
-
-```
-answer tensor   : [<start>, w1, w2, w3, <end>]
-
-decoder_input   : answer[:, :-1] = [<start>, w1, w2, w3]
-decoder_target  : answer[:, 1:]  = [w1, w2, w3, <end>]
-
-Loss = CrossEntropy(logits vs decoder_target), ignore_index=0
-```
+Sử dụng **official VQA 2.0 train/val split** — COCO train2014 cho training, COCO val2014 cho validation. Không dùng `random_split`.
 
 ---
 
@@ -289,479 +316,476 @@ Loss = CrossEntropy(logits vs decoder_target), ignore_index=0
 
 ### 6.1 `src/models/encoder_cnn.py`
 
-Chứa 4 CNN image encoder classes.
+#### `SimpleCNN` (Model A)
+- 5× `conv_block(Conv2d→BN→ReLU→MaxPool)` → `AdaptiveAvgPool(1)` → `Linear(1024→hidden)`
+- Output: `(B, hidden_size)` — 1 global vector
 
-#### `SimpleCNN`
-- **Mục đích:** Baseline CNN train từ đầu, không dùng pretrained weights
-- **Input:** `(batch, 3, 224, 224)`
-- **Output:** `(batch, output_size)` — 1 vector đại diện cho ảnh
-- **Kiến trúc:** 5× `conv_block(Conv2d → BN → ReLU → MaxPool)` → `AdaptiveAvgPool(1)` → `Linear`
-- **Dùng bởi:** `VQAmodelA`
+#### `SimpleCNNSpatial` (Model C)
+- 5× `conv_block` → `Conv2d(kernel=1)` → flatten → permute
+- Output: `(B, 49, hidden_size)` — 49 spatial regions, không mean pool
 
-#### `SimpleCNNSpatial`
-- **Mục đích:** Giống SimpleCNN nhưng giữ lại 49 vùng spatial cho attention
-- **Input:** `(batch, 3, 224, 224)`
-- **Output:** `(batch, 49, output_size)` — 49 regional feature vectors
-- **Khác SimpleCNN:** Không dùng `AdaptiveAvgPool`, thay bằng `Conv2d(kernel=1)` → `flatten(2)` → `permute`
-- **Dùng bởi:** `VQAModelC`
+#### `ResNetEncoder` (Model B)
+- `ResNet101(pretrained)[:-1]` (bỏ fc, giữ avgpool) → `Linear(2048→hidden)`
+- `freeze=True`: đóng băng ResNet weights
+- `unfreeze_top_layers()`: mở layer3 + layer4 cho Phase 2 fine-tuning
+- `backbone_params()`: trả về params cho differential LR
 
-#### `ResNetEncoder`
-- **Mục đích:** Sử dụng ResNet101 pretrained ImageNet, frozen
-- **Input:** `(batch, 3, 224, 224)`
-- **Output:** `(batch, output_size)`
-- **Kiến trúc:** `ResNet101[:-1]` (bỏ fc, giữ avgpool) → `flatten` → `Linear(2048 → output_size)`
-- **Dùng bởi:** `VQAModelB`
-
-#### `ResNetSpatialEncoder`
-- **Mục đích:** ResNet101 pretrained giữ spatial features
-- **Input:** `(batch, 3, 224, 224)`
-- **Output:** `(batch, 49, output_size)` — 49 pretrained regional features
-- **Kiến trúc:** `ResNet101[:-2]` (bỏ avgpool và fc) → `Conv2d(kernel=1)` → `flatten(2)` → `permute`
-- **Dùng bởi:** `VQAModelD`
-
----
+#### `ResNetSpatialEncoder` (Model D)
+- `ResNet101(pretrained)[:-2]` (bỏ avgpool+fc) → `Conv2d(k=1)` → 49 regions
+- Tương tự `ResNetEncoder` với `unfreeze_top_layers()` và `backbone_params()`
 
 ### 6.2 `src/models/encoder_question.py`
 
 #### `QuestionEncoder`
-- **Mục đích:** Encode câu hỏi thành 1 vector ngữ nghĩa
-- **Input:** `(batch, max_q_len)` — token indices
-- **Output:** `(batch, hidden_size)` — last hidden state của LSTM
-- **Kiến trúc:** `Embedding(vocab_size, embed_size)` → `LSTM(embed_size, hidden_size, num_layers)` → lấy `h_n[-1]`
-- **Dùng bởi:** Tất cả 4 model
-
----
+- `Embedding(vocab_size, embed_size, padding_idx=0)` → `LSTM(num_layers, dropout)` → `h_n[-1]`
+- Output: `(B, hidden_size)` — last hidden state
+- Dùng bởi tất cả 4 models
 
 ### 6.3 `src/models/decoder_lstm.py`
 
-#### `LSTMDecoder`
-- **Mục đích:** LSTM decoder không có attention, dùng teacher forcing
-- **Input:** `(h_0, c_0)`, `target_seq (batch, seq_len)`
-- **Output:** `logits (batch, seq_len, vocab_size)`
-- **Kiến trúc:** `Embedding` → `LSTM` → `Linear(hidden → vocab_size)`
-- **`decode_step(token, hidden)`:** 1 bước autoregressive cho inference, trả về `(logit, hidden_new)`
-- **Dùng bởi:** `VQAmodelA`, `VQAModelB`
-
----
+#### `LSTMDecoder` (Model A & B)
+- `Embedding` → `Dropout(0.5)` → `LSTM(num_layers, dropout)` → `Linear(hidden→vocab)`
+- `forward(encoder_hidden, target_seq)`: teacher forcing, trả về logits
+- `self.dropout`: áp dụng lên embedding output để regularize
+- LSTM inter-layer dropout=0.5 khi num_layers > 1
 
 ### 6.4 `src/models/decoder_attention.py`
 
 #### `BahdanauAttention`
-- **Mục đích:** Tính attention weights giữa decoder hidden state và 49 image regions
-- **Input:** `hidden (batch, hidden_size)`, `img_features (batch, 49, hidden_size)`
-- **Output:** `context (batch, hidden_size)`, `alpha (batch, 49)`
-- **Công thức:**
-  ```
-  energy = tanh(W_h(hidden) + W_img(img_features))   → (batch, 49, attn_dim)
-  alpha  = softmax(v(energy), dim=1)                  → (batch, 49)
-  context = sum(alpha.unsqueeze(2) * img_features, dim=1)
-  ```
+- `W_h(hidden)` + `W_img(img_features)` → tanh → `v` → softmax → context
+- Output: `(context, alpha)` — alpha dùng cho visualization
 
-#### `LSTMDecoderWithAttention`
-- **Mục đích:** LSTM decoder kết hợp Bahdanau Attention
-- **Khác LSTMDecoder:** LSTM `input_size = embed_size + hidden_size` (ghép embedding với context vector)
-- **`forward(encoder_hidden, img_features, target_seq)`:** Teacher forcing, trả về `logits`
-- **`decode_step(token, hidden, img_features)`:** 1 bước autoregressive, trả về `(logit, hidden_new, alpha)`
-  - `alpha` dùng để visualize attention heatmap
-- **Dùng bởi:** `VQAModelC`, `VQAModelD`
-
----
+#### `LSTMDecoderWithAttention` (Model C & D)
+- LSTM `input_size = embed_size + hidden_size` (concat embedding + attention context)
+- `forward(encoder_hidden, img_features, target_seq)`: teacher forcing
+- `decode_step(token, hidden, img_features)`: 1 step autoregressive, trả về `(logit, hidden, alpha)`
+- Dropout áp dụng cho embedding
 
 ### 6.5 `src/models/vqa_models.py`
 
-Wrapper kết hợp encoders + decoder thành end-to-end model.
+4 wrapper classes kết hợp encoders + decoder:
 
-#### `hadamard_fusion(img_feature, q_feature)`
-```python
-return img_feature * q_feature   # element-wise multiplication
-```
-Dùng để kết hợp image và question features thành initial hidden state.
+| Class | Components | Forward |
+|-------|-----------|---------|
+| `VQAModelA` | SimpleCNN + QuestionEncoder + LSTMDecoder | img→fusion→decode |
+| `VQAModelB` | ResNetEncoder + QuestionEncoder + LSTMDecoder | img→fusion→decode |
+| `VQAModelC` | SimpleCNNSpatial + QuestionEncoder + LSTMDecoderWithAttention | img(49)→fusion→decode+attn |
+| `VQAModelD` | ResNetSpatialEncoder + QuestionEncoder + LSTMDecoderWithAttention | img(49)→fusion→decode+attn |
 
-#### `VQAmodelA` / `VQAModelB` / `VQAModelC` / `VQAModelD`
-**Chung cho tất cả:**
-- **`__init__`:** khởi tạo `i_encoder`, `q_encoder`, `decoder`
-- **`forward(images, questions, target_seq)`:** training forward pass
-- **`num_layers`:** stored để tạo `h_0` đúng shape
-
-**Riêng cho C/D:** truyền thêm `img_features (batch, 49, hidden)` vào decoder mỗi bước
-
----
+Tất cả:
+- L2 normalize image features: `F.normalize(feat, p=2, dim=...)`
+- Hadamard fusion: `fusion = img_feat * q_feat`
+- `h_0 = fusion.unsqueeze(0).repeat(num_layers, 1, 1)`, `c_0 = zeros_like(h_0)`
 
 ### 6.6 `src/dataset.py`
 
-#### `VQADatasetA`
-```python
-VQADatasetA(image_dir, question_json_path, annotations_json_path, vocab_q, vocab_a)
-```
-- Load ảnh on-the-fly (không pre-extract)
-- Transform: `Resize(224,224)` → `ToTensor()` → `Normalize(ImageNet mean/std)`
-- Answer tokenization: `[<start>] + tokens + [<end>]`
-
-#### `vqa_collate_fn`
-- Xử lý variable-length sequences trong một batch
-- Pad questions và answers về cùng độ dài với `<pad>=0`
-- Trả về `(imgs, questions, answers)` tensors
-
----
+Đã mô tả ở §5. Augmentation transforms:
+- `augment=False`: Resize(224) → ToTensor → Normalize
+- `augment=True`: Resize(224) → RandomHorizontalFlip(0.5) → ColorJitter(0.2, 0.2, 0.2, 0.05) → ToTensor → Normalize
 
 ### 6.7 `src/vocab.py`
 
-#### `Vocabulary`
 ```python
-vocab.word2idx     # dict: word → index
-vocab.idx2word     # dict: index → word
-vocab.numericalize(text)  # str → List[int]
-vocab.save(path)          # lưu JSON
-vocab.load(path)          # load JSON
+vocab = Vocabulary()
+vocab.word2idx      # dict: word → index
+vocab.idx2word      # dict: index → word
+vocab.numericalize(text)  # "what color" → [4, 5]
+vocab.save(path)    # lưu JSON
+vocab.load(path)    # load JSON
 ```
 
 ---
 
-### 6.8 `src/train.py`
+## 7. Training Pipeline — 3 Phases
 
-**Config (đầu file):**
-```python
-MODEL_TYPE = 'A'    # thay đổi để train model khác: 'B', 'C', 'D'
-BATCH_SIZE = 32
-EPOCHS = 10
-LEARNING_RATE = 1e-3
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-```
+### 7.1 Phase 1 — Baseline (10 epochs)
 
-**Factory function:**
-```python
-def get_model(model_type, vocab_q_size, vocab_a_size) → nn.Module
-```
-
-**Outputs:**
-- `checkpoints/model_{type}_epoch{n}.pth` — model weights sau mỗi epoch
-- `checkpoints/history_model_{type}.json` — `{"train_loss": [...], "val_loss": [...]}`, cập nhật sau mỗi epoch
-
----
-
-### 6.9 `src/inference.py`
-
-```python
-greedy_decode(model, img_tensor, q_tensor, vocab_a, max_len=20, device='cpu')
-# → str  (dùng cho Model A, B)
-
-greedy_decode_with_attention(model, img_tensor, q_tensor, vocab_a, max_len=20, device='cpu')
-# → str  (dùng cho Model C, D)
-
-get_model(model_type, vocab_q_size, vocab_a_size)
-# → nn.Module  (factory, dùng chung với evaluate/compare)
-```
-
----
-
-### 6.10 `src/evaluate.py`
+**Mục tiêu:** Decoder + Question Encoder hội tụ trước.
 
 ```bash
-python src/evaluate.py --model_type A
-python src/evaluate.py --model_type C --checkpoint checkpoints/model_c_epoch5.pth
-python src/evaluate.py --model_type B --num_samples 200
+python src/train.py --model A --epochs 10 --lr 1e-3 --batch_size 256 \
+    --num_workers 8 --augment --weight_decay 1e-5 --early_stopping 3
 ```
 
-**Metrics:**
-| Metric | Mô tả |
-|--------|-------|
-| Exact Match | % câu trả lời khớp hoàn toàn với ground truth |
-| BLEU-1 | Unigram precision |
-| BLEU-2 | Bigram precision |
-| BLEU-3 | Trigram precision |
-| BLEU-4 | 4-gram precision (metric chính cho text generation) |
-| METEOR | Xét synonym + stemming, tốt hơn BLEU về ngữ nghĩa |
+- Teacher forcing thuần (pure)
+- ResNet **frozen** cho Model B, D
+- Tất cả 4 models cùng điều kiện → controlled experiment
 
-Hàm `evaluate()` trả về dict kết quả — dùng được từ `compare.py`.
+### 7.2 Phase 2 — Fine-tune / Continue (5 epochs)
 
----
-
-### 6.11 `src/compare.py`
+**Mục tiêu:** Adapt pretrained features cho VQA domain.
 
 ```bash
-python src/compare.py                        # cả 4 model, epoch 10
-python src/compare.py --epoch 5
-python src/compare.py --models A,C --num_samples 100
+# Model A, C (continue training, LR giảm)
+python src/train.py --model A --epochs 5 --lr 5e-4 --batch_size 256 \
+    --resume checkpoints/model_a_resume.pth --augment --weight_decay 1e-5 --early_stopping 3
+
+# Model B, D (unfreeze ResNet layer3+layer4, differential LR)
+python src/train.py --model B --epochs 5 --lr 5e-4 --batch_size 256 \
+    --resume checkpoints/model_b_resume.pth --finetune_cnn --cnn_lr_factor 0.1 \
+    --augment --weight_decay 1e-5 --early_stopping 3
 ```
 
-**Output mẫu:**
-```
-Model     Exact Match     BLEU-1  Checkpoint
-----------------------------------------------------------------------
-A          72.30%        0.7412  checkpoints/model_a_epoch10.pth
-B          79.15%        0.8103  checkpoints/model_b_epoch10.pth
-C          74.80%        0.7680  checkpoints/model_c_epoch10.pth
-D          83.42%        0.8560  checkpoints/model_d_epoch10.pth
-```
-Model thiếu checkpoint → tự động SKIP, không crash.
+**Differential LR (Model B, D):**
+- Backbone (layer3+4): `lr × 0.1 = 5e-5` — giữ pretrained knowledge
+- Head (decoder + Q-Encoder): `lr = 5e-4` — adapt nhanh hơn
 
----
+### 7.3 Phase 3 — Scheduled Sampling (5 epochs)
 
-### 6.12 `src/plot_curves.py`
+**Mục tiêu:** Giảm exposure bias.
 
 ```bash
-python src/plot_curves.py                    # vẽ cả 4 model
-python src/plot_curves.py --models A,C
-python src/plot_curves.py --output results/curves.png
+python src/train.py --model A --epochs 5 --lr 2e-4 --batch_size 256 \
+    --resume checkpoints/model_a_resume.pth \
+    --scheduled_sampling --ss_k 5 --augment --weight_decay 1e-5 --early_stopping 3
 ```
 
-- Đọc `checkpoints/history_model_*.json`
-- Vẽ 2 subplot: Training Loss | Validation Loss
-- Lưu ảnh PNG, không cần display server (`matplotlib.use('Agg')`)
+**Cơ chế Scheduled Sampling:**
+- Mỗi decode step, xác suất `ε` dùng GT token, `(1-ε)` dùng model prediction
+- ε decay theo inverse-sigmoid: `ε(epoch) = k / (k + exp(epoch/k))`
+- `ss_k=5`: tốc độ decay vừa phải, bắt đầu ~1.0 → giảm dần
 
----
+### 7.4 Resume Logic
 
-### 6.13 `src/visualize.py`
+`--resume checkpoints/model_X_resume.pth` khôi phục:
+- Model weights
+- Optimizer state (nếu param groups khớp)
+- Scheduler state
+- GradScaler state
+- Epoch counter + best val loss + training history
+
+**Phase transition (Phase 1→2):** Optimizer layout thay đổi (frozen→unfreeze thêm param group) → tự động dùng fresh optimizer với LR mới từ CLI args. Không crash.
+
+### 7.5 So sánh sau mỗi Phase
 
 ```bash
-python src/visualize.py --model_type C               # sample đầu tiên
-python src/visualize.py --model_type D --epoch 5
-python src/visualize.py --model_type C --sample_idx 10 --output results/attn.png
+python src/compare.py --models A,B,C,D --epoch 10   # Phase 1
+python src/compare.py --models A,B,C,D --epoch 15   # Phase 2
+python src/compare.py --models A,B,C,D --epoch 20   # Phase 3 (final)
 ```
-
-- Chỉ dùng cho Model C và D (có attention)
-- Mỗi token được sinh ra → 1 panel gồm ảnh gốc + heatmap `alpha` (jet colormap)
-- `alpha (49,)` reshape thành `(7, 7)` → upsample về `(224, 224)` → overlay
 
 ---
 
-## 7. API Reference
+## 8. Anti-Overfitting
 
-### 7.1 Tensor shapes tổng hợp
+| Kỹ thuật | Cách hoạt động | CLI flag |
+|----------|---------------|----------|
+| **Data Augmentation** | RandomHorizontalFlip + ColorJitter | `--augment` |
+| **Weight Decay** | L2 regularization trên model params | `--weight_decay 1e-5` |
+| **Early Stopping** | Dừng nếu val loss không cải thiện N epochs | `--early_stopping 3` |
+| **Embedding Dropout** | Dropout(0.5) sau embedding layer (cả 2 decoder) | Built-in |
+| **LSTM Dropout** | Inter-layer dropout=0.5 (khi num_layers > 1) | Built-in |
+| **Gradient Clipping** | `clip_grad_norm_(max_norm=5.0)` | Built-in |
+| **LR Scheduling** | ReduceLROnPlateau (factor=0.5, patience=2) | Built-in |
 
-| Tensor | Shape | Ý nghĩa |
+**Early Stopping behavior:** Khi trigger, tự động copy `model_best.pth` → `model_X_epoch{target}.pth` để `compare.py` luôn tìm được checkpoint.
+
+---
+
+## 9. GPU Optimizations
+
+Code tự động detect và áp dụng:
+
+| Optimization | Điều kiện | Hiệu quả |
+|---|---|---|
+| `cudnn.benchmark = True` | CUDA available | Auto-tune conv algorithms |
+| TF32 matmul + conv | Ampere+ (A100, H100...) | ~2× faster, near-FP32 accuracy |
+| BFloat16 AMP | `compute_capability >= 8.0` | Wider dynamic range, no GradScaler needed |
+| Float16 AMP + GradScaler | Older GPUs | Fallback mixed precision |
+| Fused Adam | PyTorch 2.0+ & CUDA | ~10-20% faster optimizer step |
+| `pin_memory=True` | CUDA available | Faster CPU→GPU transfer |
+| `persistent_workers=True` | num_workers > 0 | Avoid worker respawn overhead |
+| `prefetch_factor=4` | num_workers > 0 | Pre-load next batches |
+
+---
+
+## 10. Evaluation & Metrics
+
+### 10.1 Metrics
+
+| Metric | Mô tả | Ý nghĩa |
 |--------|-------|---------|
-| `images` | `(B, 3, 224, 224)` | Batch ảnh đã normalize |
-| `questions` | `(B, Q)` | Question token indices |
-| `answers` | `(B, A)` | Answer token indices, bắt đầu `<start>`, kết thúc `<end>` |
+| **VQA Accuracy** | `min(matching_annotations / 3, 1.0)` | Official VQA challenge metric. So sánh prediction với 10 human answers, cho phép partial credit |
+| **Exact Match** | prediction == ground truth (strict) | Binary, không partial credit |
+| **BLEU-1** | Unigram precision | Đo word overlap |
+| **BLEU-2** | Bigram precision | Đo phrase overlap |
+| **BLEU-3** | Trigram precision | Đo longer phrase |
+| **BLEU-4** | 4-gram precision | Standard NLG metric |
+| **METEOR** | Synonym-aware matching + stemming | Hiểu ngữ nghĩa tốt hơn BLEU |
+
+### 10.2 Evaluate từng model
+
+```bash
+python src/evaluate.py --model_type A --checkpoint checkpoints/model_a_best.pth
+python src/evaluate.py --model_type D --beam_width 3   # beam search
+```
+
+### 10.3 So sánh 4 models
+
+```bash
+python src/compare.py --models A,B,C,D --epoch 20
+python src/compare.py --beam_width 3  # với beam search
+```
+
+**Fallback:** Nếu `model_X_epoch{N}.pth` không tồn tại (early stopping), tự động dùng `model_X_best.pth`.
+
+---
+
+## 11. Inference & Decoding
+
+### 11.1 Greedy Decode
+
+Chọn token xác suất cao nhất tại mỗi step. Nhanh nhưng có thể sub-optimal.
+
+```python
+# Model A/B (no attention)
+greedy_decode(model, img_tensor, q_tensor, vocab_a, max_len=20, device='cpu')
+
+# Model C/D (with attention)
+greedy_decode_with_attention(model, img_tensor, q_tensor, vocab_a, max_len=20, device='cpu')
+```
+
+### 11.2 Beam Search
+
+Giữ top-k candidates tại mỗi step, trả về sequence có log-probability/length cao nhất.
+
+```python
+beam_search_decode(model, img_tensor, q_tensor, vocab_a, beam_width=5)
+beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a, beam_width=5)
+```
+
+### 11.3 Batch Decode
+
+Batch wrappers cho evaluation pipeline:
+
+```python
+batch_greedy_decode(model, imgs, qs, vocab_a, device)
+batch_greedy_decode_with_attention(model, imgs, qs, vocab_a, device)
+batch_beam_search_decode(model, imgs, qs, vocab_a, beam_width=5)
+batch_beam_search_decode_with_attention(model, imgs, qs, vocab_a, beam_width=5)
+```
+
+---
+
+## 12. Google Drive Integration
+
+Notebook `vqa_colab.ipynb` tự động sync kết quả lên Google Drive:
+
+### 12.1 Cấu trúc Drive
+
+```
+MyDrive/VQA_Project/
+├── checkpoints/   # resume, best, milestone checkpoints + history JSON
+├── vocab/         # vocab_questions.json, vocab_answers.json
+└── outputs/       # training_curves.png, attention maps, analysis plots
+```
+
+### 12.2 Sync Points
+
+| Thời điểm | Dữ liệu | Mục đích |
+|-----------|---------|---------|
+| Sau Build Vocab | vocab JSON files | Khôi phục vocab khi restart |
+| Sau Phase 1 | resume + best + epoch10 + history | Resume Phase 2 |
+| Sau Phase 2 | resume + best + epoch15 + history | Resume Phase 3 |
+| Sau Phase 3 | resume + best + epoch20 + history | Final results |
+| Sau Plot Curves | training_curves.png | Lưu output |
+| Sau Attention Viz | attn_model_*.png | Lưu output |
+| Sau Analysis | qualitative + error analysis | Lưu output |
+
+### 12.3 Restore khi Runtime Restart
+
+```python
+# Chạy cell restore trong notebook
+restore_from_drive('checkpoints', 'checkpoints')
+restore_from_drive('vocab', 'data/processed')
+```
+
+---
+
+## 13. CLI Reference
+
+### 13.1 `train.py`
+
+```
+python src/train.py [OPTIONS]
+
+Options:
+  --model {A,B,C,D}        Model architecture (default: A)
+  --epochs N               Number of training epochs (default: 10)
+  --lr FLOAT               Learning rate (default: 1e-3)
+  --batch_size N           Batch size (default: 128)
+  --num_workers N          DataLoader workers (default: 4)
+  --resume PATH            Resume from checkpoint
+  --scheduled_sampling     Enable Scheduled Sampling
+  --ss_k FLOAT             SS inverse-sigmoid decay speed (default: 5.0)
+  --finetune_cnn           Unfreeze ResNet layer3+4 (B/D only)
+  --cnn_lr_factor FLOAT    Backbone LR multiplier (default: 0.1)
+  --weight_decay FLOAT     L2 regularization (default: 1e-5)
+  --early_stopping N       Patience epochs (0=disabled)
+  --augment                Enable data augmentation
+```
+
+### 13.2 `evaluate.py`
+
+```
+python src/evaluate.py [OPTIONS]
+
+Options:
+  --model_type {A,B,C,D}   Model architecture
+  --checkpoint PATH        Checkpoint path (default: model_X_epoch10.pth)
+  --num_samples N          Limit samples for speed
+  --beam_width N           Beam search width (default: 1 = greedy)
+```
+
+### 13.3 `compare.py`
+
+```
+python src/compare.py [OPTIONS]
+
+Options:
+  --epoch N                Epoch checkpoint to load (default: 10)
+  --models STR             Comma-separated model list (default: A,B,C,D)
+  --num_samples N          Limit samples
+  --beam_width N           Beam search width (default: 1)
+```
+
+### 13.4 `plot_curves.py`
+
+```
+python src/plot_curves.py [OPTIONS]
+
+Options:
+  --models STR             Models to plot (default: A,B,C,D)
+  --output PATH            Output image path
+```
+
+### 13.5 `visualize.py`
+
+```
+python src/visualize.py [OPTIONS]
+
+Options:
+  --model_type {C,D}       Model with attention
+  --epoch N                Checkpoint epoch
+  --sample_idx N           Sample index (default: 0)
+  --output PATH            Output image path
+```
+
+---
+
+## 14. API Reference — Tensor Shapes
+
+| Tensor | Shape | Mô tả |
+|--------|-------|-------|
+| `images` | `(B, 3, 224, 224)` | Batch ảnh, ImageNet normalized |
+| `questions` | `(B, Q)` | Question token indices, padded |
+| `answers` | `(B, A)` | Answer tokens `[<start>, ..., <end>]`, padded |
 | `decoder_input` | `(B, A-1)` | `answer[:, :-1]` |
 | `decoder_target` | `(B, A-1)` | `answer[:, 1:]` |
-| `img_feat_flat` | `(B, 1024)` | CNN output không spatial (Model A/B) |
-| `img_feat_spatial` | `(B, 49, 1024)` | CNN output giữ spatial (Model C/D) |
-| `q_feat` | `(B, 1024)` | LSTM question encoder output |
-| `fusion` | `(B, 1024)` | Hadamard product `img ⊙ q` |
+| `img_feat` (A/B) | `(B, 1024)` | Global image vector |
+| `img_features` (C/D) | `(B, 49, 1024)` | Spatial regions |
+| `q_feat` | `(B, 1024)` | Question feature |
+| `fusion` | `(B, 1024)` | `img_feat ⊙ q_feat` |
 | `h_0, c_0` | `(num_layers, B, 1024)` | Initial decoder state |
 | `logits` | `(B, seq_len, vocab_size)` | Decoder output |
-| `alpha` | `(B, 49)` | Attention weights (C/D only) |
-| `context` | `(B, 1024)` | Weighted sum qua 49 vùng |
+| `alpha` | `(B, 49)` | Attention weights (C/D) |
+| `context` | `(B, 1024)` | Weighted sum of 49 regions |
 
-### 7.2 Loss function
+### Loss Computation
 
 ```python
-criterion = nn.CrossEntropyLoss(ignore_index=0)
+criterion = nn.CrossEntropyLoss(ignore_index=0)  # ignore <pad>
 
-# Reshape 3D → 2D trước khi tính loss:
 loss = criterion(
-    logits.view(-1, vocab_size),               # (B * seq_len, vocab_size)
-    decoder_target.contiguous().view(-1)        # (B * seq_len,)
+    logits.view(-1, vocab_size),             # (B*seq_len, vocab_size)
+    decoder_target.contiguous().view(-1)     # (B*seq_len,)
 )
 ```
 
-`ignore_index=0` → không tính gradient tại vị trí `<pad>`.
+---
+
+## 15. Checkpoint Strategy
+
+### 15.1 Storage-Efficient Design
+
+Tránh tràn bộ nhớ Drive (15GB free) bằng chiến lược tiết kiệm:
+
+| Checkpoint | Tần suất | Ghi đè? | Mục đích |
+|-----------|---------|---------|---------|
+| `model_X_resume.pth` | Mỗi epoch | Có | Resume training sau disconnect |
+| `model_X_best.pth` | Khi val loss cải thiện | Có | Best model cho evaluation |
+| `model_X_epoch{10,15,20}.pth` | Milestone epochs only | Không | Cho `compare.py` |
+
+### 15.2 Resume Checkpoint Contents
+
+```python
+{
+    'epoch': int,                    # last completed epoch
+    'model_state_dict': dict,        # model weights
+    'optimizer_state_dict': dict,    # optimizer state
+    'scheduler_state_dict': dict,    # LR scheduler state
+    'scaler_state_dict': dict,       # AMP GradScaler state
+    'best_val_loss': float,          # best val loss so far
+    'history': {                     # training history
+        'train_loss': [float, ...],
+        'val_loss': [float, ...]
+    }
+}
+```
+
+### 15.3 Early Stopping + Milestone
+
+Khi early stopping trigger trước milestone epoch:
+1. `train.py` copy `model_best.pth` → `model_X_epoch{target}.pth`
+2. `compare.py` fallback: nếu epoch-specific không có → dùng `model_best.pth`
 
 ---
 
-## 8. Pipeline thực thi
+## 16. Ghi chú kỹ thuật
 
-### 8.1 Training
+### 16.1 Quy ước đặt tên
 
+| Đối tượng | Convention | Ví dụ |
+|-----------|-----------|-------|
+| Model class | PascalCase | `VQAModelA`, `VQAModelD` |
+| Checkpoint file | `model_{a,b,c,d}_{type}.pth` | `model_a_best.pth` |
+| History file | `history_model_{a,b,c,d}.json` | `history_model_a.json` |
+| Encoder file | `encoder_{type}.py` | `encoder_cnn.py` |
+
+### 16.2 Image Normalization
+
+```python
+transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ```
-1. Load vocab_q, vocab_a từ JSON
-2. Khởi tạo VQADatasetA
-3. random_split 90/10 với manual_seed(42)
-4. Tạo DataLoader (train + val)
-5. Khởi tạo model = get_model(MODEL_TYPE, ...)
-6. Khởi tạo Adam optimizer + CrossEntropyLoss(ignore_index=0)
-7. Với mỗi epoch:
-   a. model.train()
-   b. Với mỗi batch:
-      - Forward: logits = model(imgs, questions, answer[:, :-1])
-      - Loss: CE(logits.view(-1,V), answer[:,1:].view(-1))
-      - Backward + clip_grad_norm_(max_norm=5.0)
-      - optimizer.step()
-   c. model.eval() + torch.no_grad()
-   d. Tính val_loss tương tự trên val_loader
-   e. In "Epoch N | Train Loss | Val Loss"
-   f. torch.save(checkpoint)
-   g. json.dump(history)  ← sau mỗi epoch
-```
+ImageNet statistics — bắt buộc cho cả pretrained ResNet lẫn scratch CNN (consistency).
 
-### 8.2 Inference (greedy decode)
+### 16.3 L2 Feature Normalization
 
-```
-Model A/B:
-  1. img_feat = i_encoder(img)              (1, 1024)
-  2. q_feat   = q_encoder(q)               (1, 1024)
-  3. fusion   = img_feat * q_feat          (1, 1024)
-  4. h_0 = fusion.unsqueeze(0).repeat(L,1,1)
-  5. token = <start>
-  6. Loop:
-     embed        = embedding(token)
-     output, h    = lstm(embed, hidden)
-     logit        = fc(output.squeeze(1))
-     pred         = argmax(logit)
-     if pred == <end>: break
-     append pred → result
-  7. return id2word(result)
+```python
+# Model A/B: normalize global vector
+img_feature = F.normalize(img_feature, p=2, dim=1)
 
-Model C/D: (thêm attention mỗi bước)
-  1. img_feat   = i_encoder(img)            (1, 49, 1024)
-  2. q_feat     = q_encoder(q)             (1, 1024)
-  3. img_mean   = img_feat.mean(dim=1)     (1, 1024)
-  4. fusion     = img_mean * q_feat
-  5. h_0 = fusion.unsqueeze(0).repeat(L,1,1)
-  6. Loop:
-     logit, hidden, alpha = decoder.decode_step(token, hidden, img_feat)
-     pred = argmax(logit)
-     if pred == <end>: break
-     append pred → result
-  7. return id2word(result)
+# Model C/D: normalize each spatial region independently
+img_features = F.normalize(img_features, p=2, dim=-1)
 ```
 
----
+Loại bỏ ảnh hưởng magnitude, chỉ giữ hướng vector → Hadamard fusion ổn định hơn.
 
-## 9. Cấu hình hyperparameters
+### 16.4 Scheduled Sampling — ss_forward()
 
-| Hyperparameter | Giá trị | Mô tả |
-|----------------|---------|-------|
-| `embed_size` | 512 | Embedding dimension (câu hỏi + câu trả lời) |
-| `hidden_size` | 1024 | LSTM hidden dimension, cũng là output size của CNN encoder |
-| `num_layers` | 2 | Số lớp LSTM trong encoder và decoder |
-| `attn_dim` | 512 | Attention projection dimension (C/D only) |
-| `BATCH_SIZE` | 32 | Số samples mỗi batch |
-| `EPOCHS` | 10 | Số epoch training |
-| `LEARNING_RATE` | 1e-3 | Adam learning rate |
-| `max_norm` | 5.0 | Gradient clipping threshold |
-| `SPLIT_SEED` | 42 | Random seed cho train/val split |
-| `VAL_RATIO` | 0.1 | Tỉ lệ validation set |
-| `freeze_cnn` | `True` | Có freeze ResNet101 weights không (B/D) |
-| `max_len` | 20 | Số token tối đa khi inference |
+`ss_forward()` trong `train.py` bypass `model.forward()`, trực tiếp gọi encoders và decoder step-by-step. Mỗi step:
+- Với xác suất ε: dùng GT token (teacher forcing)
+- Với xác suất 1-ε: dùng `argmax(logit).detach()` (model prediction)
 
----
+Model A/B: gọi `model.decoder.dropout(model.decoder.embedding(tok))` + `model.decoder.lstm()` + `model.decoder.fc()`  
+Model C/D: gọi `model.decoder.decode_step(tok, hidden, img_features)`
 
-## 10. Hướng dẫn sử dụng
-
-### 10.1 Train một model
-
-```bash
-# 1. Sửa MODEL_TYPE trong src/train.py
-# MODEL_TYPE = 'A'   hoặc 'B', 'C', 'D'
-
-# 2. Chạy training
-python src/train.py
-
-# Output:
-# checkpoints/model_a_epoch1.pth ... model_a_epoch10.pth
-# checkpoints/history_model_a.json
-```
-
-### 10.2 Đánh giá một model
-
-```bash
-python src/evaluate.py --model_type A
-# hoặc chỉ định checkpoint cụ thể:
-python src/evaluate.py --model_type C --checkpoint checkpoints/model_c_epoch5.pth
-# chỉ chạy N samples:
-python src/evaluate.py --model_type B --num_samples 100
-```
-
-### 10.3 So sánh tất cả model
-
-```bash
-python src/compare.py
-# Kết quả: bảng Exact Match + BLEU-1 cho từng model
-```
-
-### 10.4 Vẽ training curves
-
-```bash
-python src/plot_curves.py
-# Lưu vào: checkpoints/training_curves.png
-```
-
-### 10.5 Visualize attention (C/D)
-
-```bash
-python src/visualize.py --model_type C
-python src/visualize.py --model_type D --sample_idx 5
-# Lưu vào: checkpoints/attn_model_c.png
-```
-
-### 10.6 Test inference thủ công
-
-```bash
-# Sửa MODEL_TYPE trong src/inference.py rồi chạy:
-python src/inference.py
-# Output: Question / Predicted answer
-```
-
-### 10.7 Workflow Kaggle (full)
-
-```bash
-# Terminal Kaggle:
-git clone https://github.com/Anakonkai01/new_vqa && cd new_vqa
-pip install torch torchvision nltk matplotlib pillow tqdm
-python -c "import nltk; nltk.download('wordnet'); nltk.download('omw-1.4')"
-python create_dummy_data.py          # hoặc dùng real data
-python src/scripts/1_build_vocab.py
-
-# Train 4 model (đổi MODEL_TYPE rồi chạy từng cái):
-# MODEL_TYPE = 'A' → python src/train.py
-# MODEL_TYPE = 'B' → python src/train.py
-# MODEL_TYPE = 'C' → python src/train.py
-# MODEL_TYPE = 'D' → python src/train.py
-
-# Download thư mục checkpoints/ về local, rồi:
-python src/compare.py
-python src/plot_curves.py
-python src/visualize.py --model_type C
-python src/visualize.py --model_type D
-```
-
----
-
-## 11. Kết quả đánh giá (template)
-
-Điền sau khi train xong trên Kaggle:
-
-| Model | Exact Match | BLEU-1 | BLEU-2 | BLEU-3 | BLEU-4 | METEOR | Train Time |
-|-------|:-----------:|:------:|:------:|:------:|:------:|:------:|:----------:|
-| A — Scratch, No Attn | — | — | — | — | — | — | — |
-| B — Pretrained, No Attn | — | — | — | — | — | — | — |
-| C — Scratch, Attn | — | — | — | — | — | — | — |
-| D — Pretrained, Attn | — | — | — | — | — | — | — |
-
-**Kết quả dự kiến:** D > B > C > A (pretrained features > scratch; attention > no attention)
-
----
-
-## 12. Ghi chú kỹ thuật
-
-### Những lỗi đã gặp và cách fix
+### 16.5 Các lỗi đã gặp và fix
 
 | Lỗi | Nguyên nhân | Fix |
 |-----|-------------|-----|
-| `size mismatch` khi load checkpoint | Vocab size thay đổi giữa 2 lần train | Retrain từ đầu sau khi rebuild vocab |
-| `CUDA error: no kernel image` | MX330 sm_61 < sm_70 yêu cầu | `DEVICE = torch.device('cpu')` |
-| `ValueError: ResNet101_Weights("Default")` | Không thể khởi tạo enum bằng string | Dùng `ResNet101_Weights.DEFAULT` |
-| `RuntimeError: ...contiguous` | Tensor slice cần `.contiguous()` trước `.view()` | `decoder_target.contiguous().view(-1)` |
-
-### Quy ước đặt tên
-
-- Class: `VQAmodelA` (chữ **m thường**) — tên cũ, **không đổi** để tránh break code
-- File: `encoder_question.py` (không có 's') — tên file thực tế
-- Checkpoint: `model_{a/b/c/d}_epoch{n}.pth`
-- History: `history_model_{a/b/c/d}.json`
-
-### Normalization
-
-- Image features: `F.normalize(feat, p=2, dim=1)` (flat) hoặc `dim=-1` (spatial)
-- Lý do: loại bỏ ảnh hưởng của magnitude, chỉ giữ hướng vector → fusion ổn định hơn
-
-### `matplotlib.use('Agg')`
-
-Đặt ở đầu `plot_curves.py` và `visualize.py` → không cần X11/display server, chạy được trên Kaggle và headless server.
-
-### History JSON — tại sao ghi sau mỗi epoch
-
-Training trên Kaggle có thể bị ngắt bất cứ lúc nào (timeout, quota). Ghi JSON sau mỗi epoch đảm bảo dữ liệu không mất dù training không hoàn thành đủ 10 epoch.
+| `ValueError: different number of parameter groups` | Phase 1→2 optimizer layout thay đổi (freeze→unfreeze) | Compare group counts, skip optimizer restore khi khác |
+| `AttributeError: 'LSTMDecoder' has no attribute 'dropout'` | ss_forward gọi dropout chưa có | Thêm `self.dropout = nn.Dropout(0.5)` vào LSTMDecoder |
+| Val loss tăng sau epoch 11 | Overfitting | 4 regularization techniques (augment, weight_decay, early_stopping, dropout) |
+| Drive tràn 15GB | Per-epoch checkpoints quá nhiều | Milestone-only saving (epochs 10, 15, 20) |
+| Early stopping → compare.py SKIP | Milestone checkpoint chưa được tạo | Copy best→milestone khi early stop + fallback trong compare.py |
