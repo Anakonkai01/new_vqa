@@ -54,6 +54,18 @@ def _supports_bf16():
     return torch.cuda.get_device_capability()[0] >= 8
 
 
+def _fused_adam_available():
+    """Check if fused Adam is available (CUDA + PyTorch >= 2.0)."""
+    if not torch.cuda.is_available():
+        return False
+    try:
+        # fused=True requires CUDA tensors and PyTorch 2.0+
+        optim.Adam([torch.zeros(1, device='cuda')], fused=True)
+        return True
+    except Exception:
+        return False
+
+
 def get_model(model_type, vocab_q_size, vocab_a_size):
     """Factory function: return the model corresponding to model_type."""
     if model_type == 'A':
@@ -232,11 +244,12 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         optimizer = optim.Adam([
             {'params': other_params,    'lr': lr},
             {'params': backbone_params, 'lr': lr * cnn_lr_factor},
-        ], weight_decay=weight_decay)
+        ], weight_decay=weight_decay, fused=_fused_adam_available())
         print(f"CNN fine-tuning  : ON | backbone LR = {lr * cnn_lr_factor:.2e}  other LR = {lr:.2e}")
         print(f"  trainable backbone params : {sum(p.numel() for p in backbone_params):,}")
     else:
-        optimizer = optim.Adam(params=model.parameters(), lr=lr, weight_decay=weight_decay)
+        optimizer = optim.Adam(params=model.parameters(), lr=lr, weight_decay=weight_decay,
+                               fused=_fused_adam_available())
 
     if weight_decay > 0:
         print(f"Weight decay     : {weight_decay:.1e}")
