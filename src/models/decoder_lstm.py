@@ -31,6 +31,7 @@ class LSTMDecoder(nn.Module):
         super().__init__()
 
         self.embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=embed_size, padding_idx=0)
+        self.dropout   = nn.Dropout(dropout)
 
         self.lstm = nn.LSTM(
             input_size=embed_size, 
@@ -55,7 +56,7 @@ class LSTMDecoder(nn.Module):
         logits (batch, max_len, vocab_size)
         """
 
-        embeds = self.embedding(target_seq)
+        embeds = self.dropout(self.embedding(target_seq))
         # embeds (batch, maxlen, embed_size)
 
         # use encoder_hidden to be initial state of lstm 

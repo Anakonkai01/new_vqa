@@ -123,7 +123,7 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
             logit, hidden, _ = model.decoder.decode_step(tok, hidden, img_features)
             # logit: (B, vocab), hidden: updated (h, c)
         else:
-            emb        = model.decoder.embedding(tok)            # (B, 1, embed)
+            emb        = model.decoder.dropout(model.decoder.embedding(tok)) # (B, 1, embed)
             out, hidden = model.decoder.lstm(emb, hidden)        # (B, 1, H)
             logit      = model.decoder.fc(out.squeeze(1))        # (B, vocab)
 
@@ -160,7 +160,8 @@ MAX_VAL_SAMPLES   = None
 def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           scheduled_sampling=False, ss_k=5,
           finetune_cnn=False, cnn_lr_factor=0.1,
-          num_workers=4):
+          num_workers=4, weight_decay=1e-5,
+          early_stopping_patience=0, augment=False):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -173,7 +174,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         vocab_q=vocab_q,
         vocab_a=vocab_a,
         split='train2014',
-        max_samples=MAX_TRAIN_SAMPLES
+        max_samples=MAX_TRAIN_SAMPLES,
+        augment=augment
     )
 
     val_dataset = VQADataset(
@@ -230,11 +232,14 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         optimizer = optim.Adam([
             {'params': other_params,    'lr': lr},
             {'params': backbone_params, 'lr': lr * cnn_lr_factor},
-        ])
+        ], weight_decay=weight_decay)
         print(f"CNN fine-tuning  : ON | backbone LR = {lr * cnn_lr_factor:.2e}  other LR = {lr:.2e}")
         print(f"  trainable backbone params : {sum(p.numel() for p in backbone_params):,}")
     else:
-        optimizer = optim.Adam(params=model.parameters(), lr=lr)
+        optimizer = optim.Adam(params=model.parameters(), lr=lr, weight_decay=weight_decay)
+
+    if weight_decay > 0:
+        print(f"Weight decay     : {weight_decay:.1e}")
 
     # Halve LR when val loss stops improving for 2 consecutive epochs
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
@@ -287,6 +292,11 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         print(f"  Resumed at epoch {start_epoch} | best_val_loss: {best_val_loss:.4f}")
 
     print(f"Model: {model_type} | Device: {DEVICE}")
+    if augment:
+        print("Data augmentation: ON (RandomHorizontalFlip + ColorJitter)")
+    if early_stopping_patience > 0:
+        print(f"Early stopping   : patience={early_stopping_patience}")
+    es_counter = 0  # early stopping counter
     if scheduled_sampling:
         print(f"Scheduled Sampling: ON | k={ss_k} (epsilon decays from "
               f"{ss_k/(ss_k+math.exp(0/ss_k)):.2f} to "
@@ -388,8 +398,16 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         # Save best checkpoint separately
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
+            es_counter = 0
             torch.save(model.state_dict(), f"checkpoints/model_{model_type.lower()}_best.pth")
             print(f"  -> New best val loss: {best_val_loss:.4f}. Saved best checkpoint.")
+        else:
+            es_counter += 1
+            if early_stopping_patience > 0:
+                print(f"  Val loss did not improve ({es_counter}/{early_stopping_patience})")
+                if es_counter >= early_stopping_patience:
+                    print(f"  Early stopping triggered after {epoch+1} epochs.")
+                    break
 
 
 if __name__ == "__main__":
@@ -414,12 +432,19 @@ if __name__ == "__main__":
                         help='LR multiplier for backbone params when fine-tuning (default: 0.1)')
     parser.add_argument('--num_workers', type=int, default=4,
                         help='DataLoader worker processes (default: 4, recommend 8 for A100)')
+    parser.add_argument('--weight_decay', type=float, default=1e-5,
+                        help='L2 regularization weight decay (default: 1e-5)')
+    parser.add_argument('--early_stopping', type=int, default=0,
+                        help='Stop if val loss does not improve for N epochs (0=disabled)')
+    parser.add_argument('--augment', action='store_true',
+                        help='Enable image data augmentation (RandomHorizontalFlip + ColorJitter)')
     args = parser.parse_args()
     train(model_type=args.model, epochs=args.epochs, lr=args.lr,
           batch_size=args.batch_size, resume=args.resume,
           scheduled_sampling=args.scheduled_sampling, ss_k=args.ss_k,
           finetune_cnn=args.finetune_cnn, cnn_lr_factor=args.cnn_lr_factor,
-          num_workers=args.num_workers)
+          num_workers=args.num_workers, weight_decay=args.weight_decay,
+          early_stopping_patience=args.early_stopping, augment=args.augment)
         
         
         

@@ -42,25 +42,41 @@ def vqa_collate_fn(batch):
 class VQADataset(Dataset):
     def __init__(self, image_dir, question_json_path,
                  annotations_json_path, vocab_q, vocab_a,
-                 split='train2014', max_samples=None):
+                 split='train2014', max_samples=None,
+                 augment=False):
         """
         split      : 'train2014' or 'val2014' — used to construct the correct image filename
         max_samples: limit the number of samples (useful for quick pipeline testing)
+        augment    : if True, apply data augmentation (train only — NOT for val/test)
         """
         self.image_dir = image_dir
         self.vocab_q   = vocab_q
         self.vocab_a   = vocab_a
         self.split     = split        # 'train2014' | 'val2014'
 
-        # transform: resize to 224, normalize according imagenet 
-        self.transform = transforms.Compose([
-            transforms.Resize((224, 224)), 
-            transforms.ToTensor(),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            )
-        ])
+        # Data augmentation: mild transforms that don't change the answer
+        # (e.g. horizontal flip is OK, but vertical flip would be unnatural)
+        if augment:
+            self.transform = transforms.Compose([
+                transforms.Resize((224, 224)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2,
+                                       saturation=0.2, hue=0.05),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225]
+                )
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(
+                    mean=[0.485, 0.456, 0.406],
+                    std=[0.229, 0.224, 0.225]
+                )
+            ])
 
         # load questions
         with open(question_json_path, 'r') as f:
