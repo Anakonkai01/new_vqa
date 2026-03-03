@@ -28,12 +28,12 @@ from torchvision import transforms
 sys.path.append(os.path.dirname(__file__))
 from vocab import Vocabulary
 from inference import get_model, greedy_decode
-from models.vqa_models import hadamard_fusion
+from models.vqa_models import _build_h0
 
 # ── Config ───────────────────────────────────────────────────────
 DEVICE          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-IMAGE_DIR       = "data/raw/images/train2014"
-QUESTION_JSON   = "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
+IMAGE_DIR       = "data/train2014/train2014"
+QUESTION_JSON   = "data/vqa_data_json/v2_Questions_Train_mscoco/v2_OpenEnded_mscoco_train2014_questions.json"
 VOCAB_Q_PATH    = "data/processed/vocab_questions.json"
 VOCAB_A_PATH    = "data/processed/vocab_answers.json"
 
@@ -66,14 +66,13 @@ def decode_with_attention_steps(model, image_tensor, question_tensor,
         img      = image_tensor.unsqueeze(0).to(device)
         question = question_tensor.unsqueeze(0).to(device)
 
-        img_features  = model.i_encoder(img)                   # (1, 49, 1024)
-        img_features  = F.normalize(img_features, p=2, dim=-1)
-        question_feat = model.q_encoder(question)              # (1, 1024)
+        img_features  = F.normalize(model.i_encoder(img), p=2, dim=-1)   # (1, 49, 1024)
+        q_feat        = F.normalize(model.q_encoder(question), p=2, dim=1) # (1, 1024)
 
         img_mean = img_features.mean(dim=1)                    # (1, 1024)
-        fusion   = hadamard_fusion(img_mean, question_feat)    # (1, 1024)
+        fusion   = model.fusion(img_mean, q_feat)              # GatedFusion + LayerNorm
 
-        h_0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)
+        h_0 = _build_h0(fusion, model.num_layers)
         c_0 = torch.zeros_like(h_0)
         hidden = (h_0, c_0)
 
@@ -155,14 +154,13 @@ def _decode_wrapper(model, image_tensor, question_tensor, vocab_a, device='cpu')
         img      = image_tensor.unsqueeze(0).to(device)
         question = question_tensor.unsqueeze(0).to(device)
 
-        img_features  = model.i_encoder(img)
-        img_features  = F.normalize(img_features, p=2, dim=-1)
-        question_feat = model.q_encoder(question)
+        img_features  = F.normalize(model.i_encoder(img), p=2, dim=-1)   # (1, 49, 1024)
+        q_feat        = F.normalize(model.q_encoder(question), p=2, dim=1) # (1, 1024)
 
         img_mean = img_features.mean(dim=1)
-        fusion   = hadamard_fusion(img_mean, question_feat)
+        fusion   = model.fusion(img_mean, q_feat)              # GatedFusion + LayerNorm
 
-        h_0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)
+        h_0 = _build_h0(fusion, model.num_layers)
         c_0 = torch.zeros_like(h_0)
         hidden = (h_0, c_0)
 

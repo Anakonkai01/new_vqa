@@ -3,18 +3,24 @@ Wrapper model:
   CNN Encoder      -> img_feature  (batch, hidden_size)
   Question Encoder -> q_feature    (batch, hidden_size)
            |
-      FUSION = img_feature * q_feature  (Hadamard element-wise product)
+      FUSION = GatedFusion(img_feature, q_feature)  + LayerNorm
            |
-      Create initial hidden state for Decoder
+      Create initial hidden state for Decoder (layer 0 only)
            |
   LSTM Decoder -> logits  (batch, seq_len, vocab_size)
+
+Changes vs original:
+  - hadamard_fusion() replaced by GatedFusion (learned soft gate + LayerNorm)
+  - q_feature L2-normalized before fusion (same scale as img_feature)
+  - h_0: only layer 0 receives fusion signal; upper layers start from zeros
+  - dropout parameter forwarded from CLI down to decoders
 """
 
 
 import torch
-import torch.nn as nn 
-import torch.nn.functional as F 
-import sys, os 
+import torch.nn as nn
+import torch.nn.functional as F
+import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
 from models.encoder_cnn import SimpleCNN, ResNetEncoder, SimpleCNNSpatial, ResNetSpatialEncoder
@@ -23,213 +29,175 @@ from models.decoder_lstm import LSTMDecoder
 from models.decoder_attention import LSTMDecoderWithAttention
 
 
-
-
-
-
-
-# FUSION 
-# Hadamard fusion 
+# ── Legacy Hadamard fusion (kept for reference / backward compat) ──────────
 def hadamard_fusion(img_feature, q_feature):
     return img_feature * q_feature
 
 
+# ── Gated Fusion (replaces Hadamard in all 4 models) ──────────────────────
+class GatedFusion(nn.Module):
+    """
+    Learned soft gate between image and question features.
+
+    Instead of element-wise multiply (Hadamard), a sigmoid gate decides how
+    much of each modality to let through:
+        g       = sigmoid( W([img; q]) )       gate ∈ (0, 1)^H
+        out     = g * img + (1-g) * q          weighted blend
+        fusion  = LayerNorm(out)               stabilise h_0 magnitude
+
+    LayerNorm ensures the resulting h_0 fed to the LSTM decoder has
+    unit-ish variance regardless of encoder output scale.
+    """
+
+    def __init__(self, hidden_size):
+        super().__init__()
+        self.gate = nn.Linear(hidden_size * 2, hidden_size)
+        self.norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, img_feat, q_feat):
+        combined = torch.cat([img_feat, q_feat], dim=1)   # (B, 2H)
+        g = torch.sigmoid(self.gate(combined))             # (B, H)
+        out = g * img_feat + (1 - g) * q_feat             # (B, H)
+        return self.norm(out)                              # (B, H)
 
 
+# ── Shared helper: build h_0 so only layer 0 gets the fusion signal ────────
+def _build_h0(fusion, num_layers):
+    """
+    layer 0  = fusion vector (carries image+question information)
+    layer 1+ = zeros         (free to develop its own representation)
+    """
+    h0 = torch.zeros(num_layers, fusion.size(0), fusion.size(1), device=fusion.device)
+    h0[0] = fusion
+    return h0
 
 
-# Model A: no attention + scratch CNN
+# ── Model A: no attention + scratch CNN ───────────────────────────────────
 class VQAModelA(nn.Module):
     def __init__(self, vocab_size, answer_vocab_size,
-                 embed_size=512, hidden_size=1024, num_layers=2):
+                 embed_size=512, hidden_size=1024, num_layers=2, dropout=0.3):
         super().__init__()
 
-        self.num_layers = num_layers 
-        
-        # Initialize image encoder, question encoder, and decoder
+        self.num_layers = num_layers
+
         self.i_encoder = SimpleCNN(output_size=hidden_size)
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
                                          hidden_size=hidden_size, num_layers=num_layers)
+        self.fusion  = GatedFusion(hidden_size)
         self.decoder = LSTMDecoder(vocab_size=answer_vocab_size, embed_size=embed_size,
-                                   hidden_size=hidden_size, num_layers=num_layers)
-
+                                   hidden_size=hidden_size, num_layers=num_layers,
+                                   dropout=dropout)
 
     def forward(self, images, questions, target_seq):
-        """  
-        images: (batch, 3, 224, 224) 
-        question: (batch, max_q_len)
-        target_seq: (batch, max_a_len) - answer token (teacher forcing)
+        img_feature = F.normalize(self.i_encoder(images), p=2, dim=1)   # (B, H)
+        q_feature   = F.normalize(self.q_encoder(questions), p=2, dim=1) # (B, H)
 
-        return: logits (batch, max_a_len, answer_vocab_size)
-        """
+        fusion = self.fusion(img_feature, q_feature)   # (B, H)
 
-        # encode image
-        img_feature = self.i_encoder(images)  # (batch, hidden_size)
-        img_feature = F.normalize(img_feature, p=2, dim=1)  # L2 normalize: direction matters, not magnitude
+        h_0 = _build_h0(fusion, self.num_layers)
+        c_0 = torch.zeros_like(h_0)
 
-        # encode question
-        q_feature = self.q_encoder(questions)  # (batch, hidden_size)
-
-        # Hadamard fusion
-        fusion = hadamard_fusion(img_feature, q_feature)
-
-        # Create initial hidden state for decoder.
-        # LSTM expects (h_0, c_0) tuple, each shape (num_layers, batch, hidden_size)
-        h_0 = fusion.unsqueeze(0)
-        h_0 = h_0.repeat(self.num_layers, 1, 1)
-        c_0 = torch.zeros_like(h_0)  # zero-init cell state (standard practice)
-
-        # decode
         logits = self.decoder((h_0, c_0), target_seq)
-        # (batch, max_a_len, answer_a_vocab_size)
-        
         return logits
 
-    
-    
-    
-# Model B: ResNet101 + no attention
+
+# ── Model B: ResNet101 (pretrained, frozen) + no attention ────────────────
 class VQAModelB(nn.Module):
     def __init__(self, vocab_size, answer_vocab_size,
-                 embed_size=512, hidden_size=1024, num_layers=2, freeze=True):
+                 embed_size=512, hidden_size=1024, num_layers=2,
+                 freeze=True, dropout=0.3):
         super().__init__()
 
-        self.num_layers = num_layers  # stored for use when building initial hidden state
-        
+        self.num_layers = num_layers
+
         self.i_encoder = ResNetEncoder(output_size=hidden_size, freeze=freeze)
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
                                          hidden_size=hidden_size, num_layers=num_layers)
-
+        self.fusion  = GatedFusion(hidden_size)
         self.decoder = LSTMDecoder(vocab_size=answer_vocab_size, embed_size=embed_size,
-                                   hidden_size=hidden_size, num_layers=num_layers)
+                                   hidden_size=hidden_size, num_layers=num_layers,
+                                   dropout=dropout)
 
-    
     def forward(self, images, questions, target_seq):
-        # encode
-        img_feature = self.i_encoder(images) # (batch, 1024)
-        img_feature = F.normalize(img_feature, p=2, dim=1) # (batch, 1024)
-        
-        question_feature = self.q_encoder(questions) # (batch, 1024)
+        img_feature = F.normalize(self.i_encoder(images), p=2, dim=1)
+        q_feature   = F.normalize(self.q_encoder(questions), p=2, dim=1)
 
-        fusion = hadamard_fusion(img_feature, question_feature)
+        fusion = self.fusion(img_feature, q_feature)
 
-        # decode 
-        h_0 = fusion.unsqueeze(0).repeat(self.num_layers, 1, 1)
+        h_0 = _build_h0(fusion, self.num_layers)
         c_0 = torch.zeros_like(h_0)
 
-        logits = self.decoder((h_0, c_0), target_seq) # (batch, max_seq, answer_vocab_size)
-
+        logits = self.decoder((h_0, c_0), target_seq)
         return logits
 
 
-# Model C: SimpleCNN Spatial + Bahdanau Attention + LSTM Decoder
+# ── Model C: SimpleCNN Spatial + Bahdanau Attention ───────────────────────
 class VQAModelC(nn.Module):
     def __init__(self, vocab_size, answer_vocab_size,
-                 embed_size=512, hidden_size=1024, num_layers=2, attn_dim=512):
+                 embed_size=512, hidden_size=1024, num_layers=2,
+                 attn_dim=512, dropout=0.3):
         super().__init__()
 
         self.num_layers = num_layers
 
-        # CNN preserves spatial 7x7=49 regions -> output (batch, 49, hidden_size)
-        # Unlike Model A: no mean pool; decoder attends over all 49 regions
         self.i_encoder = SimpleCNNSpatial(output_size=hidden_size)
-
-        # Question encoder — identical to A/B
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
                                          hidden_size=hidden_size, num_layers=num_layers)
-
-        # Decoder with attention — receives img_features at every decode step
+        self.fusion  = GatedFusion(hidden_size)
         self.decoder = LSTMDecoderWithAttention(
             vocab_size=answer_vocab_size,
             embed_size=embed_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
-            attn_dim=attn_dim
+            attn_dim=attn_dim,
+            dropout=dropout
         )
 
     def forward(self, images, questions, target_seq):
-        """
-        images    : (batch, 3, 224, 224)
-        questions : (batch, max_q_len)
-        target_seq: (batch, max_a_len) — teacher forcing input
+        img_features = F.normalize(self.i_encoder(images), p=2, dim=-1)  # (B, 49, H)
+        q_feature    = F.normalize(self.q_encoder(questions), p=2, dim=1) # (B, H)
 
-        returns: logits (batch, max_a_len, answer_vocab_size)
-        """
-        # ── Encode image ──────────────────────────────────────────
-        # Model A/B: (batch, hidden)      <- single global vector
-        # Model C  : (batch, 49, hidden)  <- 49 spatial regions
-        img_features = self.i_encoder(images)  # (batch, 49, hidden_size)
+        img_mean = img_features.mean(dim=1)                               # (B, H)
+        fusion   = self.fusion(img_mean, q_feature)                       # (B, H)
 
-        # L2 normalize each region independently
-        img_features = F.normalize(img_features, p=2, dim=-1)
-
-        # ── Encode question ────────────────────────────────────────
-        q_feature = self.q_encoder(questions)  # (batch, hidden_size)
-
-        # ── Build h_0 via fusion ───────────────────────────────────
-        # Mean-pool the 49 regions into one representative image vector
-        # (attention will refine which region to focus on at each decode step)
-        img_mean = img_features.mean(dim=1)    # (batch, hidden_size)
-        fusion   = hadamard_fusion(img_mean, q_feature)  # (batch, hidden_size)
-
-        h_0 = fusion.unsqueeze(0).repeat(self.num_layers, 1, 1)  # (num_layers, batch, hidden)
+        h_0 = _build_h0(fusion, self.num_layers)
         c_0 = torch.zeros_like(h_0)
 
-        # ── Decode with attention ──────────────────────────────────
-        # Pass full img_features (49 regions) so attention can attend at each step
         logits = self.decoder((h_0, c_0), img_features, target_seq)
-        # (batch, max_a_len, answer_vocab_size)
-
         return logits
 
 
-# Model D: ResNet101 Spatial (pretrained, frozen) + Bahdanau Attention + LSTM Decoder
-# Same architecture as Model C — only difference: SimpleCNNSpatial -> ResNetSpatialEncoder
-# Pretrained ResNet produces higher-quality features than a scratch CNN
+# ── Model D: ResNet101 Spatial (pretrained, frozen) + Bahdanau Attention ──
 class VQAModelD(nn.Module):
     def __init__(self, vocab_size, answer_vocab_size,
                  embed_size=512, hidden_size=1024, num_layers=2,
-                 attn_dim=512, freeze_cnn=True):
+                 attn_dim=512, freeze_cnn=True, dropout=0.3):
         super().__init__()
 
         self.num_layers = num_layers
 
-        # ResNet101 pretrained, avgpool+fc removed, keeps spatial (batch, 49, hidden_size)
         self.i_encoder = ResNetSpatialEncoder(output_size=hidden_size, freeze=freeze_cnn)
-
-        # Question encoder — identical to A/B/C
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
                                          hidden_size=hidden_size, num_layers=num_layers)
-
-        # Decoder with attention — identical to Model C
+        self.fusion  = GatedFusion(hidden_size)
         self.decoder = LSTMDecoderWithAttention(
             vocab_size=answer_vocab_size,
             embed_size=embed_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
-            attn_dim=attn_dim
+            attn_dim=attn_dim,
+            dropout=dropout
         )
 
     def forward(self, images, questions, target_seq):
-        """
-        images    : (batch, 3, 224, 224)
-        questions : (batch, max_q_len)
-        target_seq: (batch, max_a_len)
-        returns   : logits (batch, max_a_len, answer_vocab_size)
-        """
-        # ResNet spatial: (batch, 49, hidden_size) — high-quality pretrained features
-        img_features = self.i_encoder(images)
-        img_features = F.normalize(img_features, p=2, dim=-1)
+        img_features = F.normalize(self.i_encoder(images), p=2, dim=-1)  # (B, 49, H)
+        q_feature    = F.normalize(self.q_encoder(questions), p=2, dim=1) # (B, H)
 
-        q_feature = self.q_encoder(questions)  # (batch, hidden_size)
+        img_mean = img_features.mean(dim=1)
+        fusion   = self.fusion(img_mean, q_feature)
 
-        # Mean-pool 49 regions -> 1 vector to initialize h_0
-        img_mean = img_features.mean(dim=1)    # (batch, hidden_size)
-        fusion   = hadamard_fusion(img_mean, q_feature)
-
-        h_0 = fusion.unsqueeze(0).repeat(self.num_layers, 1, 1)
+        h_0 = _build_h0(fusion, self.num_layers)
         c_0 = torch.zeros_like(h_0)
 
-        # Decode with attention — pass all 49 regions
         logits = self.decoder((h_0, c_0), img_features, target_seq)
         return logits

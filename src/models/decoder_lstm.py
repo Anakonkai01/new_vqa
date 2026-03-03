@@ -27,7 +27,7 @@ import torch.nn as nn
 
 
 class LSTMDecoder(nn.Module):
-    def __init__(self, vocab_size, embed_size, hidden_size, num_layers, dropout=0.5):
+    def __init__(self, vocab_size, embed_size, hidden_size, num_layers, dropout=0.3):
         super().__init__()
 
         self.embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=embed_size, padding_idx=0)

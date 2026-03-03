@@ -114,7 +114,7 @@ class LSTMDecoderWithAttention(nn.Module):
     """
 
     def __init__(self, vocab_size, embed_size, hidden_size, num_layers,
-                 attn_dim=512, dropout=0.5):
+                 attn_dim=512, dropout=0.3):
         super().__init__()
 
         self.hidden_size = hidden_size

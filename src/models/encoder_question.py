@@ -1,58 +1,77 @@
 import torch
-import torch.nn as nn 
+import torch.nn as nn
+import torch.nn.functional as F
 
 
-"""  
+"""
 input: (batch, max_len)
 embedding: (batch, max_len, embed_size)
 LSTM: (batch, max_len, hidden_size)
-output: hidden[-1] (batch, hidden_size)
+
+Attention Pooling (thay vì chỉ lấy hidden[-1]):
+  - Score mỗi token: attn(output) → (batch, max_len)
+  - Mask <pad> tokens (index 0) → -inf trước softmax
+  - alpha = softmax(scores) → (batch, max_len)
+  - q_feature = sum(alpha * output) → (batch, hidden_size)
+
+Lợi ích: tổng hợp toàn bộ question tokens thay vì chỉ token cuối,
+giúp encoder nắm bắt thông tin từ tất cả từ trong câu hỏi.
 """
+
 
 class QuestionEncoder(nn.Module):
     def __init__(self, vocab_size, embed_size, hidden_size, num_layers, dropout=0.5):
         super().__init__()
 
-        # embedding: convert token indices to vector embedding 
-        # ex: token 42 -> vector [0.1, -0.3, ..., embedding_size]
         self.embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=embed_size, padding_idx=0)
-        
-        # lstm 
+
         self.lstm = nn.LSTM(
-            input_size=embed_size, 
+            input_size=embed_size,
             hidden_size=hidden_size,
             num_layers=num_layers,
-            batch_first=True, 
+            batch_first=True,
             dropout=dropout if num_layers > 1 else 0
         )
-        
+
+        # Attention: score each token position → weighted sum over all tokens
+        self.attn = nn.Linear(hidden_size, 1)
+
     def forward(self, questions):
-        # question (batch, max_len) 
-        # 1. embeding 
+        # questions: (batch, max_len)
+
+        # 1. embedding
         embeds = self.embedding(questions)
-        # embes (batch, maxlen, embed_size)
+        # embeds: (batch, max_len, embed_size)
 
-        # 2. lstm 
+        # 2. lstm — output contains hidden state at every position
         output, (hidden, cell) = self.lstm(embeds)
-        # output: all hidden state of last layers (batch, max_len, hidden_size)
-        # hidden: last hidden state of each layers (num_layers, batch, hidden_size)
-        # cell: last cell state each layers (num_layers, batch, hidden_size)
+        # output: (batch, max_len, hidden_size) — all positions
+        # hidden: (num_layers, batch, hidden_size)
 
-        # 3. take hidden state of last layer 
-        q_feature = hidden[-1]
-        # (batch, hidden_size)
+        # 3. attention pooling over all token positions
+        scores = self.attn(output).squeeze(-1)          # (batch, max_len)
+
+        # mask <pad> tokens (index 0) to prevent them from contributing
+        mask = (questions == 0)                          # True where padding
+        scores = scores.masked_fill(mask, float('-inf'))
+
+        alpha = F.softmax(scores, dim=1)                 # (batch, max_len)
+
+        # weighted sum: aggregate all token representations
+        q_feature = (alpha.unsqueeze(2) * output).sum(dim=1)  # (batch, hidden_size)
 
         return q_feature
-    
 
-# TESTING 
+
+# TESTING
 if __name__ == "__main__":
     model = QuestionEncoder(vocab_size=7000, embed_size=512,
                             hidden_size=1024, num_layers=2, dropout=0.5)
-    
+
     q = torch.randint(0, 7000, (4, 20))
+    # Add some padding to test mask
+    q[0, 15:] = 0
+    q[1, 10:] = 0
 
     out = model(q)
-
-    print(out.shape) # expect (4, 1024)
-        
+    print(out.shape)  # expect (4, 1024)

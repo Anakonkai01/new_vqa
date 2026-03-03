@@ -10,7 +10,7 @@ import os, sys, json
 sys.path.append(os.path.dirname(__file__))
 
 
-from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, hadamard_fusion
+from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, _build_h0
 from vocab import Vocabulary
 
 
@@ -42,14 +42,13 @@ def greedy_decode(model, image_tensor, question_tensor, vocab_a,
 
         
         # encode 
-        img_feat = model.i_encoder(img) # (1, 1024) 1024 is hidden size
-        img_feat = F.normalize(img_feat, p=2, dim=1)
-        question_feat = model.q_encoder(question) # (1, 1024)
+        img_feat = F.normalize(model.i_encoder(img), p=2, dim=1)  # (1, 1024)
+        q_feat   = F.normalize(model.q_encoder(question), p=2, dim=1)  # (1, 1024)
 
-        fusion = hadamard_fusion(img_feat, question_feat) # (1, 1024)
+        fusion = model.fusion(img_feat, q_feat)  # GatedFusion + LayerNorm
 
-        # prepare h_0 and c_0 for decoder 
-        h_0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1) # (num_layers, 1, 1024)
+        # prepare h_0 and c_0 for decoder (only layer 0 = fusion)
+        h_0 = _build_h0(fusion, model.num_layers)
         c_0 = torch.zeros_like(h_0)
         
         hidden = (h_0, c_0)
@@ -95,17 +94,16 @@ def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
         question = question_tensor.unsqueeze(0).to(device)    # (1, max_q_len)
 
         # encode
-        img_features  = model.i_encoder(img)                  # (1, 49, 1024) -- keeps spatial
-        img_features  = F.normalize(img_features, p=2, dim=-1)
-        question_feat = model.q_encoder(question)             # (1, 1024)
+        img_features = F.normalize(model.i_encoder(img), p=2, dim=-1)  # (1, 49, 1024)
+        q_feat       = F.normalize(model.q_encoder(question), p=2, dim=1)  # (1, 1024)
 
         # build image representation as mean of spatial regions
-        img_mean = img_features.mean(dim=1)                   # (1, 1024)
+        img_mean = img_features.mean(dim=1)  # (1, 1024)
 
-        fusion = hadamard_fusion(img_mean, question_feat)     # (1, 1024)
+        fusion = model.fusion(img_mean, q_feat)  # GatedFusion + LayerNorm
 
-        # initialize decoder hidden state
-        h_0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (num_layers, 1, 1024)
+        # initialize decoder hidden state (only layer 0 = fusion)
+        h_0 = _build_h0(fusion, model.num_layers)
         c_0 = torch.zeros_like(h_0)
         hidden = (h_0, c_0)
 
@@ -145,12 +143,11 @@ def batch_greedy_decode(model, img_tensors, q_tensors, vocab_a,
         imgs = img_tensors.to(device)
         qs   = q_tensors.to(device)
 
-        img_feat = model.i_encoder(imgs)               # (B, hidden)
-        img_feat = F.normalize(img_feat, p=2, dim=1)
-        q_feat   = model.q_encoder(qs)                 # (B, hidden)
-        fusion   = hadamard_fusion(img_feat, q_feat)
+        img_feat = F.normalize(model.i_encoder(imgs), p=2, dim=1)  # (B, hidden)
+        q_feat   = F.normalize(model.q_encoder(qs), p=2, dim=1)    # (B, hidden)
+        fusion   = model.fusion(img_feat, q_feat)  # GatedFusion + LayerNorm
 
-        h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (layers, B, hidden)
+        h = _build_h0(fusion, model.num_layers)  # only layer 0 = fusion
         c = torch.zeros_like(h)
         hidden = (h, c)
 
@@ -197,13 +194,12 @@ def batch_greedy_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
         imgs = img_tensors.to(device)
         qs   = q_tensors.to(device)
 
-        img_features = model.i_encoder(imgs)                    # (B, 49, hidden)
-        img_features = F.normalize(img_features, p=2, dim=-1)
-        q_feat       = model.q_encoder(qs)                      # (B, hidden)
-        img_mean     = img_features.mean(dim=1)                 # (B, hidden)
-        fusion       = hadamard_fusion(img_mean, q_feat)
+        img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B, 49, hidden)
+        q_feat       = F.normalize(model.q_encoder(qs), p=2, dim=1)      # (B, hidden)
+        img_mean     = img_features.mean(dim=1)                            # (B, hidden)
+        fusion       = model.fusion(img_mean, q_feat)  # GatedFusion + LayerNorm
 
-        h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)
+        h = _build_h0(fusion, model.num_layers)  # only layer 0 = fusion
         c = torch.zeros_like(h)
         hidden = (h, c)
 
@@ -261,10 +257,10 @@ def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
         q   = q_tensor.unsqueeze(0).to(device)
 
         img_feat = F.normalize(model.i_encoder(img), p=2, dim=1)  # (1, hidden)
-        q_feat   = model.q_encoder(q)                              # (1, hidden)
-        fusion   = hadamard_fusion(img_feat, q_feat)
+        q_feat   = F.normalize(model.q_encoder(q), p=2, dim=1)    # (1, hidden)
+        fusion   = model.fusion(img_feat, q_feat)  # GatedFusion + LayerNorm
 
-        h0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)   # (L, 1, hidden)
+        h0 = _build_h0(fusion, model.num_layers)   # only layer 0 = fusion
         c0 = torch.zeros_like(h0)
 
         start_idx = vocab_a.word2idx['<start>']
@@ -320,11 +316,11 @@ def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
         q   = q_tensor.unsqueeze(0).to(device)
 
         img_features = F.normalize(model.i_encoder(img), p=2, dim=-1)  # (1, 49, hidden)
-        q_feat       = model.q_encoder(q)                               # (1, hidden)
+        q_feat       = F.normalize(model.q_encoder(q), p=2, dim=1)     # (1, hidden)
         img_mean     = img_features.mean(dim=1)                         # (1, hidden)
-        fusion       = hadamard_fusion(img_mean, q_feat)
+        fusion       = model.fusion(img_mean, q_feat)  # GatedFusion + LayerNorm
 
-        h0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)
+        h0 = _build_h0(fusion, model.num_layers)  # only layer 0 = fusion
         c0 = torch.zeros_like(h0)
 
         start_idx = vocab_a.word2idx['<start>']

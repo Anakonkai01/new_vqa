@@ -3,7 +3,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler, autocast
 import os
 import sys
 import json
@@ -15,10 +14,8 @@ sys.path.append(os.path.dirname(__file__))
 
 # Import modules
 from dataset import VQADataset, vqa_collate_fn
-from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, hadamard_fusion
+from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD
 from vocab import Vocabulary
-
-
 
 
 """
@@ -34,15 +31,12 @@ Reshape 3D logits to 2D before computing loss:
 """
 
 
-
 # Configurations / Hyperparameters
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 # ── A100 / Ampere+ optimizations ──────────────────────────────────────
 if torch.cuda.is_available():
-    # Auto-tune conv algorithms for fixed input sizes (faster after warm-up)
     torch.backends.cudnn.benchmark = True
-    # TF32 for matmul & convolutions — near-FP32 accuracy, ~2× faster on Ampere+
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
@@ -55,27 +49,30 @@ def _supports_bf16():
 
 
 def _fused_adam_available():
-    """Check if fused Adam is available (CUDA + PyTorch >= 2.0)."""
+    """Check if fused AdamW is available (CUDA + PyTorch >= 2.0)."""
     if not torch.cuda.is_available():
         return False
     try:
-        # fused=True requires CUDA tensors and PyTorch 2.0+
-        optim.Adam([torch.zeros(1, device='cuda')], fused=True)
+        optim.AdamW([torch.zeros(1, device='cuda')], fused=True)
         return True
     except Exception:
         return False
 
 
-def get_model(model_type, vocab_q_size, vocab_a_size):
+def get_model(model_type, vocab_q_size, vocab_a_size, dropout=0.3):
     """Factory function: return the model corresponding to model_type."""
     if model_type == 'A':
-        return VQAModelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+                         dropout=dropout)
     elif model_type == 'B':
-        return VQAModelB(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelB(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+                         dropout=dropout)
     elif model_type == 'C':
-        return VQAModelC(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelC(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+                         dropout=dropout)
     elif model_type == 'D':
-        return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+                         dropout=dropout)
     else:
         raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D.")
 
@@ -91,10 +88,9 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
         epsilon = 1.0  =>  pure teacher forcing  (original behaviour)
         epsilon = 0.0  =>  fully autoregressive  (same as inference)
 
-    epsilon follows an inverse-sigmoid decay schedule:
-        epsilon(epoch) = k / (k + exp(epoch / k))
-    so it starts close to 1 and gradually decays, forcing the model to
-    recover from its own mistakes over the course of training.
+    epsilon follows an inverse-sigmoid decay schedule relative to phase start:
+        epsilon(relative_epoch) = k / (k + exp(relative_epoch / k))
+    so it starts close to 1 and gradually decays.
 
     Args:
         model       : VQA model (must expose i_encoder, q_encoder, decoder, num_layers)
@@ -112,15 +108,17 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
 
     # ── Encode image + question ──────────────────────────────────────
     if model_type in ('C', 'D'):
-        img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B, 49, H)
-        q_feat       = model.q_encoder(questions)                        # (B, H)
-        fusion       = hadamard_fusion(img_features.mean(dim=1), q_feat) # (B, H)
+        img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)   # (B, 49, H)
+        q_feat       = F.normalize(model.q_encoder(questions), p=2, dim=1) # (B, H)
+        fusion       = model.fusion(img_features.mean(dim=1), q_feat)      # (B, H)
     else:
-        img_feat = F.normalize(model.i_encoder(imgs), p=2, dim=1)       # (B, H)
-        q_feat   = model.q_encoder(questions)                            # (B, H)
-        fusion   = hadamard_fusion(img_feat, q_feat)                     # (B, H)
+        img_feat = F.normalize(model.i_encoder(imgs), p=2, dim=1)          # (B, H)
+        q_feat   = F.normalize(model.q_encoder(questions), p=2, dim=1)     # (B, H)
+        fusion   = model.fusion(img_feat, q_feat)                           # (B, H)
 
-    h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (L, B, H)
+    # layer 0 = fusion, upper layers = zeros
+    h = torch.zeros(model.num_layers, B, fusion.size(1), device=fusion.device)
+    h[0] = fusion
     c = torch.zeros_like(h)
     hidden = (h, c)
 
@@ -133,38 +131,35 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
 
         if model_type in ('C', 'D'):
             logit, hidden, _ = model.decoder.decode_step(tok, hidden, img_features)
-            # logit: (B, vocab), hidden: updated (h, c)
         else:
-            emb        = model.decoder.dropout(model.decoder.embedding(tok)) # (B, 1, embed)
-            out, hidden = model.decoder.lstm(emb, hidden)        # (B, 1, H)
-            logit      = model.decoder.fc(out.squeeze(1))        # (B, vocab)
+            emb        = model.decoder.dropout(model.decoder.embedding(tok))
+            out, hidden = model.decoder.lstm(emb, hidden)
+            logit      = model.decoder.fc(out.squeeze(1))
 
         logits_list.append(logit)
 
-        # Choose next input: ground truth (prob epsilon) or own prediction
         if t < max_len - 1:
             if random.random() < epsilon:
-                current_token = decoder_input[:, t + 1]          # GT token
+                current_token = decoder_input[:, t + 1]
             else:
-                current_token = logit.detach().argmax(dim=-1)    # model's prediction
+                current_token = logit.detach().argmax(dim=-1)
 
     return torch.stack(logits_list, dim=1)  # (B, max_len, vocab_size)
 
 
 # ── Training set (train2014) ─────────────────────────────────────
-TRAIN_IMAGE_DIR       = "data/raw/images/train2014"
-TRAIN_QUESTION_JSON   = "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
-TRAIN_ANNOTATION_JSON = "data/raw/vqa_json/v2_mscoco_train2014_annotations.json"
+TRAIN_IMAGE_DIR       = "data/train2014/train2014"
+TRAIN_QUESTION_JSON   = "data/vqa_data_json/v2_Questions_Train_mscoco/v2_OpenEnded_mscoco_train2014_questions.json"
+TRAIN_ANNOTATION_JSON = "data/vqa_data_json/v2_Annotations_Train_mscoco/v2_mscoco_train2014_annotations.json"
 
 # ── Validation set (val2014) ──────────────────────────────────────
-VAL_IMAGE_DIR         = "data/raw/images/val2014"
-VAL_QUESTION_JSON     = "data/raw/vqa_json/v2_OpenEnded_mscoco_val2014_questions.json"
-VAL_ANNOTATION_JSON   = "data/raw/vqa_json/v2_mscoco_val2014_annotations.json"
+VAL_IMAGE_DIR         = "data/val2014"
+VAL_QUESTION_JSON     = "data/vqa_data_json/v2_Questions_Val_mscoco/v2_OpenEnded_mscoco_val2014_questions.json"
+VAL_ANNOTATION_JSON   = "data/vqa_data_json/v2_Annotations_Val_mscoco/v2_mscoco_val2014_annotations.json"
 
 VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
 VOCAB_A_PATH  = "data/processed/vocab_answers.json"
 
-# Set to a number (e.g. 10000) to cap samples for quick pipeline tests.
 MAX_TRAIN_SAMPLES = None
 MAX_VAL_SAMPLES   = None
 
@@ -173,7 +168,10 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           scheduled_sampling=False, ss_k=5,
           finetune_cnn=False, cnn_lr_factor=0.1,
           num_workers=4, weight_decay=1e-5,
-          early_stopping_patience=0, augment=False):
+          early_stopping_patience=0, augment=False,
+          dropout=0.3, label_smoothing=0.1,
+          grad_accum_steps=1, answer_sampling=False,
+          warmup_epochs=1):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -187,7 +185,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         vocab_a=vocab_a,
         split='train2014',
         max_samples=MAX_TRAIN_SAMPLES,
-        augment=augment
+        augment=augment,
+        answer_sampling=answer_sampling
     )
 
     val_dataset = VQADataset(
@@ -197,7 +196,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         vocab_q=vocab_q,
         vocab_a=vocab_a,
         split='val2014',
-        max_samples=MAX_VAL_SAMPLES
+        max_samples=MAX_VAL_SAMPLES,
+        answer_sampling=False   # val always uses majority vote
     )
 
     print(f"Train: {len(train_dataset)} | Val: {len(val_dataset)}")
@@ -226,14 +226,11 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         prefetch_factor=4 if num_workers > 0 else None,
     )
 
-    model     = get_model(model_type, len(vocab_q), len(vocab_a)).to(DEVICE)
-    criterion = nn.CrossEntropyLoss(ignore_index=0)
+    model     = get_model(model_type, len(vocab_q), len(vocab_a), dropout=dropout).to(DEVICE)
+    criterion = nn.CrossEntropyLoss(ignore_index=0, label_smoothing=label_smoothing)
 
-    # ── Optimizer — differential LR when fine-tuning the CNN backbone ──────────
-    # Models A/C use scratch CNN → finetune_cnn flag has no effect on them.
-    # Models B/D use frozen ResNet → finetune_cnn selectively unfreezes
-    # layer3 + layer4 with a smaller LR (cnn_lr_factor × base_lr) to avoid
-    # catastrophic forgetting of pretrained ImageNet knowledge.
+    # ── Optimizer — AdamW with optional differential LR ───────────────────
+    fused = _fused_adam_available()
     if finetune_cnn and model_type in ('B', 'D'):
         model.i_encoder.unfreeze_top_layers()
         backbone_param_ids = {id(p) for p in model.i_encoder.backbone_params()}
@@ -241,30 +238,34 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                            if id(p) in backbone_param_ids and p.requires_grad]
         other_params    = [p for p in model.parameters()
                            if id(p) not in backbone_param_ids and p.requires_grad]
-        optimizer = optim.Adam([
+        optimizer = optim.AdamW([
             {'params': other_params,    'lr': lr},
             {'params': backbone_params, 'lr': lr * cnn_lr_factor},
-        ], weight_decay=weight_decay, fused=_fused_adam_available())
+        ], weight_decay=weight_decay, fused=fused)
         print(f"CNN fine-tuning  : ON | backbone LR = {lr * cnn_lr_factor:.2e}  other LR = {lr:.2e}")
         print(f"  trainable backbone params : {sum(p.numel() for p in backbone_params):,}")
     else:
-        optimizer = optim.Adam(params=model.parameters(), lr=lr, weight_decay=weight_decay,
-                               fused=_fused_adam_available())
+        optimizer = optim.AdamW(model.parameters(), lr=lr,
+                                weight_decay=weight_decay, fused=fused)
 
     if weight_decay > 0:
         print(f"Weight decay     : {weight_decay:.1e}")
 
-    # Halve LR when val loss stops improving for 2 consecutive epochs
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=2
-    )
+    # ── LR Schedulers ─────────────────────────────────────────────────────
+    # Warmup: linear ramp from lr*0.1 → lr over warmup_epochs epochs
+    # Then: ReduceLROnPlateau halves LR when val loss plateaus for 2 epochs
+    warmup_sched = None
+    if warmup_epochs > 0:
+        warmup_sched = optim.lr_scheduler.LinearLR(
+            optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs)
+    main_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=2)
 
-    # Mixed precision — BF16 on Ampere+ (A100, etc.), FP16 elsewhere
+    # ── Mixed Precision — updated API (torch.amp instead of torch.cuda.amp) ──
     use_amp  = torch.cuda.is_available()
     use_bf16 = use_amp and _supports_bf16()
     amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
-    # GradScaler not needed for BF16 (wider dynamic range), still used for FP16
-    scaler = GradScaler(enabled=(use_amp and not use_bf16))
+    scaler = torch.amp.GradScaler('cuda', enabled=(use_amp and not use_bf16))
     if use_bf16:
         print("AMP: BFloat16 (Ampere+ detected — no GradScaler needed)")
     elif use_amp:
@@ -283,23 +284,18 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         ckpt = torch.load(resume, map_location=lambda storage, loc: storage)
         model.load_state_dict(ckpt['model_state_dict'])
 
-        # Optimizer/scheduler state can only be restored when the number of
-        # parameter groups matches.  Phase transitions (e.g. Phase 1 → 2)
-        # change the optimizer layout (frozen → unfreeze adds a param group),
-        # so we skip restoring optimizer/scheduler in that case and start
-        # with a fresh optimizer + the new LR from CLI args.
-        saved_groups = len(ckpt['optimizer_state_dict']['param_groups'])
+        saved_groups   = len(ckpt['optimizer_state_dict']['param_groups'])
         current_groups = len(optimizer.param_groups)
         if saved_groups == current_groups:
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+            main_scheduler.load_state_dict(ckpt['scheduler_state_dict'])
             scaler.load_state_dict(ckpt['scaler_state_dict'])
             print("  Optimizer & scheduler state restored.")
         else:
             print(f"  Optimizer layout changed ({saved_groups} → {current_groups} param groups) "
                   f"— using fresh optimizer with current LR settings.")
 
-        start_epoch   = ckpt['epoch']          # last completed epoch
+        start_epoch   = ckpt['epoch']
         best_val_loss = ckpt['best_val_loss']
         history       = ckpt.get('history', history)
         print(f"  Resumed at epoch {start_epoch} | best_val_loss: {best_val_loss:.4f}")
@@ -307,34 +303,44 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     print(f"Model: {model_type} | Device: {DEVICE}")
     if augment:
         print("Data augmentation: ON (RandomHorizontalFlip + ColorJitter)")
+    if answer_sampling:
+        print("Answer sampling  : ON (random 1 of 10 annotations per sample)")
+    if warmup_epochs > 0:
+        print(f"LR Warmup        : {warmup_epochs} epoch(s) (start_factor=0.1)")
     if early_stopping_patience > 0:
         print(f"Early stopping   : patience={early_stopping_patience}")
-    es_counter = 0  # early stopping counter
+    if grad_accum_steps > 1:
+        effective_bs = batch_size * grad_accum_steps
+        print(f"Grad accumulation: {grad_accum_steps} steps (effective batch = {effective_bs})")
+    print(f"Dropout          : {dropout}")
+    print(f"Label smoothing  : {label_smoothing}")
+
+    es_counter = 0
     if scheduled_sampling:
+        eps_start = ss_k / (ss_k + math.exp(0 / ss_k))
+        eps_end   = ss_k / (ss_k + math.exp((epochs - 1) / ss_k))
         print(f"Scheduled Sampling: ON | k={ss_k} (epsilon decays from "
-              f"{ss_k/(ss_k+math.exp(0/ss_k)):.2f} to "
-              f"{ss_k/(ss_k+math.exp((start_epoch+epochs-1)/ss_k)):.2f} over training)")
+              f"{eps_start:.3f} to {eps_end:.3f} over this phase)")
+
     for epoch in tqdm.tqdm(range(start_epoch, start_epoch + epochs)):
         # ── Train ────────────────────────────────────────────────
         model.train()
         total_loss = 0
+        optimizer.zero_grad()
 
-        for imgs, questions, answer in train_loader:
+        for step, (imgs, questions, answer) in enumerate(train_loader):
             imgs      = imgs.to(DEVICE)
             questions = questions.to(DEVICE)
             answer    = answer.to(DEVICE)
 
-            # Teacher forcing: input [<start>, w1, ..., wn], target [w1, ..., <end>]
             decoder_input  = answer[:, :-1]
             decoder_target = answer[:, 1:]
 
-            optimizer.zero_grad()
-
-            with autocast(enabled=use_amp, dtype=amp_dtype):
+            with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                 if scheduled_sampling:
-                    # Inverse-sigmoid epsilon decay: higher k = slower decay
-                    # epoch 0 -> epsilon~1 (mostly GT), last epoch -> epsilon lowers
-                    epsilon = ss_k / (ss_k + math.exp(epoch / ss_k))
+                    # epsilon relative to THIS phase's start (not absolute epoch)
+                    relative_epoch = epoch - start_epoch
+                    epsilon = ss_k / (ss_k + math.exp(relative_epoch / ss_k))
                     logits  = ss_forward(model, model_type, imgs, questions,
                                          decoder_input, epsilon)
                 else:
@@ -344,14 +350,20 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                     logits.view(-1, vocab_size),
                     decoder_target.contiguous().view(-1)
                 )
+                # scale down for accumulation
+                loss = loss / grad_accum_steps
 
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            scaler.step(optimizer)
-            scaler.update()
 
-            total_loss += loss.item()
+            # optimizer step every grad_accum_steps batches (or at end of epoch)
+            if (step + 1) % grad_accum_steps == 0 or (step + 1) == len(train_loader):
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+
+            total_loss += loss.item() * grad_accum_steps  # unscale for logging
 
         avg_train_loss = total_loss / len(train_loader)
 
@@ -367,7 +379,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                 decoder_input  = answer[:, :-1]
                 decoder_target = answer[:, 1:]
 
-                with autocast(enabled=use_amp, dtype=amp_dtype):
+                with torch.amp.autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                     logits     = model(imgs, questions, decoder_input)
                     vocab_size = logits.size(-1)
                     loss = criterion(
@@ -378,46 +390,46 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
         avg_val_loss = val_loss / len(val_loader)
         current_lr   = optimizer.param_groups[0]['lr']
+
         if scheduled_sampling:
-            eps = ss_k / (ss_k + math.exp(epoch / ss_k))
+            relative_epoch = epoch - start_epoch
+            eps = ss_k / (ss_k + math.exp(relative_epoch / ss_k))
             print(f"Epoch {epoch+1}/{start_epoch + epochs} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | LR: {current_lr:.2e} | SS ϵ: {eps:.3f}")
         else:
             print(f"Epoch {epoch+1}/{start_epoch + epochs} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | LR: {current_lr:.2e}")
 
-        # Step LR scheduler based on val loss
-        scheduler.step(avg_val_loss)
+        # ── LR Scheduling ─────────────────────────────────────────
+        # Warmup only during first warmup_epochs of this phase
+        relative_epoch = epoch - start_epoch
+        if warmup_sched is not None and relative_epoch < warmup_epochs:
+            warmup_sched.step()
+        else:
+            main_scheduler.step(avg_val_loss)
 
-        # Save history after every epoch (safe against session interruption)
         history['train_loss'].append(avg_train_loss)
         history['val_loss'].append(avg_val_loss)
         with open(history_path, 'w') as f:
             json.dump(history, f, indent=2)
 
-        # ── Checkpoint saving (storage-efficient) ─────────────────
-        # comparison_epochs: epochs where we run compare.py (end of each phase)
-        # Only keep per-epoch checkpoints at these milestones.
-        # resume + best checkpoints are always overwritten (1 file each).
+        # ── Checkpoint saving ─────────────────────────────────────
         comparison_epochs = {10, 15, 20}
         current_epoch = epoch + 1
 
-        # Always save resume checkpoint (overwritten each epoch — 1 file per model)
         resume_ckpt = {
             'epoch':                current_epoch,
             'model_state_dict':     model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
+            'scheduler_state_dict': main_scheduler.state_dict(),
             'scaler_state_dict':    scaler.state_dict(),
             'best_val_loss':        best_val_loss,
             'history':              history,
         }
         torch.save(resume_ckpt, f"checkpoints/model_{model_type.lower()}_resume.pth")
 
-        # Save per-epoch checkpoint ONLY at comparison milestones
         if current_epoch in comparison_epochs:
             torch.save(model.state_dict(), f"checkpoints/model_{model_type.lower()}_epoch{current_epoch}.pth")
             print(f"  Saved milestone checkpoint: epoch {current_epoch}")
 
-        # Save best checkpoint separately (overwritten — 1 file per model)
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             es_counter = 0
@@ -429,11 +441,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                 print(f"  Val loss did not improve ({es_counter}/{early_stopping_patience})")
                 if es_counter >= early_stopping_patience:
                     print(f"  Early stopping triggered after {epoch+1} epochs.")
-                    # Save best model as the next unsaved milestone so
-                    # compare.py can still find a checkpoint for this phase.
-                    target_epoch = start_epoch + epochs
+                    target_epoch  = start_epoch + epochs
                     milestone_path = f"checkpoints/model_{model_type.lower()}_epoch{target_epoch}.pth"
-                    best_path = f"checkpoints/model_{model_type.lower()}_best.pth"
+                    best_path      = f"checkpoints/model_{model_type.lower()}_best.pth"
                     if not os.path.exists(milestone_path) and os.path.exists(best_path):
                         import shutil
                         shutil.copy2(best_path, milestone_path)
@@ -443,40 +453,52 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a VQA model.")
-    parser.add_argument('--model',      type=str,   default='A', choices=['A', 'B', 'C', 'D'],
-                        help='Model architecture (default: A)')
-    parser.add_argument('--epochs',     type=int,   default=10,
-                        help='Number of training epochs (default: 10)')
-    parser.add_argument('--lr',         type=float, default=1e-3,
-                        help='Learning rate (default: 1e-3)')
-    parser.add_argument('--batch_size', type=int,   default=128,
-                        help='Batch size (default: 128)')
-    parser.add_argument('--resume',     type=str,   default=None,
-                        help='Path to a resume checkpoint (model_X_resume.pth) to continue training')
-    parser.add_argument('--scheduled_sampling', action='store_true',
-                        help='Enable Scheduled Sampling to reduce exposure bias')
-    parser.add_argument('--ss_k',       type=float, default=5.0,
-                        help='Inverse-sigmoid decay speed for Scheduled Sampling (default: 5.0)')
-    parser.add_argument('--finetune_cnn', action='store_true',
-                        help='Unfreeze ResNet layer3+layer4 for fine-tuning (models B/D only)')
-    parser.add_argument('--cnn_lr_factor', type=float, default=0.1,
-                        help='LR multiplier for backbone params when fine-tuning (default: 0.1)')
-    parser.add_argument('--num_workers', type=int, default=4,
-                        help='DataLoader worker processes (default: 4, recommend 8 for A100)')
-    parser.add_argument('--weight_decay', type=float, default=1e-5,
-                        help='L2 regularization weight decay (default: 1e-5)')
+    parser.add_argument('--model',        type=str,   default='A', choices=['A', 'B', 'C', 'D'])
+    parser.add_argument('--epochs',       type=int,   default=10)
+    parser.add_argument('--lr',           type=float, default=1e-3)
+    parser.add_argument('--batch_size',   type=int,   default=128)
+    parser.add_argument('--resume',       type=str,   default=None)
+    parser.add_argument('--scheduled_sampling', action='store_true')
+    parser.add_argument('--ss_k',         type=float, default=5.0,
+                        help='Inverse-sigmoid decay speed for Scheduled Sampling (default: 5.0). '
+                             'Use ss_k=2 for faster decay over short phases.')
+    parser.add_argument('--finetune_cnn', action='store_true')
+    parser.add_argument('--cnn_lr_factor',type=float, default=0.1)
+    parser.add_argument('--num_workers',  type=int,   default=4)
+    parser.add_argument('--weight_decay', type=float, default=1e-5)
     parser.add_argument('--early_stopping', type=int, default=0,
                         help='Stop if val loss does not improve for N epochs (0=disabled)')
-    parser.add_argument('--augment', action='store_true',
-                        help='Enable image data augmentation (RandomHorizontalFlip + ColorJitter)')
+    parser.add_argument('--augment',      action='store_true',
+                        help='Image augmentation: RandomHorizontalFlip + ColorJitter')
+    parser.add_argument('--dropout',      type=float, default=0.3,
+                        help='Dropout for decoder embedding + LSTM inter-layer (default: 0.3)')
+    parser.add_argument('--label_smoothing', type=float, default=0.1,
+                        help='Label smoothing for CrossEntropyLoss (default: 0.1)')
+    parser.add_argument('--grad_accum_steps', type=int, default=1,
+                        help='Gradient accumulation steps; effective_batch = batch_size × steps (default: 1)')
+    parser.add_argument('--answer_sampling', action='store_true',
+                        help='Randomly pick 1 of 10 human annotations per training sample')
+    parser.add_argument('--warmup_epochs', type=int, default=1,
+                        help='Linear LR warmup epochs at start of each phase (default: 1)')
     args = parser.parse_args()
-    train(model_type=args.model, epochs=args.epochs, lr=args.lr,
-          batch_size=args.batch_size, resume=args.resume,
-          scheduled_sampling=args.scheduled_sampling, ss_k=args.ss_k,
-          finetune_cnn=args.finetune_cnn, cnn_lr_factor=args.cnn_lr_factor,
-          num_workers=args.num_workers, weight_decay=args.weight_decay,
-          early_stopping_patience=args.early_stopping, augment=args.augment)
-        
-        
-        
-    
+
+    train(
+        model_type=args.model,
+        epochs=args.epochs,
+        lr=args.lr,
+        batch_size=args.batch_size,
+        resume=args.resume,
+        scheduled_sampling=args.scheduled_sampling,
+        ss_k=args.ss_k,
+        finetune_cnn=args.finetune_cnn,
+        cnn_lr_factor=args.cnn_lr_factor,
+        num_workers=args.num_workers,
+        weight_decay=args.weight_decay,
+        early_stopping_patience=args.early_stopping,
+        augment=args.augment,
+        dropout=args.dropout,
+        label_smoothing=args.label_smoothing,
+        grad_accum_steps=args.grad_accum_steps,
+        answer_sampling=args.answer_sampling,
+        warmup_epochs=args.warmup_epochs,
+    )

@@ -16,14 +16,17 @@ import torchvision.models as models
 # helper function 
 # note: W_out = W_in - kernel + 2 * padding
 def conv_block(in_channels, out_channels):
-    """  
-    basic cnn block: conv -> bn -> relu -> maxpool 
+    """
+    basic cnn block: conv -> bn -> relu -> maxpool
+    padding=1 preserves spatial size after conv (same-padding for kernel=3):
+      W_out = (W_in + 2*1 - 3) / 1 + 1 = W_in
+    After 5 blocks: 224 -> 112 -> 56 -> 28 -> 14 -> 7 (correct 7x7=49 regions)
     """
     return nn.Sequential(
-        nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1), 
-        nn.BatchNorm2d(out_channels), 
+        nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
+        nn.BatchNorm2d(out_channels),
         nn.ReLU(inplace=True),
-        nn.MaxPool2d(kernel_size=2, stride=2) # decrease spatial / 2 
+        nn.MaxPool2d(kernel_size=2, stride=2) # decrease spatial / 2
     )
 
 

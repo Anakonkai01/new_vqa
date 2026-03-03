@@ -5,9 +5,8 @@ import json
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from vocab import Vocabulary
 
-QUESTION_JSON_PATH = "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
-
-ANNOTATION_JSON_PATH = "data/raw/vqa_json/v2_mscoco_train2014_annotations.json"
+QUESTION_JSON_PATH   = "data/vqa_data_json/v2_Questions_Train_mscoco/v2_OpenEnded_mscoco_train2014_questions.json"
+ANNOTATION_JSON_PATH = "data/vqa_data_json/v2_Annotations_Train_mscoco/v2_mscoco_train2014_annotations.json"
 
 OUTPUT_DIR = "data/processed"
 

@@ -21,9 +21,9 @@ from inference import get_model, batch_greedy_decode, batch_greedy_decode_with_a
 
 # ── Config (must match evaluate.py paths) ─────────────────────
 DEVICE             = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-VAL_IMAGE_DIR      = "data/raw/images/val2014"
-VAL_QUESTION_JSON  = "data/raw/vqa_json/v2_OpenEnded_mscoco_val2014_questions.json"
-VAL_ANNOTATION_JSON= "data/raw/vqa_json/v2_mscoco_val2014_annotations.json"
+VAL_IMAGE_DIR      = "data/val2014"
+VAL_QUESTION_JSON  = "data/vqa_data_json/v2_Questions_Val_mscoco/v2_OpenEnded_mscoco_val2014_questions.json"
+VAL_ANNOTATION_JSON= "data/vqa_data_json/v2_Annotations_Val_mscoco/v2_mscoco_val2014_annotations.json"
 VOCAB_Q_PATH       = "data/processed/vocab_questions.json"
 VOCAB_A_PATH       = "data/processed/vocab_answers.json"
 

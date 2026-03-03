@@ -1,8 +1,8 @@
 # VQA System — Software Documentation
 
-**Phiên bản:** 2.0.0  
-**Ngày cập nhật:** 2025-06-26  
-**Repository:** https://github.com/Anakonkai01/new_vqa  
+**Phiên bản:** 3.0.0
+**Ngày cập nhật:** 2026-03-01
+**Repository:** https://github.com/Anakonkai01/new_vqa
 **Branch:** `main`
 
 ---
@@ -20,11 +20,12 @@
 9. [GPU Optimizations](#9-gpu-optimizations)
 10. [Evaluation & Metrics](#10-evaluation--metrics)
 11. [Inference & Decoding](#11-inference--decoding)
-12. [Google Drive Integration](#12-google-drive-integration)
+12. [Local Training (RTX 3060)](#12-local-training-rtx-3060)
 13. [CLI Reference](#13-cli-reference)
 14. [API Reference — Tensor Shapes](#14-api-reference--tensor-shapes)
 15. [Checkpoint Strategy](#15-checkpoint-strategy)
 16. [Ghi chú kỹ thuật](#16-ghi-chú-kỹ-thuật)
+17. [Changelog v3.0 — Cải tiến mô hình](#17-changelog-v30--cải-tiến-mô-hình)
 
 ---
 
@@ -145,13 +146,20 @@ lstm_input = concat(embed_t, context)             → (B, embed + hidden)
 
 `alpha` lưu lại để visualize attention heatmap — reshape `(49,)` → `(7, 7)` → upsample lên ảnh.
 
-### 2.4 Hadamard Fusion
+### 2.4 GatedFusion (v3.0 — thay thế Hadamard)
 
 ```python
-fusion = img_feature * q_feature   # element-wise multiplication
+class GatedFusion(nn.Module):
+    # Học soft gate giữa 2 modality thay vì nhân element-wise cứng nhắc
+    g      = sigmoid( W([img; q]) )      # gate ∈ (0,1)^H  per dimension
+    out    = g * img + (1-g) * q         # weighted blend
+    fusion = LayerNorm(out)              # stabilise h_0 magnitude
 ```
 
-Kết hợp image và question features. Với attention models (C/D), `img_feature = mean(49 regions)` trước khi fusion.
+- **Trước (Hadamard):** `fusion = img ⊙ q` — không có khả năng học; magnitude phụ thuộc cả hai
+- **Sau (GatedFusion):** gate được học, cho phép mô hình cân bằng 2 modality theo từng chiều
+- **LayerNorm:** đảm bảo h_0 có variance ổn định, tránh LSTM bị bão hoà ngay từ đầu
+- Với attention models (C/D): `img_feature = mean(49 regions)` trước khi vào GatedFusion
 
 ### 2.5 Teacher Forcing
 
@@ -336,18 +344,33 @@ Sử dụng **official VQA 2.0 train/val split** — COCO train2014 cho training
 
 ### 6.2 `src/models/encoder_question.py`
 
-#### `QuestionEncoder`
-- `Embedding(vocab_size, embed_size, padding_idx=0)` → `LSTM(num_layers, dropout)` → `h_n[-1]`
-- Output: `(B, hidden_size)` — last hidden state
+#### `QuestionEncoder` (v3.0 — Question Attention Pooling)
+
+```text
+Embedding → LSTM → Attention Pooling → q_feature (B, H)
+
+Trước (v2): q_feature = h_n[-1]  (chỉ lấy hidden state cuối)
+Sau  (v3): q_feature = Σ(alpha_t * output_t)  (weighted sum toàn bộ)
+
+Attention:
+  scores = W_attn(output)         (B, L, H) → (B, L)
+  mask   = (questions == 0)       True ở <pad> positions
+  scores = masked_fill(-inf)      loại bỏ <pad>
+  alpha  = softmax(scores, dim=1) (B, L)
+  q_feat = sum(alpha * output)    (B, H)
+```
+
+- Tổng hợp thông tin từ **tất cả** các token, không chỉ token cuối
+- `nn.Linear(hidden_size, 1)` học cách weight từng vị trí
 - Dùng bởi tất cả 4 models
 
 ### 6.3 `src/models/decoder_lstm.py`
 
 #### `LSTMDecoder` (Model A & B)
-- `Embedding` → `Dropout(0.5)` → `LSTM(num_layers, dropout)` → `Linear(hidden→vocab)`
+- `Embedding` → `Dropout(0.3)` → `LSTM(num_layers, dropout=0.3)` → `Linear(hidden→vocab)`
 - `forward(encoder_hidden, target_seq)`: teacher forcing, trả về logits
 - `self.dropout`: áp dụng lên embedding output để regularize
-- LSTM inter-layer dropout=0.5 khi num_layers > 1
+- LSTM inter-layer dropout=0.3 khi num_layers > 1  *(v3.0: giảm từ 0.5 → 0.3)*
 
 ### 6.4 `src/models/decoder_attention.py`
 
@@ -359,7 +382,7 @@ Sử dụng **official VQA 2.0 train/val split** — COCO train2014 cho training
 - LSTM `input_size = embed_size + hidden_size` (concat embedding + attention context)
 - `forward(encoder_hidden, img_features, target_seq)`: teacher forcing
 - `decode_step(token, hidden, img_features)`: 1 step autoregressive, trả về `(logit, hidden, alpha)`
-- Dropout áp dụng cho embedding
+- Dropout 0.3 áp dụng cho embedding  *(v3.0: giảm từ 0.5 → 0.3)*
 
 ### 6.5 `src/models/vqa_models.py`
 
@@ -367,15 +390,26 @@ Sử dụng **official VQA 2.0 train/val split** — COCO train2014 cho training
 
 | Class | Components | Forward |
 |-------|-----------|---------|
-| `VQAModelA` | SimpleCNN + QuestionEncoder + LSTMDecoder | img→fusion→decode |
-| `VQAModelB` | ResNetEncoder + QuestionEncoder + LSTMDecoder | img→fusion→decode |
-| `VQAModelC` | SimpleCNNSpatial + QuestionEncoder + LSTMDecoderWithAttention | img(49)→fusion→decode+attn |
-| `VQAModelD` | ResNetSpatialEncoder + QuestionEncoder + LSTMDecoderWithAttention | img(49)→fusion→decode+attn |
+| `VQAModelA` | SimpleCNN + QuestionEncoder + LSTMDecoder | img→GatedFusion→decode |
+| `VQAModelB` | ResNetEncoder + QuestionEncoder + LSTMDecoder | img→GatedFusion→decode |
+| `VQAModelC` | SimpleCNNSpatial + QuestionEncoder + LSTMDecoderWithAttention | img(49)→GatedFusion→decode+attn |
+| `VQAModelD` | ResNetSpatialEncoder + QuestionEncoder + LSTMDecoderWithAttention | img(49)→GatedFusion→decode+attn |
 
-Tất cả:
+Tất cả (v3.0):
+
 - L2 normalize image features: `F.normalize(feat, p=2, dim=...)`
-- Hadamard fusion: `fusion = img_feat * q_feat`
-- `h_0 = fusion.unsqueeze(0).repeat(num_layers, 1, 1)`, `c_0 = zeros_like(h_0)`
+- L2 normalize question features: `F.normalize(q_feat, p=2, dim=1)` *(v3.0: mới)*
+- GatedFusion (learned gate + LayerNorm): `fusion = self.fusion(img_feat, q_feat)` *(v3.0: thay Hadamard)*
+- h_0: chỉ layer 0 nhận fusion signal, các layer trên = zeros *(v3.0: thay repeat)*
+
+```python
+# v2.0 (cũ)
+h_0 = fusion.unsqueeze(0).repeat(num_layers, 1, 1)   # ALL layers = fusion
+
+# v3.0 (mới)
+h_0 = torch.zeros(num_layers, B, H, device=...)
+h_0[0] = fusion   # only layer 0; upper layers start fresh
+```
 
 ### 6.6 `src/dataset.py`
 
@@ -396,7 +430,7 @@ vocab.load(path)    # load JSON
 
 ---
 
-## 7. Training Pipeline — 3 Phases
+## 7. Training Pipeline — 3 Phasesn
 
 ### 7.1 Phase 1 — Baseline (10 epochs)
 
@@ -471,12 +505,16 @@ python src/compare.py --models A,B,C,D --epoch 20   # Phase 3 (final)
 | Kỹ thuật | Cách hoạt động | CLI flag |
 |----------|---------------|----------|
 | **Data Augmentation** | RandomHorizontalFlip + ColorJitter | `--augment` |
-| **Weight Decay** | L2 regularization trên model params | `--weight_decay 1e-5` |
+| **Weight Decay** | AdamW decoupled L2 regularization | `--weight_decay 1e-5` |
 | **Early Stopping** | Dừng nếu val loss không cải thiện N epochs | `--early_stopping 3` |
-| **Embedding Dropout** | Dropout(0.5) sau embedding layer (cả 2 decoder) | Built-in |
-| **LSTM Dropout** | Inter-layer dropout=0.5 (khi num_layers > 1) | Built-in |
+| **Label Smoothing** | Softens one-hot targets → better calibration | `--label_smoothing 0.1` |
+| **Embedding Dropout** | Dropout(0.3) sau embedding layer — giảm từ 0.5 | Built-in |
+| **LSTM Dropout** | Inter-layer dropout=0.3 (khi num_layers > 1) | Built-in |
 | **Gradient Clipping** | `clip_grad_norm_(max_norm=5.0)` | Built-in |
+| **LR Warmup** | Linear ramp từ lr×0.1 → lr trong warmup_epochs | `--warmup_epochs 1` |
 | **LR Scheduling** | ReduceLROnPlateau (factor=0.5, patience=2) | Built-in |
+| **Answer Sampling** | Random 1/10 human annotations per step | `--answer_sampling` |
+| **Gradient Accumulation** | Tích lũy gradient nhiều bước trước optimizer step | `--grad_accum_steps N` |
 
 **Early Stopping behavior:** Khi trigger, tự động copy `model_best.pth` → `model_X_epoch{target}.pth` để `compare.py` luôn tìm được checkpoint.
 
@@ -567,38 +605,102 @@ batch_beam_search_decode_with_attention(model, imgs, qs, vocab_a, beam_width=5)
 
 ---
 
-## 12. Google Drive Integration
+## 12. Local Training (RTX 3060)
 
-Notebook `vqa_colab.ipynb` tự động sync kết quả lên Google Drive:
+Training trên máy local (RTX 3060 12GB VRAM, i7-14700K, 64GB RAM).
 
-### 12.1 Cấu trúc Drive
+### 12.1 Cấu trúc dữ liệu local
 
+```text
+new_vqa/
+├── data/
+│   ├── train2014/train2014/         # 82,783 ảnh train (COCO_train2014_*.jpg)
+│   ├── val2014/                     # 40,504 ảnh val (COCO_val2014_*.jpg)
+│   ├── vqa_data_json/
+│   │   ├── v2_Questions_Train_mscoco/v2_OpenEnded_mscoco_train2014_questions.json
+│   │   ├── v2_Annotations_Train_mscoco/v2_mscoco_train2014_annotations.json
+│   │   ├── v2_Questions_Val_mscoco/v2_OpenEnded_mscoco_val2014_questions.json
+│   │   └── v2_Annotations_Val_mscoco/v2_mscoco_val2014_annotations.json
+│   └── processed/
+│       ├── vocab_questions.json     # (auto-generated bởi 1_build_vocab.py)
+│       └── vocab_answers.json
 ```
-MyDrive/VQA_Project/
-├── checkpoints/   # resume, best, milestone checkpoints + history JSON
-├── vocab/         # vocab_questions.json, vocab_answers.json
-└── outputs/       # training_curves.png, attention maps, analysis plots
+
+### 12.2 Batch Size khuyến nghị cho RTX 3060 (12GB VRAM)
+
+| Model | Phase 1 | Phase 2 | Phase 3 (SS) | grad_accum | Effective BS |
+| --- | --- | --- | --- | --- | --- |
+| A (no attn) | 128 | 128 | 64 | 2 / 2 / 4 | 256 |
+| B (no attn + ResNet) | 128 | 64 | 64 | 2 / 4 / 4 | 256 |
+| C (spatial attn) | 64 | 64 | 32 | 4 / 4 / 8 | 256 |
+| D (spatial attn + ResNet) | 64 | 32 | 32 | 4 / 8 / 8 | 256 |
+
+### 12.3 Lệnh train cho từng Phase
+
+#### Phase 1 — Teacher Forcing (10 epochs)
+
+```bash
+cd /home/mayxin/workspace/DeepLearning/new_vqa
+
+# Model A
+python src/train.py --model A --epochs 10 --lr 1e-3 --batch_size 128 \
+    --grad_accum_steps 2 --num_workers 8 --augment --answer_sampling \
+    --weight_decay 1e-5 --dropout 0.3 --label_smoothing 0.1 \
+    --warmup_epochs 1 --early_stopping 3
+
+# Model B
+python src/train.py --model B --epochs 10 --lr 1e-3 --batch_size 128 \
+    --grad_accum_steps 2 --num_workers 8 --augment --answer_sampling \
+    --weight_decay 1e-5 --dropout 0.3 --label_smoothing 0.1 \
+    --warmup_epochs 1 --early_stopping 3
+
+# Model C
+python src/train.py --model C --epochs 10 --lr 1e-3 --batch_size 64 \
+    --grad_accum_steps 4 --num_workers 8 --augment --answer_sampling \
+    --weight_decay 1e-5 --dropout 0.3 --label_smoothing 0.1 \
+    --warmup_epochs 1 --early_stopping 3
+
+# Model D
+python src/train.py --model D --epochs 10 --lr 1e-3 --batch_size 64 \
+    --grad_accum_steps 4 --num_workers 8 --augment --answer_sampling \
+    --weight_decay 1e-5 --dropout 0.3 --label_smoothing 0.1 \
+    --warmup_epochs 1 --early_stopping 3
 ```
 
-### 12.2 Sync Points
+#### Phase 2 — Fine-tune (5 epochs)
 
-| Thời điểm | Dữ liệu | Mục đích |
-|-----------|---------|---------|
-| Sau Build Vocab | vocab JSON files | Khôi phục vocab khi restart |
-| Sau Phase 1 | resume + best + epoch10 + history | Resume Phase 2 |
-| Sau Phase 2 | resume + best + epoch15 + history | Resume Phase 3 |
-| Sau Phase 3 | resume + best + epoch20 + history | Final results |
-| Sau Plot Curves | training_curves.png | Lưu output |
-| Sau Attention Viz | attn_model_*.png | Lưu output |
-| Sau Analysis | qualitative + error analysis | Lưu output |
+```bash
+# Model A, C (tiếp tục training, LR giảm)
+python src/train.py --model A --epochs 5 --lr 5e-4 --batch_size 128 \
+    --grad_accum_steps 2 --resume checkpoints/model_a_resume.pth \
+    --num_workers 8 --augment --answer_sampling \
+    --weight_decay 1e-5 --dropout 0.3 --label_smoothing 0.1 \
+    --warmup_epochs 1 --early_stopping 3
 
-### 12.3 Restore khi Runtime Restart
-
-```python
-# Chạy cell restore trong notebook
-restore_from_drive('checkpoints', 'checkpoints')
-restore_from_drive('vocab', 'data/processed')
+# Model B, D (unfreeze ResNet, differential LR)
+python src/train.py --model B --epochs 5 --lr 5e-4 --batch_size 64 \
+    --grad_accum_steps 4 --resume checkpoints/model_b_resume.pth \
+    --finetune_cnn --cnn_lr_factor 0.1 --num_workers 8 --augment \
+    --weight_decay 1e-5 --dropout 0.3 --label_smoothing 0.1 \
+    --warmup_epochs 1 --early_stopping 3
 ```
+
+#### Phase 3 — Scheduled Sampling (5 epochs)
+
+```bash
+python src/train.py --model A --epochs 5 --lr 2e-4 --batch_size 64 \
+    --grad_accum_steps 4 --resume checkpoints/model_a_resume.pth \
+    --scheduled_sampling --ss_k 2 --num_workers 8 --augment \
+    --weight_decay 1e-5 --dropout 0.3 --label_smoothing 0.1 \
+    --warmup_epochs 0 --early_stopping 3
+```
+
+### 12.4 GPU: RTX 3060 (Ampere, CC 8.6)
+
+- **BF16 AMP** tự động detect (CC ≥ 8.0) — không cần GradScaler
+- **TF32** bật mặc định cho matmul + conv
+- **Fused AdamW** nếu PyTorch ≥ 2.0
+- Notebook đầy đủ: `vqa_local_training.ipynb`
 
 ---
 
@@ -606,7 +708,7 @@ restore_from_drive('vocab', 'data/processed')
 
 ### 13.1 `train.py`
 
-```
+```text
 python src/train.py [OPTIONS]
 
 Options:
@@ -618,11 +720,17 @@ Options:
   --resume PATH            Resume from checkpoint
   --scheduled_sampling     Enable Scheduled Sampling
   --ss_k FLOAT             SS inverse-sigmoid decay speed (default: 5.0)
+                           Use ss_k=2 for faster decay over short phases
   --finetune_cnn           Unfreeze ResNet layer3+4 (B/D only)
   --cnn_lr_factor FLOAT    Backbone LR multiplier (default: 0.1)
-  --weight_decay FLOAT     L2 regularization (default: 1e-5)
+  --weight_decay FLOAT     AdamW weight decay (default: 1e-5)
   --early_stopping N       Patience epochs (0=disabled)
-  --augment                Enable data augmentation
+  --augment                Enable data augmentation (RandomHFlip+ColorJitter)
+  --dropout FLOAT          Decoder dropout rate (default: 0.3)          [v3.0]
+  --label_smoothing FLOAT  CrossEntropy label smoothing (default: 0.1)  [v3.0]
+  --grad_accum_steps N     Gradient accumulation steps (default: 1)     [v3.0]
+  --answer_sampling        Random 1/10 annotations per train sample     [v3.0]
+  --warmup_epochs N        Linear LR warmup epochs per phase (default: 1)[v3.0]
 ```
 
 ### 13.2 `evaluate.py`
@@ -774,18 +882,128 @@ Loại bỏ ảnh hưởng magnitude, chỉ giữ hướng vector → Hadamard f
 ### 16.4 Scheduled Sampling — ss_forward()
 
 `ss_forward()` trong `train.py` bypass `model.forward()`, trực tiếp gọi encoders và decoder step-by-step. Mỗi step:
+
 - Với xác suất ε: dùng GT token (teacher forcing)
 - Với xác suất 1-ε: dùng `argmax(logit).detach()` (model prediction)
 
-Model A/B: gọi `model.decoder.dropout(model.decoder.embedding(tok))` + `model.decoder.lstm()` + `model.decoder.fc()`  
+Model A/B: gọi `model.decoder.dropout(model.decoder.embedding(tok))` + `model.decoder.lstm()` + `model.decoder.fc()`
 Model C/D: gọi `model.decoder.decode_step(tok, hidden, img_features)`
+
+**Bug fix v3.0 — SS epsilon dùng epoch tuyệt đối:**
+
+```python
+# v2.0 (BUG): epoch là epoch tuyệt đối, Phase 3 bắt đầu epoch 15
+# → epsilon(15) = 5/(5+exp(3)) ≈ 0.199  →  80% autoregressive ngay lập tức!
+epsilon = ss_k / (ss_k + math.exp(epoch / ss_k))
+
+# v3.0 (FIX): dùng epoch tương đối từ đầu phase
+relative_epoch = epoch - start_epoch   # 0 tại đầu Phase 3
+epsilon = ss_k / (ss_k + math.exp(relative_epoch / ss_k))
+# → epsilon(0) ≈ 0.83  →  83% teacher forcing, decay dần
+```
 
 ### 16.5 Các lỗi đã gặp và fix
 
 | Lỗi | Nguyên nhân | Fix |
-|-----|-------------|-----|
+| --- | --- | --- |
 | `ValueError: different number of parameter groups` | Phase 1→2 optimizer layout thay đổi (freeze→unfreeze) | Compare group counts, skip optimizer restore khi khác |
-| `AttributeError: 'LSTMDecoder' has no attribute 'dropout'` | ss_forward gọi dropout chưa có | Thêm `self.dropout = nn.Dropout(0.5)` vào LSTMDecoder |
-| Val loss tăng sau epoch 11 | Overfitting | 4 regularization techniques (augment, weight_decay, early_stopping, dropout) |
+| `AttributeError: 'LSTMDecoder' has no attribute 'dropout'` | ss_forward gọi dropout chưa có | Thêm `self.dropout = nn.Dropout(0.3)` vào LSTMDecoder |
+| Val loss tăng sau Phase 3 | SS epsilon bug (absolute epoch) | Fix relative_epoch = epoch - start_epoch |
+| Val loss không dưới 2 | Dropout quá cao (0.5) | Giảm xuống 0.3 |
 | Drive tràn 15GB | Per-epoch checkpoints quá nhiều | Milestone-only saving (epochs 10, 15, 20) |
 | Early stopping → compare.py SKIP | Milestone checkpoint chưa được tạo | Copy best→milestone khi early stop + fallback trong compare.py |
+| `torch.cuda.amp.GradScaler` FutureWarning | API deprecated trong PyTorch 2.4+ | Dùng `torch.amp.GradScaler('cuda', ...)` |
+
+---
+
+## 17. Changelog v3.0 — Cải tiến mô hình
+
+**Ngày:** 2026-03-01 | **Mục tiêu:** Giảm val loss từ >2 xuống dưới 1.8, fix regression do SS epsilon bug
+
+### 17.1 Tóm tắt thay đổi
+
+| # | File | Thay đổi | Lý do |
+| --- | --- | --- | --- |
+| 1 | `vqa_models.py` | GatedFusion thay Hadamard | Học soft gate thay vì nhân cứng nhắc |
+| 2 | `vqa_models.py` | LayerNorm sau GatedFusion | Ổn định magnitude h_0 |
+| 3 | `vqa_models.py` | q_feat L2-normalize trước fusion | Cùng scale với img_feat |
+| 4 | `vqa_models.py` | h_0: chỉ layer 0 = fusion | Tránh signal bão hoà LSTM upper layers |
+| 5 | `encoder_question.py` | Question Attention Pooling | Tổng hợp toàn bộ token thay vì chỉ cuối |
+| 6 | `decoder_lstm.py` | Dropout 0.5 → 0.3 | Giảm regularization quá mức |
+| 7 | `decoder_attention.py` | Dropout 0.5 → 0.3 | Giảm regularization quá mức |
+| 8 | `train.py` | SS epsilon fix (relative epoch) | **Critical bug**: Phase 3 epsilon sai |
+| 9 | `train.py` | Adam → AdamW | Decoupled weight decay |
+| 10 | `train.py` | torch.amp mới (BF16 detect) | Deprecated API + BF16 cho RTX 3060 |
+| 11 | `train.py` | LR warmup (LinearLR) | Tránh LR spike đầu phase |
+| 12 | `train.py` | Label smoothing 0.1 | Tránh over-confident predictions |
+| 13 | `train.py` | Gradient accumulation | Effective batch 256 trên VRAM 12GB |
+| 14 | `dataset.py` | Answer sampling (1/10) | Data augmentation từ 10 human answers |
+| 15 | `1_build_vocab.py` | Local data paths | Chạy trên máy local |
+
+### 17.2 Chi tiết thay đổi quan trọng
+
+#### GatedFusion + LayerNorm (thay Hadamard)
+
+```python
+# v2.0
+fusion = img_feat * q_feat   # element-wise multiply — không học
+
+# v3.0
+class GatedFusion(nn.Module):
+    def forward(self, img_feat, q_feat):
+        g = sigmoid(W([img_feat; q_feat]))   # learned gate per dimension
+        return LayerNorm(g * img_feat + (1-g) * q_feat)
+```
+
+**Lý do:** Hadamard fusion không có tham số học — phụ thuộc hoàn toàn vào scale của 2 input. GatedFusion học cân bằng động giữa 2 modality. LayerNorm đảm bảo h_0 stable.
+
+#### Question Attention Pooling
+
+```python
+# v2.0
+q_feat = hidden[-1]   # chỉ lấy hidden state cuối
+
+# v3.0
+scores = Linear(H→1)(output)         # score mỗi token
+alpha  = softmax(masked_fill(-inf))  # ignore <pad>
+q_feat = sum(alpha * output)         # weighted sum toàn bộ
+```
+
+**Lý do:** Hidden state cuối không đủ để capture toàn bộ câu hỏi, đặc biệt với câu hỏi dài. Attention pooling cho phép mô hình focus vào từ quan trọng nhất.
+
+#### SS Epsilon Bug Fix
+
+```python
+# v2.0 — BUG
+epsilon = ss_k / (ss_k + exp(epoch / ss_k))
+# Phase 3 bắt đầu epoch=15, ss_k=5
+# epsilon(15) = 5/(5+exp(3)) ≈ 0.199  →  chỉ 20% teacher forcing!
+# Kết quả: val loss tăng (B: 2.09 → 2.40) thay vì giảm
+
+# v3.0 — FIX
+relative_epoch = epoch - start_epoch   # reset về 0 tại mỗi phase
+epsilon = ss_k / (ss_k + exp(relative_epoch / ss_k))
+# epsilon(0) ≈ 0.83  →  83% teacher forcing, decay dần qua 5 epochs
+```
+
+#### h_0 Initialization
+
+```python
+# v2.0 — tất cả layers = fusion (bão hoà signal)
+h_0 = fusion.unsqueeze(0).repeat(num_layers, 1, 1)
+
+# v3.0 — chỉ layer 0, upper layers khởi đầu từ zeros
+h_0 = torch.zeros(num_layers, B, H)
+h_0[0] = fusion
+```
+
+**Lý do:** Khi lặp lại cùng signal ở tất cả layers, LSTM upper layers nhận signal quá "cứng". Upper layers nên học ngữ cảnh từ layer 0 qua gating, không phải nhận trực tiếp.
+
+### 17.3 Kết quả mong đợi
+
+| Metric | v2.0 (Phase 1) | v3.0 (Phase 1) | v3.0 (Phase 3) |
+| --- | --- | --- | --- |
+| Val Loss (Model A) | ~2.27 | ~1.9–2.1 | ~1.7–1.9 |
+| Val Loss (Model B) | ~2.09 | ~1.8–2.0 | ~1.6–1.8 |
+| Val Loss (Model D) | ~2.1 | ~1.7–1.9 | ~1.5–1.7 |
+| SS Phase 3 trend | Tăng (bug) | N/A | Giảm (fixed) |
