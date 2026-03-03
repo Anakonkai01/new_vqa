@@ -10,8 +10,32 @@ import os, sys, json
 sys.path.append(os.path.dirname(__file__))
 
 
-from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, hadamard_fusion
+from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD
 from vocab import Vocabulary
+
+
+def _get_ngrams(token_ids, n):
+    """Extract all n-grams from a list of token IDs."""
+    return {tuple(token_ids[i:i+n]) for i in range(len(token_ids) - n + 1)}
+
+
+def _block_repeated_ngrams(log_probs, token_ids, no_repeat_ngram_size):
+    """Set log-prob to -inf for any token that would create a repeated n-gram.
+
+    Args:
+        log_probs: (vocab,) log probability tensor — MODIFIED in-place
+        token_ids: list of int — tokens generated so far
+        no_repeat_ngram_size: size of n-grams to block (e.g. 3 = no repeated trigrams)
+    """
+    if no_repeat_ngram_size <= 0 or len(token_ids) < no_repeat_ngram_size - 1:
+        return
+    # The (n-1)-gram ending at the current position
+    prefix = tuple(token_ids[-(no_repeat_ngram_size - 1):])
+    existing = _get_ngrams(token_ids, no_repeat_ngram_size)
+    for ng in existing:
+        if ng[:-1] == prefix:
+            # Block the token that would complete the repeated n-gram
+            log_probs[ng[-1]] = float('-inf')
 
 
 def get_model(model_type, vocab_q_size, vocab_a_size):
@@ -28,7 +52,7 @@ def get_model(model_type, vocab_q_size, vocab_a_size):
 
 
 def greedy_decode(model, image_tensor, question_tensor, vocab_a,
-                  max_len=20, device='cpu'):
+                  max_len=50, device='cpu'):
     """ 
     image_tensor (3, 224, 224)
     question_tensor (max_q_len) 
@@ -44,9 +68,9 @@ def greedy_decode(model, image_tensor, question_tensor, vocab_a,
         # encode 
         img_feat = model.i_encoder(img) # (1, 1024) 1024 is hidden size
         img_feat = F.normalize(img_feat, p=2, dim=1)
-        question_feat = model.q_encoder(question) # (1, 1024)
+        question_feat, _ = model.q_encoder(question) # (1, 1024)
 
-        fusion = hadamard_fusion(img_feat, question_feat) # (1, 1024)
+        fusion = model.fusion(img_feat, question_feat) # (1, 1024)
 
         # prepare h_0 and c_0 for decoder 
         h_0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1) # (num_layers, 1, 1024)
@@ -65,9 +89,11 @@ def greedy_decode(model, image_tensor, question_tensor, vocab_a,
         result = []
 
         for _ in range(max_len):
-            embed = model.decoder.embedding(token) # (1, 1, embed_size)
+            embed = model.decoder.embedding(token) # (1, 1, embed_size or glove_dim)
+            if model.decoder.embed_proj is not None:
+                embed = model.decoder.embed_proj(embed)
             output, hidden = model.decoder.lstm(embed, hidden) # output (1, 1, hidden_size)
-            logit = model.decoder.fc(output.squeeze(1)) # (1, vocab_a_size), we remove seq_len dim cause input of fc is (batch, hidden_size)
+            logit = model.decoder.fc(model.decoder.out_proj(output.squeeze(1))) # (1, vocab_a_size)
             pred = logit.argmax(dim=-1).item() # greedy 
             
             if pred == end_idx:
@@ -83,7 +109,7 @@ def greedy_decode(model, image_tensor, question_tensor, vocab_a,
 
 
 def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
-                                 max_len=20, device='cpu'):
+                                 max_len=50, device='cpu'):
     """
     For Model C and D (with Bahdanau attention).
     image_tensor : (3, 224, 224)
@@ -97,12 +123,12 @@ def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
         # encode
         img_features  = model.i_encoder(img)                  # (1, 49, 1024) -- keeps spatial
         img_features  = F.normalize(img_features, p=2, dim=-1)
-        question_feat = model.q_encoder(question)             # (1, 1024)
+        question_feat, q_hidden = model.q_encoder(question)   # (1, 1024), (1, qlen, 1024)
 
         # build image representation as mean of spatial regions
         img_mean = img_features.mean(dim=1)                   # (1, 1024)
 
-        fusion = hadamard_fusion(img_mean, question_feat)     # (1, 1024)
+        fusion = model.fusion(img_mean, question_feat)        # (1, 1024)
 
         # initialize decoder hidden state
         h_0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (num_layers, 1, 1024)
@@ -114,11 +140,11 @@ def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
 
         token  = torch.tensor([[start_idx]], dtype=torch.long).to(device)  # (1, 1)
         result = []
+        coverage = None  # coverage tracking (used if model has coverage enabled)
 
         for _ in range(max_len):
-            # decode_step returns (logit, new_hidden, alpha)
-            # img_features passed at each step so attention can compute context
-            logit, hidden, alpha = model.decoder.decode_step(token, hidden, img_features)
+            # decode_step returns (logit, new_hidden, alpha, coverage)
+            logit, hidden, alpha, coverage = model.decoder.decode_step(token, hidden, img_features, q_hidden, coverage)
             pred = logit.argmax(dim=-1).item()
 
             if pred == end_idx:
@@ -132,7 +158,7 @@ def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
 
 
 def batch_greedy_decode(model, img_tensors, q_tensors, vocab_a,
-                        max_len=20, device='cpu'):
+                        max_len=50, device='cpu'):
     """
     Batch greedy decode for models A/B (no attention).
 
@@ -147,8 +173,8 @@ def batch_greedy_decode(model, img_tensors, q_tensors, vocab_a,
 
         img_feat = model.i_encoder(imgs)               # (B, hidden)
         img_feat = F.normalize(img_feat, p=2, dim=1)
-        q_feat   = model.q_encoder(qs)                 # (B, hidden)
-        fusion   = hadamard_fusion(img_feat, q_feat)
+        q_feat, _ = model.q_encoder(qs)                  # (B, hidden)
+        fusion   = model.fusion(img_feat, q_feat)
 
         h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (layers, B, hidden)
         c = torch.zeros_like(h)
@@ -163,8 +189,10 @@ def batch_greedy_decode(model, img_tensors, q_tensors, vocab_a,
 
         for _ in range(max_len):
             embed  = model.decoder.embedding(token)             # (B, 1, embed)
+            if model.decoder.embed_proj is not None:
+                embed = model.decoder.embed_proj(embed)
             output, hidden = model.decoder.lstm(embed, hidden)  # (B, 1, hidden)
-            logit  = model.decoder.fc(output.squeeze(1))        # (B, vocab)
+            logit  = model.decoder.fc(model.decoder.out_proj(output.squeeze(1)))  # (B, vocab)
             preds  = logit.argmax(dim=-1)                       # (B,)
 
             for i in range(B):
@@ -184,7 +212,7 @@ def batch_greedy_decode(model, img_tensors, q_tensors, vocab_a,
 
 
 def batch_greedy_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
-                                       max_len=20, device='cpu'):
+                                       max_len=50, device='cpu'):
     """
     Batch greedy decode for models C/D (Bahdanau attention).
 
@@ -199,9 +227,9 @@ def batch_greedy_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
 
         img_features = model.i_encoder(imgs)                    # (B, 49, hidden)
         img_features = F.normalize(img_features, p=2, dim=-1)
-        q_feat       = model.q_encoder(qs)                      # (B, hidden)
+        q_feat, q_hidden = model.q_encoder(qs)                   # (B, hidden), (B, qlen, hidden)
         img_mean     = img_features.mean(dim=1)                 # (B, hidden)
-        fusion       = hadamard_fusion(img_mean, q_feat)
+        fusion       = model.fusion(img_mean, q_feat)
 
         h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)
         c = torch.zeros_like(h)
@@ -213,9 +241,10 @@ def batch_greedy_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
         token    = torch.full((B, 1), start_idx, dtype=torch.long, device=device)
         finished = torch.zeros(B, dtype=torch.bool, device=device)
         results  = [[] for _ in range(B)]
+        coverage = None  # coverage tracking
 
         for _ in range(max_len):
-            logit, hidden, _ = model.decoder.decode_step(token, hidden, img_features)
+            logit, hidden, _, coverage = model.decoder.decode_step(token, hidden, img_features, q_hidden, coverage)
             preds = logit.argmax(dim=-1)  # (B,)
 
             for i in range(B):
@@ -248,21 +277,24 @@ def batch_greedy_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
-                       beam_width=5, max_len=20, device='cpu'):
+                       beam_width=5, max_len=50, device='cpu',
+                       no_repeat_ngram_size=3):
     """
     Single-sample beam search for models A/B (no attention).
+    Supports n-gram blocking to prevent repetitive output.
 
-    img_tensor : (3, 224, 224)
-    q_tensor   : (max_q_len,)
-    returns    : best answer string
+    img_tensor           : (3, 224, 224)
+    q_tensor             : (max_q_len,)
+    no_repeat_ngram_size : block repeated n-grams of this size (0=disabled)
+    returns              : best answer string
     """
     with torch.no_grad():
         img = img_tensor.unsqueeze(0).to(device)
         q   = q_tensor.unsqueeze(0).to(device)
 
         img_feat = F.normalize(model.i_encoder(img), p=2, dim=1)  # (1, hidden)
-        q_feat   = model.q_encoder(q)                              # (1, hidden)
-        fusion   = hadamard_fusion(img_feat, q_feat)
+        q_feat, _ = model.q_encoder(q)                              # (1, hidden)
+        fusion   = model.fusion(img_feat, q_feat)
 
         h0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)   # (L, 1, hidden)
         c0 = torch.zeros_like(h0)
@@ -284,8 +316,12 @@ def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
                     continue
                 tok  = torch.tensor([[tokens[-1]]], dtype=torch.long, device=device)
                 emb  = model.decoder.embedding(tok)                    # (1, 1, embed)
+                if model.decoder.embed_proj is not None:
+                    emb = model.decoder.embed_proj(emb)
                 out, (nh, nc) = model.decoder.lstm(emb, (bh, bc))     # (1, 1, hidden)
-                lp   = F.log_softmax(model.decoder.fc(out.squeeze(1))[0], dim=-1)  # (vocab,)
+                lp   = F.log_softmax(model.decoder.fc(model.decoder.out_proj(out.squeeze(1)))[0], dim=-1)  # (vocab,)
+                # N-gram blocking: prevent repeated trigrams (or other n-grams)
+                _block_repeated_ngrams(lp, tokens, no_repeat_ngram_size)
                 topk_vals, topk_ids = lp.topk(beam_width)
                 for v, idx in zip(topk_vals.tolist(), topk_ids.tolist()):
                     candidates.append((log_score + v, tokens + [idx], nh, nc))
@@ -307,22 +343,25 @@ def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
 
 
 def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
-                                      beam_width=5, max_len=20, device='cpu'):
+                                      beam_width=5, max_len=50, device='cpu',
+                                      no_repeat_ngram_size=3):
     """
     Single-sample beam search for models C/D (Bahdanau attention).
+    Supports n-gram blocking to prevent repetitive output.
 
-    img_tensor : (3, 224, 224)
-    q_tensor   : (max_q_len,)
-    returns    : best answer string
+    img_tensor           : (3, 224, 224)
+    q_tensor             : (max_q_len,)
+    no_repeat_ngram_size : block repeated n-grams of this size (0=disabled)
+    returns              : best answer string
     """
     with torch.no_grad():
         img = img_tensor.unsqueeze(0).to(device)
         q   = q_tensor.unsqueeze(0).to(device)
 
         img_features = F.normalize(model.i_encoder(img), p=2, dim=-1)  # (1, 49, hidden)
-        q_feat       = model.q_encoder(q)                               # (1, hidden)
+        q_feat, q_hidden = model.q_encoder(q)                           # (1, hidden), (1, qlen, hidden)
         img_mean     = img_features.mean(dim=1)                         # (1, hidden)
-        fusion       = hadamard_fusion(img_mean, q_feat)
+        fusion       = model.fusion(img_mean, q_feat)
 
         h0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)
         c0 = torch.zeros_like(h0)
@@ -330,28 +369,30 @@ def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
         start_idx = vocab_a.word2idx['<start>']
         end_idx   = vocab_a.word2idx['<end>']
 
-        beams     = [(0.0, [start_idx], h0, c0)]
+        beams     = [(0.0, [start_idx], h0, c0, None)]  # last element = coverage
         completed = []
 
         for _ in range(max_len):
             if not beams:
                 break
             candidates = []
-            for log_score, tokens, bh, bc in beams:
+            for log_score, tokens, bh, bc, b_cov in beams:
                 if tokens[-1] == end_idx:
                     completed.append((log_score, tokens))
                     continue
                 tok            = torch.tensor([[tokens[-1]]], dtype=torch.long, device=device)
-                logit, (nh, nc), _ = model.decoder.decode_step(tok, (bh, bc), img_features)
+                logit, (nh, nc), _, new_cov = model.decoder.decode_step(tok, (bh, bc), img_features, q_hidden, b_cov)
                 lp             = F.log_softmax(logit[0], dim=-1)  # (vocab,)
+                # N-gram blocking: prevent repeated trigrams (or other n-grams)
+                _block_repeated_ngrams(lp, tokens, no_repeat_ngram_size)
                 topk_vals, topk_ids = lp.topk(beam_width)
                 for v, idx in zip(topk_vals.tolist(), topk_ids.tolist()):
-                    candidates.append((log_score + v, tokens + [idx], nh, nc))
+                    candidates.append((log_score + v, tokens + [idx], nh, nc, new_cov))
 
             candidates.sort(key=lambda x: x[0], reverse=True)
             beams = candidates[:beam_width]
 
-        for log_score, tokens, _, _ in beams:
+        for log_score, tokens, _, _, _ in beams:
             completed.append((log_score, tokens))
 
         if not completed:
@@ -364,24 +405,28 @@ def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
 
 
 def batch_beam_search_decode(model, img_tensors, q_tensors, vocab_a,
-                             beam_width=5, max_len=20, device='cpu'):
+                             beam_width=5, max_len=50, device='cpu',
+                             no_repeat_ngram_size=3):
     """Batch wrapper for beam_search_decode (models A/B)."""
     return [
         beam_search_decode(
             model, img_tensors[i], q_tensors[i], vocab_a,
-            beam_width=beam_width, max_len=max_len, device=device
+            beam_width=beam_width, max_len=max_len, device=device,
+            no_repeat_ngram_size=no_repeat_ngram_size
         )
         for i in range(img_tensors.size(0))
     ]
 
 
 def batch_beam_search_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
-                                            beam_width=5, max_len=20, device='cpu'):
+                                            beam_width=5, max_len=50, device='cpu',
+                                            no_repeat_ngram_size=3):
     """Batch wrapper for beam_search_decode_with_attention (models C/D)."""
     return [
         beam_search_decode_with_attention(
             model, img_tensors[i], q_tensors[i], vocab_a,
-            beam_width=beam_width, max_len=max_len, device=device
+            beam_width=beam_width, max_len=max_len, device=device,
+            no_repeat_ngram_size=no_repeat_ngram_size
         )
         for i in range(img_tensors.size(0))
     ]
@@ -397,7 +442,7 @@ if __name__ == "__main__":
     VOCAB_A_PATH  = "data/processed/vocab_answers.json"
     CHECKPOINT    = f"checkpoints/model_{MODEL_TYPE.lower()}_epoch10.pth"
     IMAGE_DIR     = "data/raw/images/train2014"
-    QUESTION_JSON = "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
+    VQA_E_JSON    = "data/raw/vqa_e_json/VQA-E_train_set.json"
 
     # Load vocab
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -416,12 +461,13 @@ if __name__ == "__main__":
                              std=[0.229, 0.224, 0.225])
     ])
 
-    with open(QUESTION_JSON, 'r') as f:
-        questions = json.load(f)['questions']
+    # VQA-E format: root is a list of dicts
+    with open(VQA_E_JSON, 'r') as f:
+        annotations = json.load(f)
 
-    sample = questions[0]
+    sample = annotations[0]
     q_text = sample['question']
-    img_id = sample['image_id']
+    img_id = sample['img_id']
 
     img_path   = os.path.join(IMAGE_DIR, f"COCO_train2014_{img_id:012d}.jpg")
     img_tensor = transform(Image.open(img_path).convert("RGB"))

@@ -8,24 +8,29 @@ Usage:
 """
 
 import torch
-import os, sys, json, argparse, tqdm
+import os, sys, argparse, tqdm
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from nltk.translate.meteor_score import meteor_score as nltk_meteor
 from torch.utils.data import DataLoader
 sys.path.append(os.path.dirname(__file__))
 
-from dataset import VQADataset, vqa_collate_fn
+try:
+    from bert_score import score as bert_score_fn
+    HAS_BERTSCORE = True
+except ImportError:
+    HAS_BERTSCORE = False
+
+from dataset import VQAEDataset, vqa_collate_fn
 from vocab import Vocabulary
 from inference import get_model, batch_greedy_decode, batch_greedy_decode_with_attention, \
     batch_beam_search_decode, batch_beam_search_decode_with_attention
 
-# ── Config (must match evaluate.py paths) ─────────────────────
-DEVICE             = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-VAL_IMAGE_DIR      = "data/raw/images/val2014"
-VAL_QUESTION_JSON  = "data/raw/vqa_json/v2_OpenEnded_mscoco_val2014_questions.json"
-VAL_ANNOTATION_JSON= "data/raw/vqa_json/v2_mscoco_val2014_annotations.json"
-VOCAB_Q_PATH       = "data/processed/vocab_questions.json"
-VOCAB_A_PATH       = "data/processed/vocab_answers.json"
+# ── Config ─────────────────────────────────────────────────────────
+DEVICE         = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+VAL_IMAGE_DIR  = "data/raw/images/val2014"
+VAL_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_val_set.json"
+VOCAB_Q_PATH   = "data/processed/vocab_questions.json"
+VOCAB_A_PATH   = "data/processed/vocab_answers.json"
 
 
 def decode_tensor(a_tensor, vocab_a):
@@ -38,12 +43,11 @@ def decode_tensor(a_tensor, vocab_a):
     return ' '.join(words)
 
 
-def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset,
-                       qid_to_all_answers, question_ids, num_samples, beam_width=1):
+def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset, beam_width=1,
+                       no_repeat_ngram_size=3):
     checkpoint = f"checkpoints/model_{model_type.lower()}_epoch{epoch}.pth"
 
     # Fallback to best checkpoint if epoch-specific one doesn't exist
-    # (happens when early stopping ended training before this milestone)
     if not os.path.exists(checkpoint):
         best_ckpt = f"checkpoints/model_{model_type.lower()}_best.pth"
         if os.path.exists(best_ckpt):
@@ -61,7 +65,8 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset,
     use_attention = model_type in ('C', 'D')
     if beam_width > 1:
         decode_fn     = batch_beam_search_decode_with_attention if use_attention else batch_beam_search_decode
-        decode_kwargs = dict(beam_width=beam_width)
+        decode_kwargs = dict(beam_width=beam_width,
+                             no_repeat_ngram_size=no_repeat_ngram_size)
     else:
         decode_fn     = batch_greedy_decode_with_attention if use_attention else batch_greedy_decode
         decode_kwargs = {}
@@ -82,26 +87,20 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset,
             for a_tensor in answers:
                 all_gt_strings.append(decode_tensor(a_tensor, vocab_a))
 
-    n           = len(all_predictions)
-    exact_match = 0
-    vqa_acc     = 0.0
-    bleu1_total = 0.0
-    bleu2_total = 0.0
-    bleu3_total = 0.0
-    bleu4_total = 0.0
+    n            = len(all_predictions)
+    exact_match  = 0
+    bleu1_total  = 0.0
+    bleu2_total  = 0.0
+    bleu3_total  = 0.0
+    bleu4_total  = 0.0
     meteor_total = 0.0
 
-    for idx, (pred_str, gt_str) in enumerate(zip(all_predictions, all_gt_strings)):
+    for pred_str, gt_str in zip(all_predictions, all_gt_strings):
         pred_clean = pred_str.strip().lower()
         gt_clean   = gt_str.strip().lower()
 
         if pred_clean == gt_clean:
             exact_match += 1
-
-        qid         = question_ids[idx]
-        all_answers = qid_to_all_answers.get(qid, [gt_clean])
-        match_count = sum(1 for a in all_answers if a == pred_clean)
-        vqa_acc += min(match_count / 3.0, 1.0)
 
         gt_words   = gt_str.split() or ['<unk>']
         pred_words = pred_str.split() or ['<unk>']
@@ -119,39 +118,54 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset,
                                       smoothing_function=smoothie)
         meteor_total += nltk_meteor([gt_words], pred_words)
 
+    # BERTScore (computed once per model on full prediction list)
+    bertscore_f1 = 0.0
+    if HAS_BERTSCORE:
+        _, _, F1 = bert_score_fn(all_predictions, all_gt_strings, lang='en', verbose=False)
+        bertscore_f1 = F1.mean().item()
+
     return {
-        'vqa_accuracy': vqa_acc / n * 100,
-        'exact_match':  exact_match / n * 100,
-        'bleu1':        bleu1_total / n,
-        'bleu2':        bleu2_total / n,
-        'bleu3':        bleu3_total / n,
-        'bleu4':        bleu4_total / n,
-        'meteor':       meteor_total / n,
-        'checkpoint':   checkpoint,
-        'n':            n,
+        'exact_match': exact_match / n * 100,
+        'bleu1':       bleu1_total / n,
+        'bleu2':       bleu2_total / n,
+        'bleu3':       bleu3_total / n,
+        'bleu4':       bleu4_total / n,
+        'meteor':      meteor_total / n,
+        'bertscore':   bertscore_f1,
+        'checkpoint':  checkpoint,
+        'n':           n,
     }
 
 
 def print_table(results):
-    header = f"{'Model':<8} {'VQA Acc':>9} {'Exact':>8} {'BLEU-1':>8} {'BLEU-2':>8} {'BLEU-3':>8} {'BLEU-4':>8} {'METEOR':>8}  Checkpoint"
+    has_bert = HAS_BERTSCORE
+    header = f"{'Model':<8} {'BLEU-4':>8} {'METEOR':>8}"
+    if has_bert:
+        header += f" {'BERTScr':>8}"
+    header += f" {'BLEU-1':>8} {'BLEU-2':>8} {'BLEU-3':>8} {'Exact':>8}  Checkpoint"
     print()
     print(header)
     print("-" * len(header))
     for model_type, r in sorted(results.items()):
         if r is None:
-            print(f"{model_type:<8} {'N/A':>9} {'N/A':>8} {'N/A':>8} {'N/A':>8} {'N/A':>8} {'N/A':>8} {'N/A':>8}  (checkpoint missing)")
+            cols = f"{'N/A':>8} " * (7 if has_bert else 6)
+            print(f"{model_type:<8} {cols} (checkpoint missing)")
         else:
-            print(
+            line = (
                 f"{model_type:<8}"
-                f" {r['vqa_accuracy']:>8.2f}%"
-                f" {r['exact_match']:>7.2f}%"
+                f" {r['bleu4']:>8.4f}"
+                f" {r['meteor']:>8.4f}"
+            )
+            if has_bert:
+                line += f" {r['bertscore']:>8.4f}"
+            line += (
                 f" {r['bleu1']:>8.4f}"
                 f" {r['bleu2']:>8.4f}"
                 f" {r['bleu3']:>8.4f}"
-                f" {r['bleu4']:>8.4f}"
-                f" {r['meteor']:>8.4f}"
+                f" {r['exact_match']:>7.2f}%"
                 f"  {r['checkpoint']}"
             )
+            print(line)
     print()
 
 
@@ -164,34 +178,24 @@ def main():
     parser.add_argument('--models',      type=str, default='A,B,C,D',
                         help='Comma-separated list of models to compare (default: A,B,C,D)')
     parser.add_argument('--beam_width',  type=int, default=1,
-                        help='Beam width for decoding. 1 = greedy (default), >1 = beam search')
+                        help='Beam width. 1 = greedy (default), >1 = beam search')
+    parser.add_argument('--no_repeat_ngram', type=int, default=3,
+                        help='Block repeated n-grams of this size in beam search (0=disabled, default=3)')
     args = parser.parse_args()
 
     model_types = [m.strip().upper() for m in args.models.split(',')]
 
-    # Load vocab
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
     vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
 
-    # Official VQA 2.0 val split
-    val_dataset = VQADataset(
+    val_dataset = VQAEDataset(
         image_dir=VAL_IMAGE_DIR,
-        question_json_path=VAL_QUESTION_JSON,
-        annotations_json_path=VAL_ANNOTATION_JSON,
+        vqa_e_json_path=VAL_VQA_E_JSON,
         vocab_q=vocab_q,
         vocab_a=vocab_a,
         split='val2014',
         max_samples=args.num_samples
     )
-
-    # Load all 10 human annotations per question for VQA accuracy
-    with open(VAL_ANNOTATION_JSON, 'r') as f:
-        raw_annotations = json.load(f)['annotations']
-    qid_to_all_answers = {
-        ann['question_id']: [a['answer'].lower().strip() for a in ann['answers']]
-        for ann in raw_annotations
-    }
-    question_ids = [q['question_id'] for q in val_dataset.questions]
 
     n = len(val_dataset)
     print(f"Comparing models: {model_types} | epoch={args.epoch} | samples={n} | decode={'beam (w=' + str(args.beam_width) + ')' if args.beam_width > 1 else 'greedy'}")
@@ -200,8 +204,8 @@ def main():
     for model_type in model_types:
         results[model_type] = evaluate_one_model(
             model_type, args.epoch, vocab_q, vocab_a, val_dataset,
-            qid_to_all_answers, question_ids, args.num_samples,
-            beam_width=args.beam_width
+            beam_width=args.beam_width,
+            no_repeat_ngram_size=args.no_repeat_ngram
         )
 
     print_table(results)

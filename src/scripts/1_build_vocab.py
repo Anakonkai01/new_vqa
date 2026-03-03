@@ -5,9 +5,8 @@ import json
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from vocab import Vocabulary
 
-QUESTION_JSON_PATH = "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
-
-ANNOTATION_JSON_PATH = "data/raw/vqa_json/v2_mscoco_train2014_annotations.json"
+# VQA-E single annotation file (contains question + answer + explanation)
+TRAIN_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_train_set.json"
 
 OUTPUT_DIR = "data/processed"
 
@@ -17,50 +16,54 @@ def main():
         os.makedirs(OUTPUT_DIR)
         print(f"Created directory: {OUTPUT_DIR}")
 
-    # handdle question
-    print(f"\n1. Reading question file: {QUESTION_JSON_PATH}")
+    print(f"\nReading VQA-E annotation file: {TRAIN_VQA_E_JSON}")
     try:
-        with open(QUESTION_JSON_PATH, 'r') as f:
-            questions_data = json.load(f)['questions']
+        with open(TRAIN_VQA_E_JSON, 'r') as f:
+            annotations = json.load(f)  # root is a list
     except FileNotFoundError:
-        print(f"ERROR: File not found: {QUESTION_JSON_PATH}")
-        print("Please check the file path in the configuration section above.")
+        print(f"ERROR: File not found: {TRAIN_VQA_E_JSON}")
+        print("Please download VQA-E and place it in data/raw/vqa_e_json/")
         return
 
-    print("Building question vocabulary...")
-    # Extract all question texts
-    questions_list = [q['question'] for q in questions_data]
-    
-    # Build vocab (filter words appearing >= 3 times)
+    print(f"Loaded {len(annotations)} annotations.")
+
+    # Build question vocabulary from 'question' field
+    print("\n1. Building question vocabulary...")
+    questions_list = [ann['question'] for ann in annotations if 'question' in ann]
     q_vocab = Vocabulary()
     q_vocab.build(questions_list, threshold=3)
-    
-    # Save file
     q_out_path = os.path.join(OUTPUT_DIR, 'vocab_questions.json')
     q_vocab.save(q_out_path)
-    print(f"Done! Saved to: {q_out_path}")
+    print(f"   Vocab size: {len(q_vocab)} | Saved to: {q_out_path}")
 
-    # haddle answer 
-    print(f"\n2. Reading annotation file: {ANNOTATION_JSON_PATH}")
-    try:
-        with open(ANNOTATION_JSON_PATH, 'r') as f:
-            annotations_data = json.load(f)['annotations']
-    except FileNotFoundError:
-        print(f"ERROR: File not found: {ANNOTATION_JSON_PATH}")
-        return
+    # Build answer vocabulary from 'answer + because + explanation'
+    # VQA-E format: 'answer' field (some versions use 'multiple_choice_answer')
+    # and 'explanation' field (a list, take first element)
+    print("\n2. Building answer vocabulary (answer + explanation)...")
+    answers_list = []
+    for ann in annotations:
+        answer = ann.get('multiple_choice_answer', '')
+        explanation_list = ann.get('explanation', [])
+        # explanation = [text_string, confidence_score] — take index 0
+        explanation = explanation_list[0] if explanation_list and isinstance(explanation_list[0], str) else ''
+        if explanation:
+            a_text = f"{answer} because {explanation}"
+        else:
+            a_text = answer
+        answers_list.append(a_text)
 
-    print("Building answer vocabulary...")
-    # Get the most common answer (multiple_choice_answer)
-    answers_list = [ann['multiple_choice_answer'] for ann in annotations_data]
-    
-    # Build vocab (stricter filter, threshold=5)
+    # threshold=3: VQA-E is ~6x smaller than VQA 2.0, need to keep more words
     a_vocab = Vocabulary()
-    a_vocab.build(answers_list, threshold=5)
-    
-    # Save file
+    a_vocab.build(answers_list, threshold=3)
     a_out_path = os.path.join(OUTPUT_DIR, 'vocab_answers.json')
     a_vocab.save(a_out_path)
-    print(f"Done! Saved to: {a_out_path}")
+    print(f"   Vocab size: {len(a_vocab)} | Saved to: {a_out_path}")
+    print(f"\nSample answer texts:")
+    for ann in annotations[:3]:
+        answer = ann.get('multiple_choice_answer', '')
+        exp = ann.get('explanation', [''])[0]
+        print(f"  Q: {ann['question']}")
+        print(f"  A: {answer} because {exp}\n")
 
 if __name__ == '__main__':
     main()

@@ -27,10 +27,26 @@ import torch.nn as nn
 
 
 class LSTMDecoder(nn.Module):
-    def __init__(self, vocab_size, embed_size, hidden_size, num_layers, dropout=0.5):
+    def __init__(self, vocab_size, embed_size, hidden_size, num_layers,
+                 dropout=0.5, pretrained_embeddings=None):
         super().__init__()
 
-        self.embedding = nn.Embedding(num_embeddings=vocab_size, embedding_dim=embed_size, padding_idx=0)
+        # Embedding: supports GloVe pretrained vectors
+        if pretrained_embeddings is not None:
+            glove_dim = pretrained_embeddings.shape[1]
+            self.embedding = nn.Embedding.from_pretrained(
+                pretrained_embeddings, freeze=False, padding_idx=0
+            )
+            if glove_dim != embed_size:
+                self.embed_proj = nn.Linear(glove_dim, embed_size)
+            else:
+                self.embed_proj = None
+        else:
+            self.embedding = nn.Embedding(
+                num_embeddings=vocab_size, embedding_dim=embed_size, padding_idx=0
+            )
+            self.embed_proj = None
+
         self.dropout   = nn.Dropout(dropout)
 
         self.lstm = nn.LSTM(
@@ -41,8 +57,13 @@ class LSTMDecoder(nn.Module):
             dropout=dropout if num_layers > 1 else 0
         )
 
-        # projec hidden state -> vocab logits 
-        self.fc = nn.Linear(hidden_size, vocab_size)
+        # Weight Tying (Press & Wolf, 2017):
+        # hidden_size → embed_dim (projection) → vocab (tied with embedding)
+        actual_embed_dim = self.embedding.embedding_dim  # 300 (GloVe) or 512 (random)
+        self.out_proj = nn.Linear(hidden_size, actual_embed_dim)
+        self.fc = nn.Linear(actual_embed_dim, vocab_size, bias=False)
+        # Tie: fc.weight = embedding.weight (both shape: vocab × embed_dim)
+        self.fc.weight = self.embedding.weight
 
     
     def forward(self, encoder_hidden, target_seq):
@@ -57,14 +78,16 @@ class LSTMDecoder(nn.Module):
         """
 
         embeds = self.dropout(self.embedding(target_seq))
+        if self.embed_proj is not None:
+            embeds = self.embed_proj(embeds)
         # embeds (batch, maxlen, embed_size)
 
         # use encoder_hidden to be initial state of lstm 
         outputs, (hidden, cell) = self.lstm(embeds, encoder_hidden)
         # outputs (batch, maxlen, hidden_size)
 
-        # project from hidden to vocab space 
-        logits = self.fc(outputs)
+        # project from hidden to vocab space (with weight tying)
+        logits = self.fc(self.out_proj(outputs))
         # logits (batch, maxlen, vocab_size)
 
         return logits 

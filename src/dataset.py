@@ -39,6 +39,79 @@ def vqa_collate_fn(batch):
 
 
 
+class VQAEDataset(Dataset):
+    """
+    Dataset for VQA-E: loads a single annotation JSON that contains
+    question + answer + explanation per entry.
+    Target sequence: "<start> answer because explanation <end>"
+    Images: same COCO 2014 images as VQA 2.0 (no new download needed).
+    """
+    def __init__(self, image_dir, vqa_e_json_path, vocab_q, vocab_a,
+                 split='train2014', max_samples=None, augment=False):
+        """
+        image_dir      : path to COCO images (train2014 or val2014)
+        vqa_e_json_path: path to VQA-E annotation JSON (single file)
+        vocab_q        : question Vocabulary object
+        vocab_a        : answer Vocabulary object
+        split          : 'train2014' or 'val2014' — used in image filename
+        max_samples    : cap number of samples (useful for quick tests)
+        augment        : apply data augmentation (train only)
+        """
+        self.image_dir = image_dir
+        self.vocab_q   = vocab_q
+        self.vocab_a   = vocab_a
+        self.split     = split
+
+        if augment:
+            self.transform = transforms.Compose([
+                transforms.Resize((224, 224)),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2,
+                                       saturation=0.2, hue=0.05),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.Resize((224, 224)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.229, 0.224, 0.225])
+            ])
+
+        with open(vqa_e_json_path, 'r') as f:
+            self.annotations = json.load(f)  # root is a list
+
+        if max_samples is not None:
+            self.annotations = self.annotations[:max_samples]
+
+    def __len__(self):
+        return len(self.annotations)
+
+    def __getitem__(self, index):
+        ann    = self.annotations[index]
+        q_text = ann['question']
+        img_id = ann['img_id']  # VQA-E uses 'img_id' (not 'image_id')
+
+        answer   = ann.get('multiple_choice_answer', '')
+        exp_list = ann.get('explanation', [])
+        # explanation = [text_string, confidence_score] — text is index 0
+        explanation = exp_list[0] if exp_list and isinstance(exp_list[0], str) else ''
+
+        a_text = f"{answer} because {explanation}" if explanation else answer
+
+        q_tensor = torch.tensor(self.vocab_q.numericalize(q_text), dtype=torch.long)
+        a_tensor = torch.tensor(self.vocab_a.numericalize(a_text), dtype=torch.long)
+
+        img_name  = f"COCO_{self.split}_{img_id:012d}.jpg"
+        img_path  = os.path.join(self.image_dir, img_name)
+        image     = Image.open(img_path).convert("RGB")
+        img_tensor = self.transform(image)
+
+        return img_tensor, q_tensor, a_tensor
+
+
 class VQADataset(Dataset):
     def __init__(self, image_dir, question_json_path,
                  annotations_json_path, vocab_q, vocab_a,

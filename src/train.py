@@ -14,8 +14,9 @@ import tqdm
 sys.path.append(os.path.dirname(__file__))
 
 # Import modules
-from dataset import VQADataset, vqa_collate_fn
-from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, hadamard_fusion
+from dataset import VQAEDataset, vqa_collate_fn
+from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD
+from glove_utils import build_glove_matrix
 from vocab import Vocabulary
 
 
@@ -66,16 +67,21 @@ def _fused_adam_available():
         return False
 
 
-def get_model(model_type, vocab_q_size, vocab_a_size):
+def get_model(model_type, vocab_q_size, vocab_a_size,
+              pretrained_q_emb=None, pretrained_a_emb=None,
+              use_coverage=False):
     """Factory function: return the model corresponding to model_type."""
+    kw = dict(pretrained_q_emb=pretrained_q_emb, pretrained_a_emb=pretrained_a_emb)
     if model_type == 'A':
-        return VQAModelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
     elif model_type == 'B':
-        return VQAModelB(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelB(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
     elif model_type == 'C':
-        return VQAModelC(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelC(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+                         use_coverage=use_coverage, **kw)
     elif model_type == 'D':
-        return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+                         use_coverage=use_coverage, **kw)
     else:
         raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D.")
 
@@ -113,16 +119,21 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
     # ── Encode image + question ──────────────────────────────────────
     if model_type in ('C', 'D'):
         img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B, 49, H)
-        q_feat       = model.q_encoder(questions)                        # (B, H)
-        fusion       = hadamard_fusion(img_features.mean(dim=1), q_feat) # (B, H)
+        q_feat, q_hidden = model.q_encoder(questions)                    # (B, H), (B, qlen, H)
+        fusion       = model.fusion(img_features.mean(dim=1), q_feat)    # (B, H)
     else:
         img_feat = F.normalize(model.i_encoder(imgs), p=2, dim=1)       # (B, H)
-        q_feat   = model.q_encoder(questions)                            # (B, H)
-        fusion   = hadamard_fusion(img_feat, q_feat)                     # (B, H)
+        q_feat, _ = model.q_encoder(questions)                           # (B, H)
+        fusion    = model.fusion(img_feat, q_feat)                       # (B, H)
 
     h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (L, B, H)
     c = torch.zeros_like(h)
     hidden = (h, c)
+
+    # Coverage vector for models C/D
+    coverage = None
+    if model_type in ('C', 'D') and model.decoder.use_coverage:
+        coverage = imgs.new_zeros(B, img_features.size(1))  # (B, 49)
 
     # ── Step-by-step decoding ────────────────────────────────────────
     current_token = decoder_input[:, 0]   # (B,) — first token is always <start>
@@ -132,12 +143,14 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
         tok = current_token.unsqueeze(1)  # (B, 1)
 
         if model_type in ('C', 'D'):
-            logit, hidden, _ = model.decoder.decode_step(tok, hidden, img_features)
+            logit, hidden, _, coverage = model.decoder.decode_step(tok, hidden, img_features, q_hidden, coverage)
             # logit: (B, vocab), hidden: updated (h, c)
         else:
             emb        = model.decoder.dropout(model.decoder.embedding(tok)) # (B, 1, embed)
+            if model.decoder.embed_proj is not None:
+                emb = model.decoder.embed_proj(emb)
             out, hidden = model.decoder.lstm(emb, hidden)        # (B, 1, H)
-            logit      = model.decoder.fc(out.squeeze(1))        # (B, vocab)
+            logit      = model.decoder.fc(model.decoder.out_proj(out.squeeze(1)))  # (B, vocab)
 
         logits_list.append(logit)
 
@@ -152,14 +165,12 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
 
 
 # ── Training set (train2014) ─────────────────────────────────────
-TRAIN_IMAGE_DIR       = "data/raw/images/train2014"
-TRAIN_QUESTION_JSON   = "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
-TRAIN_ANNOTATION_JSON = "data/raw/vqa_json/v2_mscoco_train2014_annotations.json"
+TRAIN_IMAGE_DIR  = "data/raw/images/train2014"
+TRAIN_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_train_set.json"
 
 # ── Validation set (val2014) ──────────────────────────────────────
-VAL_IMAGE_DIR         = "data/raw/images/val2014"
-VAL_QUESTION_JSON     = "data/raw/vqa_json/v2_OpenEnded_mscoco_val2014_questions.json"
-VAL_ANNOTATION_JSON   = "data/raw/vqa_json/v2_mscoco_val2014_annotations.json"
+VAL_IMAGE_DIR  = "data/raw/images/val2014"
+VAL_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_val_set.json"
 
 VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
 VOCAB_A_PATH  = "data/processed/vocab_answers.json"
@@ -173,16 +184,18 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           scheduled_sampling=False, ss_k=5,
           finetune_cnn=False, cnn_lr_factor=0.1,
           num_workers=4, weight_decay=1e-5,
-          early_stopping_patience=0, augment=False):
+          early_stopping_patience=0, augment=False,
+          use_glove=False, glove_dim=300,
+          use_coverage=False, coverage_lambda=1.0,
+          accum_steps=1):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
     vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
 
-    train_dataset = VQADataset(
+    train_dataset = VQAEDataset(
         image_dir=TRAIN_IMAGE_DIR,
-        question_json_path=TRAIN_QUESTION_JSON,
-        annotations_json_path=TRAIN_ANNOTATION_JSON,
+        vqa_e_json_path=TRAIN_VQA_E_JSON,
         vocab_q=vocab_q,
         vocab_a=vocab_a,
         split='train2014',
@@ -190,10 +203,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         augment=augment
     )
 
-    val_dataset = VQADataset(
+    val_dataset = VQAEDataset(
         image_dir=VAL_IMAGE_DIR,
-        question_json_path=VAL_QUESTION_JSON,
-        annotations_json_path=VAL_ANNOTATION_JSON,
+        vqa_e_json_path=VAL_VQA_E_JSON,
         vocab_q=vocab_q,
         vocab_a=vocab_a,
         split='val2014',
@@ -226,8 +238,23 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         prefetch_factor=4 if num_workers > 0 else None,
     )
 
-    model     = get_model(model_type, len(vocab_q), len(vocab_a)).to(DEVICE)
-    criterion = nn.CrossEntropyLoss(ignore_index=0)
+    # ── GloVe pretrained embeddings (optional) ────────────────────
+    pretrained_q_emb = None
+    pretrained_a_emb = None
+    if use_glove:
+        import torch as _t
+        print(f"Loading GloVe {glove_dim}d embeddings ...")
+        q_matrix, q_cov = build_glove_matrix(vocab_q, glove_dim=glove_dim)
+        a_matrix, a_cov = build_glove_matrix(vocab_a, glove_dim=glove_dim)
+        pretrained_q_emb = _t.tensor(q_matrix)
+        pretrained_a_emb = _t.tensor(a_matrix)
+        print(f"  Q-vocab coverage: {q_cov:.1%} | A-vocab coverage: {a_cov:.1%}")
+
+    model     = get_model(model_type, len(vocab_q), len(vocab_a),
+                           pretrained_q_emb=pretrained_q_emb,
+                           pretrained_a_emb=pretrained_a_emb,
+                           use_coverage=use_coverage).to(DEVICE)
+    criterion = nn.CrossEntropyLoss(ignore_index=0, label_smoothing=0.1)
 
     # ── Optimizer — differential LR when fine-tuning the CNN backbone ──────────
     # Models A/C use scratch CNN → finetune_cnn flag has no effect on them.
@@ -254,10 +281,17 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     if weight_decay > 0:
         print(f"Weight decay     : {weight_decay:.1e}")
 
-    # Halve LR when val loss stops improving for 2 consecutive epochs
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+    # ── LR Warmup + ReduceLROnPlateau ─────────────────────────────
+    # Warm up linearly from lr/10 → lr over first warmup_epochs epochs,
+    # then switch to ReduceLROnPlateau (halve when val loss plateaus).
+    warmup_epochs = 3
+    warmup_scheduler = optim.lr_scheduler.LinearLR(
+        optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
+    )
+    plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=2
     )
+    print(f"LR Warmup        : {warmup_epochs} epochs (lr/10 → lr)")
 
     # Mixed precision — BF16 on Ampere+ (A100, etc.), FP16 elsewhere
     use_amp  = torch.cuda.is_available()
@@ -292,7 +326,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         current_groups = len(optimizer.param_groups)
         if saved_groups == current_groups:
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-            scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+            if 'warmup_scheduler_state_dict' in ckpt:
+                warmup_scheduler.load_state_dict(ckpt['warmup_scheduler_state_dict'])
+                plateau_scheduler.load_state_dict(ckpt['plateau_scheduler_state_dict'])
             scaler.load_state_dict(ckpt['scaler_state_dict'])
             print("  Optimizer & scheduler state restored.")
         else:
@@ -305,6 +341,10 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         print(f"  Resumed at epoch {start_epoch} | best_val_loss: {best_val_loss:.4f}")
 
     print(f"Model: {model_type} | Device: {DEVICE}")
+    if use_coverage and model_type in ('C', 'D'):
+        print(f"Coverage Mechanism: ON | λ = {coverage_lambda}")
+    if accum_steps > 1:
+        print(f"Gradient Accum   : {accum_steps} steps (effective batch = {batch_size * accum_steps})")
     if augment:
         print("Data augmentation: ON (RandomHorizontalFlip + ColorJitter)")
     if early_stopping_patience > 0:
@@ -318,8 +358,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         # ── Train ────────────────────────────────────────────────
         model.train()
         total_loss = 0
+        optimizer.zero_grad()  # zero once before accumulation loop
 
-        for imgs, questions, answer in train_loader:
+        for step_idx, (imgs, questions, answer) in enumerate(train_loader):
             imgs      = imgs.to(DEVICE)
             questions = questions.to(DEVICE)
             answer    = answer.to(DEVICE)
@@ -328,8 +369,6 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
             decoder_input  = answer[:, :-1]
             decoder_target = answer[:, 1:]
 
-            optimizer.zero_grad()
-
             with autocast(enabled=use_amp, dtype=amp_dtype):
                 if scheduled_sampling:
                     # Inverse-sigmoid epsilon decay: higher k = slower decay
@@ -337,21 +376,37 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                     epsilon = ss_k / (ss_k + math.exp(epoch / ss_k))
                     logits  = ss_forward(model, model_type, imgs, questions,
                                          decoder_input, epsilon)
+                    coverage_loss = torch.tensor(0.0, device=DEVICE)
                 else:
-                    logits  = model(imgs, questions, decoder_input)
+                    result = model(imgs, questions, decoder_input)
+                    # Models C/D return (logits, coverage_loss), A/B return logits
+                    if isinstance(result, tuple):
+                        logits, coverage_loss = result
+                    else:
+                        logits = result
+                        coverage_loss = torch.tensor(0.0, device=DEVICE)
+
                 vocab_size = logits.size(-1)
-                loss = criterion(
+                ce_loss = criterion(
                     logits.view(-1, vocab_size),
                     decoder_target.contiguous().view(-1)
                 )
+                # Total loss = CE + λ * coverage_loss (coverage_loss is 0 when disabled)
+                loss = ce_loss + coverage_lambda * coverage_loss
+                # Scale loss for gradient accumulation
+                loss = loss / accum_steps
 
             scaler.scale(loss).backward()
-            scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
-            scaler.step(optimizer)
-            scaler.update()
 
-            total_loss += loss.item()
+            # Step optimizer every accum_steps mini-batches (or at the last batch)
+            if (step_idx + 1) % accum_steps == 0 or (step_idx + 1) == len(train_loader):
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
+
+            total_loss += loss.item() * accum_steps  # undo the /accum_steps for logging
 
         avg_train_loss = total_loss / len(train_loader)
 
@@ -368,7 +423,11 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                 decoder_target = answer[:, 1:]
 
                 with autocast(enabled=use_amp, dtype=amp_dtype):
-                    logits     = model(imgs, questions, decoder_input)
+                    result     = model(imgs, questions, decoder_input)
+                    if isinstance(result, tuple):
+                        logits, _ = result
+                    else:
+                        logits = result
                     vocab_size = logits.size(-1)
                     loss = criterion(
                         logits.view(-1, vocab_size),
@@ -384,8 +443,11 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         else:
             print(f"Epoch {epoch+1}/{start_epoch + epochs} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | LR: {current_lr:.2e}")
 
-        # Step LR scheduler based on val loss
-        scheduler.step(avg_val_loss)
+        # Step LR scheduler: warmup for first warmup_epochs, then plateau
+        if epoch < start_epoch + warmup_epochs:
+            warmup_scheduler.step()
+        else:
+            plateau_scheduler.step(avg_val_loss)
 
         # Save history after every epoch (safe against session interruption)
         history['train_loss'].append(avg_train_loss)
@@ -405,7 +467,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
             'epoch':                current_epoch,
             'model_state_dict':     model.state_dict(),
             'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
+            'warmup_scheduler_state_dict':  warmup_scheduler.state_dict(),
+            'plateau_scheduler_state_dict': plateau_scheduler.state_dict(),
             'scaler_state_dict':    scaler.state_dict(),
             'best_val_loss':        best_val_loss,
             'history':              history,
@@ -469,13 +532,26 @@ if __name__ == "__main__":
                         help='Stop if val loss does not improve for N epochs (0=disabled)')
     parser.add_argument('--augment', action='store_true',
                         help='Enable image data augmentation (RandomHorizontalFlip + ColorJitter)')
+    parser.add_argument('--glove', action='store_true',
+                        help='Use GloVe 300d pretrained embeddings for Q-encoder and decoder')
+    parser.add_argument('--glove_dim', type=int, default=300,
+                        help='GloVe embedding dimension: 50, 100, 200, or 300 (default: 300)')
+    parser.add_argument('--coverage', action='store_true',
+                        help='Enable coverage mechanism to reduce repetition (models C/D only)')
+    parser.add_argument('--coverage_lambda', type=float, default=1.0,
+                        help='Weight for coverage loss term (default: 1.0)')
+    parser.add_argument('--accum_steps', type=int, default=1,
+                        help='Gradient accumulation steps (effective batch = batch_size × accum_steps)')
     args = parser.parse_args()
     train(model_type=args.model, epochs=args.epochs, lr=args.lr,
           batch_size=args.batch_size, resume=args.resume,
           scheduled_sampling=args.scheduled_sampling, ss_k=args.ss_k,
           finetune_cnn=args.finetune_cnn, cnn_lr_factor=args.cnn_lr_factor,
           num_workers=args.num_workers, weight_decay=args.weight_decay,
-          early_stopping_patience=args.early_stopping, augment=args.augment)
+          early_stopping_patience=args.early_stopping, augment=args.augment,
+          use_glove=args.glove, glove_dim=args.glove_dim,
+          use_coverage=args.coverage, coverage_lambda=args.coverage_lambda,
+          accum_steps=args.accum_steps)
         
         
         

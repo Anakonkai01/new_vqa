@@ -28,12 +28,11 @@ from torchvision import transforms
 sys.path.append(os.path.dirname(__file__))
 from vocab import Vocabulary
 from inference import get_model, greedy_decode
-from models.vqa_models import hadamard_fusion
 
 # ── Config ───────────────────────────────────────────────────────
 DEVICE          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 IMAGE_DIR       = "data/raw/images/train2014"
-QUESTION_JSON   = "data/raw/vqa_json/v2_OpenEnded_mscoco_train2014_questions.json"
+VQA_E_JSON      = "data/raw/vqa_e_json/VQA-E_train_set.json"
 VOCAB_Q_PATH    = "data/processed/vocab_questions.json"
 VOCAB_A_PATH    = "data/processed/vocab_answers.json"
 
@@ -68,10 +67,10 @@ def decode_with_attention_steps(model, image_tensor, question_tensor,
 
         img_features  = model.i_encoder(img)                   # (1, 49, 1024)
         img_features  = F.normalize(img_features, p=2, dim=-1)
-        question_feat = model.q_encoder(question)              # (1, 1024)
+        question_feat, q_hidden = model.q_encoder(question)     # (1, 1024), (1, qlen, 1024)
 
         img_mean = img_features.mean(dim=1)                    # (1, 1024)
-        fusion   = hadamard_fusion(img_mean, question_feat)    # (1, 1024)
+        fusion   = model.fusion(img_mean, question_feat)       # (1, 1024)
 
         h_0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)
         c_0 = torch.zeros_like(h_0)
@@ -83,9 +82,10 @@ def decode_with_attention_steps(model, image_tensor, question_tensor,
 
         tokens = []
         alphas = []
+        coverage = None  # coverage tracking
 
         for _ in range(max_len):
-            logit, hidden, alpha = model.decoder.decode_step(token, hidden, img_features)
+            logit, hidden, alpha, coverage = model.decoder.decode_step(token, hidden, img_features, q_hidden, coverage)
             pred = logit.argmax(dim=-1).item()
 
             if pred == end_idx:
@@ -100,12 +100,12 @@ def decode_with_attention_steps(model, image_tensor, question_tensor,
 
 
 def visualize_attention(model, image_tensor, original_image, question_text,
-                        vocab_a, output_path, device='cpu'):
+                        question_tensor, vocab_a, output_path, device='cpu'):
     """
     Draw the original image + per-token attention heatmaps.
     """
     tokens, alphas = decode_with_attention_steps(
-        model, image_tensor, None, vocab_a, device=device
+        model, image_tensor, question_tensor, vocab_a, device=device
     )
 
     # fallback: if model has no attention (A/B), skip visualization
@@ -157,10 +157,10 @@ def _decode_wrapper(model, image_tensor, question_tensor, vocab_a, device='cpu')
 
         img_features  = model.i_encoder(img)
         img_features  = F.normalize(img_features, p=2, dim=-1)
-        question_feat = model.q_encoder(question)
+        question_feat, q_hidden = model.q_encoder(question)    # (1, H), (1, qlen, H)
 
         img_mean = img_features.mean(dim=1)
-        fusion   = hadamard_fusion(img_mean, question_feat)
+        fusion   = model.fusion(img_mean, question_feat)
 
         h_0 = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)
         c_0 = torch.zeros_like(h_0)
@@ -172,9 +172,10 @@ def _decode_wrapper(model, image_tensor, question_tensor, vocab_a, device='cpu')
 
         tokens = []
         alphas = []
+        coverage = None  # coverage tracking
 
         for _ in range(20):
-            logit, hidden, alpha = model.decoder.decode_step(token, hidden, img_features)
+            logit, hidden, alpha, coverage = model.decoder.decode_step(token, hidden, img_features, q_hidden, coverage)
             pred = logit.argmax(dim=-1).item()
             if pred == end_idx:
                 break
@@ -216,13 +217,13 @@ if __name__ == "__main__":
     model.to(DEVICE)
     model.eval()
 
-    # load sample
-    with open(QUESTION_JSON, 'r') as f:
-        questions = json.load(f)['questions']
+    # load sample (VQA-E format: list of dicts with 'question', 'img_id', etc.)
+    with open(VQA_E_JSON, 'r') as f:
+        annotations = json.load(f)
 
-    sample    = questions[args.sample_idx]
+    sample    = annotations[args.sample_idx]
     q_text    = sample['question']
-    img_id    = sample['image_id']
+    img_id    = sample['img_id']
     img_path  = os.path.join(IMAGE_DIR, f"COCO_train2014_{img_id:012d}.jpg")
 
     transform     = get_transform()
