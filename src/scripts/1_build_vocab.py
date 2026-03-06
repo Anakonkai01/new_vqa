@@ -6,7 +6,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from vocab import Vocabulary
 
 # VQA-E single annotation file (contains question + answer + explanation)
-TRAIN_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_train_set.json"
+TRAIN_VQA_E_JSON = "data/vqa_e/VQA-E_train_set.json"
 
 OUTPUT_DIR = "data/processed"
 
@@ -22,7 +22,7 @@ def main():
             annotations = json.load(f)  # root is a list
     except FileNotFoundError:
         print(f"ERROR: File not found: {TRAIN_VQA_E_JSON}")
-        print("Please download VQA-E and place it in data/raw/vqa_e_json/")
+        print("Please download VQA-E and place it in data/vqa_e/")
         return
 
     print(f"Loaded {len(annotations)} annotations.")

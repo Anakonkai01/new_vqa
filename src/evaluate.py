@@ -25,12 +25,13 @@ from inference import (
     batch_greedy_decode_with_attention,
     batch_beam_search_decode,
     batch_beam_search_decode_with_attention,
+    strip_compiled_prefix,
 )
 
 # CONFIGURATION
 DEVICE         = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-VAL_IMAGE_DIR  = "data/raw/images/val2014"
-VAL_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_val_set.json"
+VAL_IMAGE_DIR  = "data/raw/val2014"
+VAL_VQA_E_JSON = "data/vqa_e/VQA-E_val_set.json"
 VOCAB_Q_PATH   = "data/processed/vocab_questions.json"
 VOCAB_A_PATH   = "data/processed/vocab_answers.json"
 
@@ -61,7 +62,8 @@ def evaluate(model_type='A', checkpoint=None, num_samples=None, beam_width=1,
     )
 
     model = get_model(model_type, len(vocab_q), len(vocab_a))
-    model.load_state_dict(torch.load(checkpoint, map_location=lambda storage, loc: storage))
+    state_dict = torch.load(checkpoint, map_location=lambda storage, loc: storage)
+    model.load_state_dict(strip_compiled_prefix(state_dict))
     model.to(DEVICE)
     model.eval()
 

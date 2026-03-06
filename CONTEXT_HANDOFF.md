@@ -1,7 +1,7 @@
 # CONTEXT HANDOFF — VQA Project (tiếp tục từ đây)
 
 > Tài liệu này tóm tắt toàn bộ ngữ cảnh cần thiết để tiếp tục dự án.
-> Cập nhật lần cuối: 2026-03-03 (session 4 — 11 architecture improvements implemented)
+> Cập nhật lần cuối: 2026-03-03 (session 5 — bugs fixed, vocab rebuilt, local training notebook)
 
 ---
 
@@ -40,7 +40,7 @@ Xây dựng các loại kiến trúc khác nhau dựa trên:
 
 ## 3. TRẠNG THÁI HIỆN TẠI
 
-### ĐÃ HOÀN THÀNH (session 1-4)
+### ĐÃ HOÀN THÀNH (session 1-5)
 
 #### Session 1-2: VQA-E Migration + Pipeline
 - [x] VQA-E dataset migration: `VQAEDataset`, `1_build_vocab.py`, all paths updated
@@ -64,10 +64,19 @@ Xây dựng các loại kiến trúc khác nhau dựa trên:
 - [x] **Repetition Penalty (N-gram Blocking)** — `inference.py`: `_block_repeated_ngrams()` trong beam search. Default block trigram. Flag: `--no_repeat_ngram 3` (0=disable)
 - [x] **Gradient Accumulation** — `train.py`: `--accum_steps N` → effective batch = batch_size × N
 
+#### Session 5: Bug Fixes + Local Training Setup
+- [x] **Path bugs fixed** — 6 files dùng sai đường dẫn, đã sửa tất cả:
+  - `data/raw/images/train2014` → `data/raw/train2014`
+  - `data/raw/images/val2014` → `data/raw/val2014`
+  - `data/raw/vqa_e_json/VQA-E_*.json` → `data/vqa_e/VQA-E_*.json`
+  - Files: `train.py`, `evaluate.py`, `compare.py`, `inference.py`, `visualize.py`, `1_build_vocab.py`
+- [x] **Vocab rebuilt** — vocab cũ bị overwrite bởi VQA 2.0 data (short answers, thiếu explanation words). Đã rebuild từ VQA-E: Q=4546, A=8648, coverage tăng từ 93% → 99.6%
+- [x] **AMP API updated** — `torch.cuda.amp` → `torch.amp` (fix FutureWarning trong PyTorch 2.10)
+- [x] **Local training notebook** — `vqa_local_training.ipynb` tạo mới cho RTX 3060 12GB
+
 ### CÒN LẠI — VIỆC CẦN LÀM TIẾP
-1. **Train model A 1 epoch** để kiểm tra pipeline: `python src/train.py --model A --epochs 1`
-2. **Train đủ 4 model** theo training plan (Phase 1-3) và compare
-3. **Download val2014 images** nếu chưa có (cần cho evaluation)
+1. **Train đủ 4 model** theo 3-phase plan dùng `vqa_local_training.ipynb`
+2. **Compare metrics** sau mỗi phase (epoch 10, 15, 20)
 
 ---
 
@@ -93,114 +102,131 @@ LSTM Decoder → sinh sequence token by token (teacher forcing khi train)
 
 ---
 
-## 5. VQA-E JSON FORMAT (dự kiến)
+## 5. VQA-E JSON FORMAT (ĐÃ VERIFY — session 5)
+
+**Root là list**, không phải dict có key `annotations`:
 
 ```json
-{
-  "annotations": [
-    {
-      "image_id": 458752,
-      "question_id": 458752000,
-      "question": "What is the person doing?",
-      "answer": "surfing",
-      "explanation": ["the person is riding a wave on a surfboard"]
-    }
-  ]
-}
+[
+  {
+    "answer_type": "other",
+    "explanation": ["Closeup of bins of food that include broccoli and bread.", 0.679],
+    "question": "What is the green stuff?",
+    "multiple_choice_answer": "broccoli",
+    "answers": ["broccoli", "broccoli", ...],
+    "question_type": "what is the",
+    "img_id": 9
+  }
+]
 ```
 
-**Code đã xử lý cả 2 trường hợp:**
-- `ann['answer']` (VQA-E chuẩn)
-- `ann['multiple_choice_answer']` (fallback nếu format khác)
+**Field names thực tế (đã xác nhận):**
+- `img_id` (không phải `image_id`)
+- `multiple_choice_answer` (không phải `answer`)
+- `explanation` = list gồm `[text_string, confidence_float]` — lấy `[0]`
 
-**Sau khi download, verify bằng:**
+**Code trong `dataset.py` đã đúng:**
 ```python
-import json
-with open('data/raw/vqa_e_json/vqa_e_train2014.json') as f:
-    data = json.load(f)
-print(data['annotations'][0].keys())  # kiểm tra field names
-print(data['annotations'][0])          # xem 1 sample
+img_id     = ann['img_id']
+answer     = ann.get('multiple_choice_answer', '')
+exp_list   = ann.get('explanation', [])
+explanation = exp_list[0] if exp_list and isinstance(exp_list[0], str) else ''
 ```
 
-Nếu field name khác với dự kiến, sửa trong:
-- `src/scripts/1_build_vocab.py` (line ~36-43)
-- `src/dataset.py` class `VQAEDataset.__getitem__` (line ~98-102)
+**Thống kê dataset:**
+- Train: 181,298 samples | Val: 88,488 samples
+- Train images: 82,783 | Val images: 40,504 (tại `data/raw/train2014/` và `data/raw/val2014/`)
 
 ---
 
-## 6. CẤU TRÚC THƯ MỤC
+## 6. CẤU TRÚC THƯ MỤC (THỰC TẾ — đã verify session 5)
 
 ```
-vqa_new/
-├── README.md                    ← đề bài
-├── CONTEXT_HANDOFF.md           ← file này
-├── DOCUMENTATION.md             ← docs chi tiết
+new_vqa/
+├── README.md
+├── CONTEXT_HANDOFF.md
+├── DOCUMENTATION.md
+├── vqa_local_training.ipynb     ← notebook train local (RTX 3060) [tạo session 5]
+├── vqa_colab_new.ipynb          ← notebook Colab (giữ nguyên)
 ├── src/
-│   ├── vocab.py                 ← Vocabulary class (word2idx, idx2word, numericalize)
-│   ├── dataset.py               ← VQAEDataset (mới), VQADataset (cũ, giữ lại)
-│   ├── train.py                 ← training loop (CE + Label Smoothing + Coverage + Grad Accum)
+│   ├── vocab.py
+│   ├── dataset.py               ← VQAEDataset + VQADataset (cũ, giữ lại)
+│   ├── train.py                 ← training loop
 │   ├── evaluate.py              ← BLEU-4, METEOR, BERTScore, Exact Match
-│   ├── compare.py               ← so sánh 4 model trong 1 bảng + BERTScore
-│   ├── inference.py             ← greedy + beam search decode (n-gram blocking)
-│   ├── visualize.py             ← attention heatmap visualization
-│   ├── glove_utils.py           ← GloVe download + embedding matrix builder
-│   ├── plot_curves.py           ← training curve plotting
+│   ├── compare.py               ← so sánh 4 model
+│   ├── inference.py             ← greedy + beam search (n-gram blocking)
+│   ├── visualize.py             ← attention heatmap
+│   ├── glove_utils.py           ← GloVe loader
+│   ├── plot_curves.py           ← training curves
 │   ├── models/
 │   │   ├── vqa_models.py        ← VQAModelA/B/C/D + GatedFusion
 │   │   ├── encoder_cnn.py       ← SimpleCNN, ResNetEncoder, spatial variants
-│   │   ├── encoder_question.py  ← QuestionEncoder (BiLSTM + GloVe)
-│   │   ├── decoder_lstm.py      ← LSTMDecoder (Weight Tying + GloVe)
-│   │   └── decoder_attention.py ← LSTMDecoderWithAttention (Dual Attn + Coverage + Weight Tying)
+│   │   ├── encoder_question.py  ← QuestionEncoder (BiLSTM)
+│   │   ├── decoder_lstm.py      ← LSTMDecoder (Weight Tying)
+│   │   └── decoder_attention.py ← LSTMDecoderWithAttention (Dual Attn + Coverage)
 │   └── scripts/
 │       ├── 1_build_vocab.py     ← build vocab từ VQA-E JSON
-│       └── 2_extract_features.py← extract ResNet features (optional HDF5)
+│       └── 2_extract_features.py
 ├── data/
 │   ├── raw/
-│   │   ├── images/
-│   │   │   ├── train2014/       ← COCO train images
-│   │   │   └── val2014/         ← COCO val images
-│   │   └── vqa_e_json/          ← VQA-E JSON files
-│   │       ├── VQA-E_train_set.json
-│   │       └── VQA-E_val_set.json
+│   │   ├── train2014/           ← COCO train images (82,783 ảnh)  ← ĐÚNG PATH
+│   │   ├── val2014/             ← COCO val images (40,504 ảnh)    ← ĐÚNG PATH
+│   │   └── test2015/
+│   ├── vqa_e/                   ← VQA-E JSON                       ← ĐÚNG PATH
+│   │   ├── VQA-E_train_set.json (181,298 samples)
+│   │   └── VQA-E_val_set.json  (88,488 samples)
+│   ├── vqa_data_json/           ← VQA 2.0 gốc (giữ tham khảo, không dùng để train)
 │   └── processed/
-│       ├── vocab_questions.json ← Q vocab (4546 từ)
-│       └── vocab_answers.json   ← A vocab (8648 từ)
-└── checkpoints/                 ← model_X_best.pth, model_X_resume.pth, milestones
+│       ├── vocab_questions.json ← Q vocab 4,546 từ (rebuild từ VQA-E session 5)
+│       └── vocab_answers.json   ← A vocab 8,648 từ (rebuild từ VQA-E session 5)
+└── checkpoints/                 ← tạo tự động khi train
 ```
 
 ---
 
 ## 7. COMMANDS ĐỂ CHẠY
 
+**Chạy từ thư mục `new_vqa/` (project root). Dùng notebook `vqa_local_training.ipynb` để tiện hơn.**
+
 ```bash
-# Bước 1: Train từng model (basic)
-python src/train.py --model A --epochs 10 --batch_size 128
-python src/train.py --model B --epochs 10 --batch_size 128
-python src/train.py --model C --epochs 10 --batch_size 64
-python src/train.py --model D --epochs 10 --batch_size 64
+# ── Phase 1 (10 epochs, LR=1e-3, ResNet frozen) ──────────────────────────────
+# RTX 3060 12GB — batch sizes đã chọn để không OOM
+python src/train.py --model A --epochs 10 --lr 1e-3 --batch_size 64  --accum_steps 2 --num_workers 6 --augment --early_stopping 5
+python src/train.py --model B --epochs 10 --lr 1e-3 --batch_size 32  --accum_steps 4 --num_workers 6 --augment --early_stopping 5
+python src/train.py --model C --epochs 10 --lr 1e-3 --batch_size 32  --accum_steps 2 --num_workers 6 --augment --early_stopping 5 --coverage
+python src/train.py --model D --epochs 10 --lr 1e-3 --batch_size 16  --accum_steps 4 --num_workers 6 --augment --early_stopping 5 --coverage
 
-# Optional flags:
-python src/train.py --model A --epochs 10 --glove                    # GloVe embeddings
-python src/train.py --model A --epochs 10 --scheduled_sampling       # reduce exposure bias
-python src/train.py --model D --epochs 10 --finetune_cnn             # unfreeze ResNet
-python src/train.py --model C --epochs 10 --coverage                 # coverage mechanism (C/D only)
-python src/train.py --model A --epochs 10 --accum_steps 4            # effective batch = 128×4 = 512
-python src/train.py --model A --epochs 10 --augment                  # data augmentation
-python src/train.py --model A --epochs 10 --early_stopping 5         # patience=5
+# ── Phase 2 (5 epochs, LR=5e-4, unfreeze ResNet layer3+4 cho B/D) ────────────
+python src/train.py --model A --epochs 5 --lr 5e-4 --resume checkpoints/model_a_resume.pth --batch_size 64  --accum_steps 2 --num_workers 6 --augment
+python src/train.py --model B --epochs 5 --lr 5e-4 --resume checkpoints/model_b_resume.pth --batch_size 32  --accum_steps 4 --num_workers 6 --finetune_cnn
+python src/train.py --model C --epochs 5 --lr 5e-4 --resume checkpoints/model_c_resume.pth --batch_size 32  --accum_steps 2 --num_workers 6 --coverage
+python src/train.py --model D --epochs 5 --lr 5e-4 --resume checkpoints/model_d_resume.pth --batch_size 16  --accum_steps 4 --num_workers 6 --coverage --finetune_cnn
 
-# Bước 2: Evaluate 1 model
-python src/evaluate.py --model_type A
-python src/evaluate.py --model_type A --beam_width 5                 # beam search
-python src/evaluate.py --model_type A --beam_width 5 --no_repeat_ngram 3  # + n-gram blocking
+# ── Phase 3 (5 epochs, LR=2e-4, Scheduled Sampling) ─────────────────────────
+python src/train.py --model A --epochs 5 --lr 2e-4 --resume checkpoints/model_a_resume.pth --batch_size 64  --accum_steps 2 --num_workers 6 --scheduled_sampling
+python src/train.py --model B --epochs 5 --lr 2e-4 --resume checkpoints/model_b_resume.pth --batch_size 32  --accum_steps 4 --num_workers 6 --scheduled_sampling
+python src/train.py --model C --epochs 5 --lr 2e-4 --resume checkpoints/model_c_resume.pth --batch_size 32  --accum_steps 2 --num_workers 6 --scheduled_sampling --coverage
+python src/train.py --model D --epochs 5 --lr 2e-4 --resume checkpoints/model_d_resume.pth --batch_size 16  --accum_steps 4 --num_workers 6 --scheduled_sampling --coverage
 
-# Bước 3: So sánh tất cả model
-python src/compare.py --epoch 10
-python src/compare.py --epoch 10 --beam_width 3
+# ── Evaluate + Compare ────────────────────────────────────────────────────────
+python src/evaluate.py --model_type A --checkpoint checkpoints/model_a_best.pth
+python src/evaluate.py --model_type A --checkpoint checkpoints/model_a_best.pth --beam_width 5 --no_repeat_ngram 3
+
+python src/compare.py --epoch 10   # sau Phase 1
+python src/compare.py --epoch 15   # sau Phase 2
+python src/compare.py --epoch 20   # sau Phase 3 (final)
+python src/compare.py --epoch 20 --beam_width 3
+
+# ── Plots & Visualization ─────────────────────────────────────────────────────
+python src/plot_curves.py
+python src/visualize.py --model_type D --checkpoint checkpoints/model_d_best.pth --image_path "..." --question "..."
 ```
 
 ---
 
 ## 8. CÁC THAM SỐ QUAN TRỌNG
+
+**Model architecture:**
 
 | Tham số | Giá trị | Ghi chú |
 |---|---|---|
@@ -209,14 +235,31 @@ python src/compare.py --epoch 10 --beam_width 3
 | `num_layers` | 2 | LSTM layers |
 | `attn_dim` | 512 | Bahdanau attention dim (model C/D) |
 | `max_len` (inference) | 50 | max tokens sinh ra |
-| `batch_size` | 128 (A/B), 64 (C/D) | |
-| Answer vocab threshold | 3 | |
+| `vocab_q_size` | **4,546** | Q vocab từ VQA-E (rebuild session 5) |
+| `vocab_a_size` | **8,648** | A vocab từ VQA-E MC+explanation (rebuild session 5) |
+
+**Training (RTX 3060 12GB — đã verify không OOM):**
+
+| Model | batch_size | accum_steps | Effective batch | num_workers |
+|---|---|---|---|---|
+| A (SimpleCNN) | 64 | 2 | 128 | 6 |
+| B (ResNet101) | 32 | 4 | 128 | 6 |
+| C (SimpleCNN Spatial) | 32 | 2 | 64 | 6 |
+| D (ResNet101 Spatial) | 16 | 4 | 64 | 6 |
+
+**Regularization & training config:**
+
+| Tham số | Giá trị | Ghi chú |
+|---|---|---|
+| Answer vocab threshold | 3 | dùng khi build vocab |
 | Grad clip | 5.0 | clip_grad_norm |
 | Label smoothing | 0.1 | CrossEntropyLoss |
+| Weight decay | 1e-5 | L2 regularization |
 | LR Warmup | 3 epochs | LinearLR(start_factor=0.1) |
-| Coverage λ | 1.0 | weight for coverage loss (C/D) |
+| ReduceLROnPlateau | factor=0.5, patience=2 | sau warmup |
+| Coverage λ | 1.0 | weight for coverage loss (C/D only) |
 | N-gram blocking | 3 | trigram blocking in beam search |
-| Accum steps | 1 (default) | gradient accumulation |
+| Early stopping | patience=5 | recommended local |
 
 ---
 
@@ -270,8 +313,10 @@ Dần dần thay GT token bằng prediction của model để giảm exposure bi
 - `model_X_epoch10.pth` — milestone epochs (10, 15, 20)
 
 ### Mixed Precision
-- Ampere+ GPU (A100): BFloat16 tự động, không cần GradScaler
-- GPU khác: Float16 + GradScaler
+- RTX 3060 (GA106, Ampere, Compute Cap 8.6): **BFloat16 tự động**, không cần GradScaler ✓
+- GPU khác (Turing trở xuống): Float16 + GradScaler
+- Code tự detect: `_supports_bf16()` kiểm tra `compute_capability >= 8.0`
+- API đã update sang `torch.amp.GradScaler('cuda', ...)` và `torch.amp.autocast('cuda', ...)` (fix session 5)
 
 ---
 
@@ -302,8 +347,26 @@ Dần dần thay GT token bằng prediction của model để giảm exposure bi
 
 ---
 
-## 13. BUG TIỀM NĂNG CẦN CHÚ Ý SAU KHI CÓ DATA
+## 13. BUGS ĐÃ GẶP VÀ ĐÃ FIX (session 5)
 
-1. **Field name mismatch**: VQA-E có thể dùng `multiple_choice_answer` thay vì `answer` — code đã handle fallback nhưng cần verify
-2. **Explanation là list hay string?** Code xử lý: `exp_list[0] if exp_list else ''` — nếu explanation là string (không phải list) thì sẽ lấy ký tự đầu tiên → cần kiểm tra
-3. **Vocab size nhỏ**: Nếu VQA-E train set nhỏ hơn dự kiến, answer vocab có thể rất nhỏ → điều chỉnh threshold xuống 2
+Tất cả bugs đã được xác nhận và fix. Không còn gì cần làm.
+
+| Bug | Trạng thái | Chi tiết |
+|-----|-----------|---------|
+| **Path sai** (6 files) | ✅ Fixed | `data/raw/images/` → `data/raw/` và `data/raw/vqa_e_json/` → `data/vqa_e/` |
+| **Vocab sai nguồn** | ✅ Fixed | Vocab cũ build từ VQA 2.0 (short answers), đã rebuild từ VQA-E |
+| **AMP deprecated API** | ✅ Fixed | `torch.cuda.amp` → `torch.amp` (PyTorch 2.10) |
+| **Field name `answer`** | ✅ Verified | Actual field = `multiple_choice_answer`, code đã dùng đúng |
+| **Explanation là list** | ✅ Verified | Format = `[text_string, confidence_float]`, `[0]` lấy đúng text |
+| **Vocab size nhỏ** | ✅ Verified & Fixed | Root cause: VQA 2.0 thay vì VQA-E. Sau rebuild: A=8,648, coverage=99.6% |
+
+## 14. MÁY LOCAL — THÔNG SỐ KỸ THUẬT
+
+- **CPU**: Intel i7-14700K (20 cores: 8P + 12E)
+- **RAM**: 64 GB
+- **GPU**: NVIDIA GeForce RTX 3060 12 GB VRAM
+- **CUDA**: 12.8 | **PyTorch**: 2.10.0
+- **Compute Capability**: 8.6 (Ampere) → BF16 supported, TF32 enabled
+- **Python**: 3.12 | venv: `/home/mayxin/workspace/DeepLearning/.venv`
+- **Project root**: `/home/mayxin/workspace/DeepLearning/new_vqa`
+- **Notebook**: `vqa_local_training.ipynb` — chạy từ project root

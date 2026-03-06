@@ -33,18 +33,19 @@ class QuestionEncoder(nn.Module):
         
         # BiLSTM: each direction has hidden_size//2, concat → hidden_size
         self.lstm = nn.LSTM(
-            input_size=embed_size, 
+            input_size=embed_size,
             hidden_size=hidden_size // 2,
             num_layers=num_layers,
-            batch_first=True, 
+            batch_first=True,
             dropout=dropout if num_layers > 1 else 0,
             bidirectional=True
         )
-        
+        self.dropout = nn.Dropout(dropout)
+
     def forward(self, questions):
-        # question (batch, max_len) 
-        # 1. embedding
-        embeds = self.embedding(questions)
+        # question (batch, max_len)
+        # 1. embedding with dropout (consistent with decoder embedding dropout)
+        embeds = self.dropout(self.embedding(questions))
         if self.embed_proj is not None:
             embeds = self.embed_proj(embeds)
         # embeds (batch, maxlen, embed_size)

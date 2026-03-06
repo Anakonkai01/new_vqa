@@ -59,11 +59,22 @@ class LSTMDecoder(nn.Module):
 
         # Weight Tying (Press & Wolf, 2017):
         # hidden_size → embed_dim (projection) → vocab (tied with embedding)
-        actual_embed_dim = self.embedding.embedding_dim  # 300 (GloVe) or 512 (random)
-        self.out_proj = nn.Linear(hidden_size, actual_embed_dim)
-        self.fc = nn.Linear(actual_embed_dim, vocab_size, bias=False)
-        # Tie: fc.weight = embedding.weight (both shape: vocab × embed_dim)
-        self.fc.weight = self.embedding.weight
+        #
+        # IMPORTANT: When GloVe is used, embedding_dim=300 (GloVe dim).
+        # Tying output with 300-dim embeddings creates a severe bottleneck
+        # (1024 → 300 → 8648 vocab). Instead, we use embed_size (512) for
+        # the output projection and DON'T tie weights with GloVe embeddings.
+        if pretrained_embeddings is not None:
+            # GloVe: use embed_size for output, no weight tying
+            self.out_proj = nn.Linear(hidden_size, embed_size)
+            self.fc = nn.Linear(embed_size, vocab_size, bias=False)
+            # No tying: fc learns its own output embeddings
+        else:
+            # No GloVe: tie fc.weight = embedding.weight (both vocab × embed_size)
+            actual_embed_dim = self.embedding.embedding_dim
+            self.out_proj = nn.Linear(hidden_size, actual_embed_dim)
+            self.fc = nn.Linear(actual_embed_dim, vocab_size, bias=False)
+            self.fc.weight = self.embedding.weight  # tie weights
 
     
     def forward(self, encoder_hidden, target_seq):

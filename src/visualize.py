@@ -27,12 +27,12 @@ from torchvision import transforms
 
 sys.path.append(os.path.dirname(__file__))
 from vocab import Vocabulary
-from inference import get_model, greedy_decode
+from inference import get_model, greedy_decode, strip_compiled_prefix
 
 # ── Config ───────────────────────────────────────────────────────
 DEVICE          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-IMAGE_DIR       = "data/raw/images/train2014"
-VQA_E_JSON      = "data/raw/vqa_e_json/VQA-E_train_set.json"
+IMAGE_DIR       = "data/raw/train2014"
+VQA_E_JSON      = "data/vqa_e/VQA-E_train_set.json"
 VOCAB_Q_PATH    = "data/processed/vocab_questions.json"
 VOCAB_A_PATH    = "data/processed/vocab_answers.json"
 
@@ -212,8 +212,10 @@ if __name__ == "__main__":
     vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
 
     # load model
+    from inference import strip_compiled_prefix
     model = get_model(args.model_type, len(vocab_q), len(vocab_a))
-    model.load_state_dict(torch.load(checkpoint, map_location=lambda storage, loc: storage))
+    state_dict = torch.load(checkpoint, map_location=lambda storage, loc: storage)
+    model.load_state_dict(strip_compiled_prefix(state_dict))
     model.to(DEVICE)
     model.eval()
 

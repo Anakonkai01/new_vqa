@@ -14,6 +14,20 @@ from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD
 from vocab import Vocabulary
 
 
+def strip_compiled_prefix(state_dict):
+    """Strip '_orig_mod.' prefix from keys saved by torch.compile.
+    
+    When a model is wrapped with torch.compile(), state_dict keys get a
+    '_orig_mod.' prefix. This helper makes such checkpoints loadable
+    into non-compiled models (inference, evaluate, compare, visualize).
+    """
+    cleaned = {}
+    for k, v in state_dict.items():
+        new_key = k.replace('_orig_mod.', '') if k.startswith('_orig_mod.') else k
+        cleaned[new_key] = v
+    return cleaned
+
+
 def _get_ngrams(token_ids, n):
     """Extract all n-grams from a list of token IDs."""
     return {tuple(token_ids[i:i+n]) for i in range(len(token_ids) - n + 1)}
@@ -38,27 +52,42 @@ def _block_repeated_ngrams(log_probs, token_ids, no_repeat_ngram_size):
             log_probs[ng[-1]] = float('-inf')
 
 
-def get_model(model_type, vocab_q_size, vocab_a_size):
+def get_model(model_type, vocab_q_size, vocab_a_size, glove_dim=300):
+    """Create a model with architecture matching checkpoints trained with --glove.
+    
+    When glove_dim > 0, dummy embeddings of that dimension are created so the
+    model has the correct layers (embedding + embed_proj). The actual weights
+    are overwritten when loading the checkpoint via load_state_dict().
+    """
+    # Create dummy GloVe embeddings to match training architecture
+    if glove_dim > 0:
+        pretrained_q_emb = torch.zeros(vocab_q_size, glove_dim)
+        pretrained_a_emb = torch.zeros(vocab_a_size, glove_dim)
+    else:
+        pretrained_q_emb = None
+        pretrained_a_emb = None
+    
+    kw = dict(pretrained_q_emb=pretrained_q_emb, pretrained_a_emb=pretrained_a_emb)
     if model_type == 'A':
-        return VQAModelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
     elif model_type == 'B':
-        return VQAModelB(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelB(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
     elif model_type == 'C':
-        return VQAModelC(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelC(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
     elif model_type == 'D':
-        return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size)
+        return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
     else:
         raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D.")
 
 
 def greedy_decode(model, image_tensor, question_tensor, vocab_a,
                   max_len=50, device='cpu'):
-    """ 
-    image_tensor (3, 224, 224)
-    question_tensor (max_q_len) 
-    return: string answer 
     """
-
+    image_tensor (3, 224, 224)
+    question_tensor (max_q_len)
+    return: string answer
+    """
+    model.eval()
     with torch.no_grad():
         # add batch dim 
         img = image_tensor.unsqueeze(0).to(device) # (1, 3, 224, 224)
@@ -116,6 +145,7 @@ def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
     question_tensor: (max_q_len)
     return: string answer
     """
+    model.eval()
     with torch.no_grad():
         img      = image_tensor.unsqueeze(0).to(device)       # (1, 3, 224, 224)
         question = question_tensor.unsqueeze(0).to(device)    # (1, max_q_len)
@@ -166,6 +196,7 @@ def batch_greedy_decode(model, img_tensors, q_tensors, vocab_a,
     q_tensors   : (B, max_q_len)
     returns     : list of B answer strings
     """
+    model.eval()
     with torch.no_grad():
         B    = img_tensors.size(0)
         imgs = img_tensors.to(device)
@@ -220,6 +251,7 @@ def batch_greedy_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
     q_tensors   : (B, max_q_len)
     returns     : list of B answer strings
     """
+    model.eval()
     with torch.no_grad():
         B    = img_tensors.size(0)
         imgs = img_tensors.to(device)
@@ -288,6 +320,7 @@ def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
     no_repeat_ngram_size : block repeated n-grams of this size (0=disabled)
     returns              : best answer string
     """
+    model.eval()
     with torch.no_grad():
         img = img_tensor.unsqueeze(0).to(device)
         q   = q_tensor.unsqueeze(0).to(device)
@@ -354,6 +387,7 @@ def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
     no_repeat_ngram_size : block repeated n-grams of this size (0=disabled)
     returns              : best answer string
     """
+    model.eval()
     with torch.no_grad():
         img = img_tensor.unsqueeze(0).to(device)
         q   = q_tensor.unsqueeze(0).to(device)
@@ -441,8 +475,8 @@ if __name__ == "__main__":
     VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
     VOCAB_A_PATH  = "data/processed/vocab_answers.json"
     CHECKPOINT    = f"checkpoints/model_{MODEL_TYPE.lower()}_epoch10.pth"
-    IMAGE_DIR     = "data/raw/images/train2014"
-    VQA_E_JSON    = "data/raw/vqa_e_json/VQA-E_train_set.json"
+    IMAGE_DIR     = "data/raw/train2014"
+    VQA_E_JSON    = "data/vqa_e/VQA-E_train_set.json"
 
     # Load vocab
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -450,7 +484,8 @@ if __name__ == "__main__":
 
     # Load model
     model = get_model(MODEL_TYPE, len(vocab_q), len(vocab_a))
-    model.load_state_dict(torch.load(CHECKPOINT, map_location=lambda storage, loc: storage))
+    state_dict = torch.load(CHECKPOINT, map_location=lambda storage, loc: storage)
+    model.load_state_dict(strip_compiled_prefix(state_dict))
     model.to(DEVICE)
 
     # Load 1 sample

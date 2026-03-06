@@ -23,12 +23,12 @@ except ImportError:
 from dataset import VQAEDataset, vqa_collate_fn
 from vocab import Vocabulary
 from inference import get_model, batch_greedy_decode, batch_greedy_decode_with_attention, \
-    batch_beam_search_decode, batch_beam_search_decode_with_attention
+    batch_beam_search_decode, batch_beam_search_decode_with_attention, strip_compiled_prefix
 
 # ── Config ─────────────────────────────────────────────────────────
 DEVICE         = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-VAL_IMAGE_DIR  = "data/raw/images/val2014"
-VAL_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_val_set.json"
+VAL_IMAGE_DIR  = "data/raw/val2014"
+VAL_VQA_E_JSON = "data/vqa_e/VQA-E_val_set.json"
 VOCAB_Q_PATH   = "data/processed/vocab_questions.json"
 VOCAB_A_PATH   = "data/processed/vocab_answers.json"
 
@@ -58,7 +58,8 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset, beam_wi
             return None
 
     model = get_model(model_type, len(vocab_q), len(vocab_a))
-    model.load_state_dict(torch.load(checkpoint, map_location=lambda storage, loc: storage))
+    state_dict = torch.load(checkpoint, map_location=lambda storage, loc: storage)
+    model.load_state_dict(strip_compiled_prefix(state_dict))
     model.to(DEVICE)
     model.eval()
 

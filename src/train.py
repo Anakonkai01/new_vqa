@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 import os
 import sys
 import json
@@ -69,9 +69,10 @@ def _fused_adam_available():
 
 def get_model(model_type, vocab_q_size, vocab_a_size,
               pretrained_q_emb=None, pretrained_a_emb=None,
-              use_coverage=False):
+              use_coverage=False, dropout=0.5):
     """Factory function: return the model corresponding to model_type."""
-    kw = dict(pretrained_q_emb=pretrained_q_emb, pretrained_a_emb=pretrained_a_emb)
+    kw = dict(pretrained_q_emb=pretrained_q_emb, pretrained_a_emb=pretrained_a_emb,
+              dropout=dropout)
     if model_type == 'A':
         return VQAModelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
     elif model_type == 'B':
@@ -165,12 +166,12 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
 
 
 # ── Training set (train2014) ─────────────────────────────────────
-TRAIN_IMAGE_DIR  = "data/raw/images/train2014"
-TRAIN_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_train_set.json"
+TRAIN_IMAGE_DIR  = "data/raw/train2014"
+TRAIN_VQA_E_JSON = "data/vqa_e/VQA-E_train_set.json"
 
 # ── Validation set (val2014) ──────────────────────────────────────
-VAL_IMAGE_DIR  = "data/raw/images/val2014"
-VAL_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_val_set.json"
+VAL_IMAGE_DIR  = "data/raw/val2014"
+VAL_VQA_E_JSON = "data/vqa_e/VQA-E_val_set.json"
 
 VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
 VOCAB_A_PATH  = "data/processed/vocab_answers.json"
@@ -187,7 +188,10 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           early_stopping_patience=0, augment=False,
           use_glove=False, glove_dim=300,
           use_coverage=False, coverage_lambda=1.0,
-          accum_steps=1):
+          accum_steps=1, warmup_epochs=3,
+          max_train_samples=None, max_val_samples=None,
+          dropout=0.5, no_compile=False,
+          grad_clip=5.0, label_smoothing=0.1):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -199,7 +203,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         vocab_q=vocab_q,
         vocab_a=vocab_a,
         split='train2014',
-        max_samples=MAX_TRAIN_SAMPLES,
+        max_samples=max_train_samples or MAX_TRAIN_SAMPLES,
         augment=augment
     )
 
@@ -209,7 +213,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         vocab_q=vocab_q,
         vocab_a=vocab_a,
         split='val2014',
-        max_samples=MAX_VAL_SAMPLES
+        max_samples=max_val_samples or MAX_VAL_SAMPLES
     )
 
     print(f"Train: {len(train_dataset)} | Val: {len(val_dataset)}")
@@ -253,8 +257,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     model     = get_model(model_type, len(vocab_q), len(vocab_a),
                            pretrained_q_emb=pretrained_q_emb,
                            pretrained_a_emb=pretrained_a_emb,
-                           use_coverage=use_coverage).to(DEVICE)
-    criterion = nn.CrossEntropyLoss(ignore_index=0, label_smoothing=0.1)
+                           use_coverage=use_coverage,
+                           dropout=dropout).to(DEVICE)
+    criterion = nn.CrossEntropyLoss(ignore_index=0, label_smoothing=label_smoothing)
 
     # ── Optimizer — differential LR when fine-tuning the CNN backbone ──────────
     # Models A/C use scratch CNN → finetune_cnn flag has no effect on them.
@@ -284,21 +289,34 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     # ── LR Warmup + ReduceLROnPlateau ─────────────────────────────
     # Warm up linearly from lr/10 → lr over first warmup_epochs epochs,
     # then switch to ReduceLROnPlateau (halve when val loss plateaus).
-    warmup_epochs = 3
+    #
+    # IMPORTANT: LinearLR auto-calls .step() at init (last_epoch=-1 → 0),
+    # which immediately multiplies LR by start_factor. When warmup_epochs=0
+    # (Phase 2/3 resume), we must use start_factor=1.0 so the LR is unchanged.
     warmup_scheduler = optim.lr_scheduler.LinearLR(
-        optimizer, start_factor=0.1, end_factor=1.0, total_iters=warmup_epochs
+        optimizer,
+        start_factor=0.1 if warmup_epochs > 0 else 1.0,
+        end_factor=1.0,
+        total_iters=max(warmup_epochs, 1)
     )
-    plateau_scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=2
+    # CosineAnnealingLR: smooth decay from peak LR to eta_min over remaining epochs
+    # Much better than ReduceLROnPlateau for fixed-length training runs
+    remaining_epochs = max(epochs - warmup_epochs, 1)
+    cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=remaining_epochs, eta_min=lr * 0.01
     )
-    print(f"LR Warmup        : {warmup_epochs} epochs (lr/10 → lr)")
+    if warmup_epochs > 0:
+        print(f"LR Warmup        : {warmup_epochs} epochs (lr/10 → lr)")
+    else:
+        print(f"LR Warmup        : DISABLED (resume training)")
+    print(f"LR Schedule      : CosineAnnealing (T_max={remaining_epochs}, eta_min={lr*0.01:.1e})")
 
     # Mixed precision — BF16 on Ampere+ (A100, etc.), FP16 elsewhere
     use_amp  = torch.cuda.is_available()
     use_bf16 = use_amp and _supports_bf16()
     amp_dtype = torch.bfloat16 if use_bf16 else torch.float16
     # GradScaler not needed for BF16 (wider dynamic range), still used for FP16
-    scaler = GradScaler(enabled=(use_amp and not use_bf16))
+    scaler = GradScaler('cuda', enabled=(use_amp and not use_bf16))
     if use_bf16:
         print("AMP: BFloat16 (Ampere+ detected — no GradScaler needed)")
     elif use_amp:
@@ -315,7 +333,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
             raise FileNotFoundError(f"Resume checkpoint not found: {resume}")
         print(f"Resuming from: {resume}")
         ckpt = torch.load(resume, map_location=lambda storage, loc: storage)
-        model.load_state_dict(ckpt['model_state_dict'])
+        # Strip '_orig_mod.' prefix (backward compat with torch.compile checkpoints)
+        clean_sd = {k.replace('_orig_mod.', ''): v for k, v in ckpt['model_state_dict'].items()}
+        model.load_state_dict(clean_sd)
 
         # Optimizer/scheduler state can only be restored when the number of
         # parameter groups matches.  Phase transitions (e.g. Phase 1 → 2)
@@ -328,7 +348,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
             if 'warmup_scheduler_state_dict' in ckpt:
                 warmup_scheduler.load_state_dict(ckpt['warmup_scheduler_state_dict'])
-                plateau_scheduler.load_state_dict(ckpt['plateau_scheduler_state_dict'])
+                if 'cosine_scheduler_state_dict' in ckpt:
+                    cosine_scheduler.load_state_dict(ckpt['cosine_scheduler_state_dict'])
             scaler.load_state_dict(ckpt['scaler_state_dict'])
             print("  Optimizer & scheduler state restored.")
         else:
@@ -340,7 +361,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         history       = ckpt.get('history', history)
         print(f"  Resumed at epoch {start_epoch} | best_val_loss: {best_val_loss:.4f}")
 
-    print(f"Model: {model_type} | Device: {DEVICE}")
+    print(f"Model: {model_type} | Device: {DEVICE} | Dropout: {dropout}")
     if use_coverage and model_type in ('C', 'D'):
         print(f"Coverage Mechanism: ON | λ = {coverage_lambda}")
     if accum_steps > 1:
@@ -354,6 +375,20 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         print(f"Scheduled Sampling: ON | k={ss_k} (epsilon decays from "
               f"{ss_k/(ss_k+math.exp(0/ss_k)):.2f} to "
               f"{ss_k/(ss_k+math.exp((start_epoch+epochs-1)/ss_k)):.2f} over training)")
+
+    # ── torch.compile — requires python3.12-dev (for Triton) ──────────
+    # NOTE: Models C/D use a step-by-step attention loop with mutable coverage
+    # state. torch.compile adds overhead from graph breaks at each step and
+    # provides minimal speedup. Use --no_compile to disable.
+    if torch.cuda.is_available() and not no_compile:
+        try:
+            model = torch.compile(model, mode='default', dynamic=True)
+            print("torch.compile    : ON  (default | dynamic shapes)")
+        except Exception as e:
+            print(f"torch.compile    : skipped — {e}")
+    elif no_compile:
+        print("torch.compile    : OFF (--no_compile flag)")
+
     for epoch in tqdm.tqdm(range(start_epoch, start_epoch + epochs)):
         # ── Train ────────────────────────────────────────────────
         model.train()
@@ -369,7 +404,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
             decoder_input  = answer[:, :-1]
             decoder_target = answer[:, 1:]
 
-            with autocast(enabled=use_amp, dtype=amp_dtype):
+            with autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                 if scheduled_sampling:
                     # Inverse-sigmoid epsilon decay: higher k = slower decay
                     # epoch 0 -> epsilon~1 (mostly GT), last epoch -> epsilon lowers
@@ -401,7 +436,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
             # Step optimizer every accum_steps mini-batches (or at the last batch)
             if (step_idx + 1) % accum_steps == 0 or (step_idx + 1) == len(train_loader):
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
@@ -422,7 +457,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                 decoder_input  = answer[:, :-1]
                 decoder_target = answer[:, 1:]
 
-                with autocast(enabled=use_amp, dtype=amp_dtype):
+                with autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                     result     = model(imgs, questions, decoder_input)
                     if isinstance(result, tuple):
                         logits, _ = result
@@ -443,11 +478,11 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         else:
             print(f"Epoch {epoch+1}/{start_epoch + epochs} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | LR: {current_lr:.2e}")
 
-        # Step LR scheduler: warmup for first warmup_epochs, then plateau
+        # Step LR scheduler: warmup for first warmup_epochs, then cosine annealing
         if epoch < start_epoch + warmup_epochs:
             warmup_scheduler.step()
         else:
-            plateau_scheduler.step(avg_val_loss)
+            cosine_scheduler.step()
 
         # Save history after every epoch (safe against session interruption)
         history['train_loss'].append(avg_train_loss)
@@ -459,16 +494,18 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         # comparison_epochs: epochs where we run compare.py (end of each phase)
         # Only keep per-epoch checkpoints at these milestones.
         # resume + best checkpoints are always overwritten (1 file each).
-        comparison_epochs = {10, 15, 20}
+        comparison_epochs = {10, 15, 20, 25, 30}
         current_epoch = epoch + 1
 
         # Always save resume checkpoint (overwritten each epoch — 1 file per model)
+        # Strip '_orig_mod.' prefix from torch.compile so checkpoints work everywhere
+        clean_sd = {k.replace('_orig_mod.', ''): v for k, v in model.state_dict().items()}
         resume_ckpt = {
             'epoch':                current_epoch,
-            'model_state_dict':     model.state_dict(),
+            'model_state_dict':     clean_sd,
             'optimizer_state_dict': optimizer.state_dict(),
             'warmup_scheduler_state_dict':  warmup_scheduler.state_dict(),
-            'plateau_scheduler_state_dict': plateau_scheduler.state_dict(),
+            'cosine_scheduler_state_dict':  cosine_scheduler.state_dict(),
             'scaler_state_dict':    scaler.state_dict(),
             'best_val_loss':        best_val_loss,
             'history':              history,
@@ -477,18 +514,25 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
         # Save per-epoch checkpoint ONLY at comparison milestones
         if current_epoch in comparison_epochs:
-            torch.save(model.state_dict(), f"checkpoints/model_{model_type.lower()}_epoch{current_epoch}.pth")
+            torch.save(clean_sd, f"checkpoints/model_{model_type.lower()}_epoch{current_epoch}.pth")
             print(f"  Saved milestone checkpoint: epoch {current_epoch}")
 
         # Save best checkpoint separately (overwritten — 1 file per model)
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             es_counter = 0
-            torch.save(model.state_dict(), f"checkpoints/model_{model_type.lower()}_best.pth")
+            torch.save(clean_sd, f"checkpoints/model_{model_type.lower()}_best.pth")
             print(f"  -> New best val loss: {best_val_loss:.4f}. Saved best checkpoint.")
         else:
-            es_counter += 1
-            if early_stopping_patience > 0:
+            # BUG FIX: Don't count early stopping during warmup epochs.
+            # The LR ramp-up (lr/10 → lr) naturally destabilizes complex models
+            # (C/D have 5× more LSTM params), causing val loss to increase.
+            # Counting warmup epochs as "no improvement" kills C/D at epoch 4.
+            if epoch >= start_epoch + warmup_epochs:
+                es_counter += 1
+            else:
+                print(f"  Val loss did not improve (warmup — not counting for early stop)")
+            if early_stopping_patience > 0 and es_counter > 0:
                 print(f"  Val loss did not improve ({es_counter}/{early_stopping_patience})")
                 if es_counter >= early_stopping_patience:
                     print(f"  Early stopping triggered after {epoch+1} epochs.")
@@ -542,6 +586,20 @@ if __name__ == "__main__":
                         help='Weight for coverage loss term (default: 1.0)')
     parser.add_argument('--accum_steps', type=int, default=1,
                         help='Gradient accumulation steps (effective batch = batch_size × accum_steps)')
+    parser.add_argument('--warmup_epochs', type=int, default=3,
+                        help='LR warmup epochs (lr/10 → lr). Set 0 to disable for resume/Phase 2+ (default: 3)')
+    parser.add_argument('--max_train_samples', type=int, default=None,
+                        help='Limit number of training samples (None=use all). For quick tests use 1000-5000')
+    parser.add_argument('--max_val_samples', type=int, default=None,
+                        help='Limit number of validation samples (None=use all). For quick tests use 500-2000')
+    parser.add_argument('--dropout', type=float, default=0.5,
+                        help='Dropout rate for Q-encoder and decoder embeddings/LSTM (default: 0.5, recommend 0.3)')
+    parser.add_argument('--no_compile', action='store_true',
+                        help='Disable torch.compile (recommended for Models C/D with attention loop)')
+    parser.add_argument('--grad_clip', type=float, default=5.0,
+                        help='Maximum gradient norm for clipping (default: 5.0)')
+    parser.add_argument('--label_smoothing', type=float, default=0.1,
+                        help='Label smoothing factor for CrossEntropyLoss (default: 0.1)')
     args = parser.parse_args()
     train(model_type=args.model, epochs=args.epochs, lr=args.lr,
           batch_size=args.batch_size, resume=args.resume,
@@ -551,7 +609,10 @@ if __name__ == "__main__":
           early_stopping_patience=args.early_stopping, augment=args.augment,
           use_glove=args.glove, glove_dim=args.glove_dim,
           use_coverage=args.coverage, coverage_lambda=args.coverage_lambda,
-          accum_steps=args.accum_steps)
+          accum_steps=args.accum_steps, warmup_epochs=args.warmup_epochs,
+          max_train_samples=args.max_train_samples, max_val_samples=args.max_val_samples,
+          dropout=args.dropout, no_compile=args.no_compile,
+          grad_clip=args.grad_clip, label_smoothing=args.label_smoothing)
         
         
         

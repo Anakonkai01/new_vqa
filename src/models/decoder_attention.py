@@ -154,10 +154,21 @@ class LSTMDecoderWithAttention(nn.Module):
         )
 
         # Weight Tying: hidden → embed_dim (projection) → vocab (tied with embedding)
-        actual_embed_dim = self.embedding.embedding_dim
-        self.out_proj = nn.Linear(hidden_size, actual_embed_dim)
-        self.fc       = nn.Linear(actual_embed_dim, vocab_size, bias=False)
-        self.fc.weight = self.embedding.weight  # tie weights
+        #
+        # IMPORTANT: When GloVe is used, embedding_dim=300 (GloVe dim).
+        # Tying output with 300-dim embeddings creates a severe bottleneck
+        # (1024 → 300 → 8648 vocab). Instead, use embed_size (512) for
+        # output projection and DON'T tie weights with GloVe embeddings.
+        if pretrained_embeddings is not None:
+            # GloVe: use embed_size for output, no weight tying
+            self.out_proj = nn.Linear(hidden_size, embed_size)
+            self.fc = nn.Linear(embed_size, vocab_size, bias=False)
+        else:
+            # No GloVe: tie fc.weight = embedding.weight
+            actual_embed_dim = self.embedding.embedding_dim
+            self.out_proj = nn.Linear(hidden_size, actual_embed_dim)
+            self.fc = nn.Linear(actual_embed_dim, vocab_size, bias=False)
+            self.fc.weight = self.embedding.weight  # tie weights
 
         self.dropout = nn.Dropout(dropout)
 
@@ -202,10 +213,13 @@ class LSTMDecoderWithAttention(nn.Module):
             img_context, img_alpha = self.img_attention(h_top, img_features, coverage)  # (batch, hidden_size)
             q_context, _           = self.q_attention(h_top, q_hidden_states)           # (batch, hidden_size)
 
-            # Accumulate coverage loss: sum_i min(alpha_i, coverage_i)
-            # Penalises attending to already-attended regions (See et al. 2017)
+            # Coverage loss: penalize re-attending to already-attended regions
+            # Original See et al.: sum(min(alpha, coverage)) — but this is ~constant
+            # Better: sum(alpha * log(coverage + 1)) — penalizes attention on high-coverage regions
             if self.use_coverage:
-                cov_loss = cov_loss + torch.min(img_alpha, coverage).sum(dim=1).mean()
+                # At t=0 coverage=0 → log(1)=0 → no penalty (correct)
+                # At t>0 high coverage → high penalty for re-attending
+                cov_loss = cov_loss + (img_alpha * torch.log(coverage + 1.0)).sum(dim=1).mean()
                 coverage = coverage + img_alpha  # update cumulative attention
 
             # Concatenate token embedding with both context vectors
