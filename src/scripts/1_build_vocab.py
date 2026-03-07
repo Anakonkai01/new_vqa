@@ -6,7 +6,7 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from vocab import Vocabulary
 
 # VQA-E single annotation file (contains question + answer + explanation)
-TRAIN_VQA_E_JSON = "data/vqa_e/VQA-E_train_set.json"
+TRAIN_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_train_set.json"
 
 OUTPUT_DIR = "data/processed"
 

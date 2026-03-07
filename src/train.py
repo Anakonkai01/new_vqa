@@ -166,12 +166,12 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
 
 
 # ── Training set (train2014) ─────────────────────────────────────
-TRAIN_IMAGE_DIR  = "data/raw/train2014"
-TRAIN_VQA_E_JSON = "data/vqa_e/VQA-E_train_set.json"
+TRAIN_IMAGE_DIR  = "data/raw/images/train2014"
+TRAIN_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_train_set.json"
 
 # ── Validation set (val2014) ──────────────────────────────────────
-VAL_IMAGE_DIR  = "data/raw/val2014"
-VAL_VQA_E_JSON = "data/vqa_e/VQA-E_val_set.json"
+VAL_IMAGE_DIR  = "data/raw/images/val2014"
+VAL_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_val_set.json"
 
 VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
 VOCAB_A_PATH  = "data/processed/vocab_answers.json"

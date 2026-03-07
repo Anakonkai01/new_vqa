@@ -500,8 +500,8 @@ if __name__ == "__main__":
     VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
     VOCAB_A_PATH  = "data/processed/vocab_answers.json"
     CHECKPOINT    = f"checkpoints/model_{MODEL_TYPE.lower()}_epoch10.pth"
-    IMAGE_DIR     = "data/raw/train2014"
-    VQA_E_JSON    = "data/vqa_e/VQA-E_train_set.json"
+    IMAGE_DIR     = "data/raw/images/train2014"
+    VQA_E_JSON    = "data/raw/vqa_e_json/VQA-E_train_set.json"
 
     # Load vocab
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)

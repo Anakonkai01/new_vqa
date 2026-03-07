@@ -31,8 +31,8 @@ from inference import get_model, load_model_from_checkpoint, greedy_decode, stri
 
 # ── Config ───────────────────────────────────────────────────────
 DEVICE          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-IMAGE_DIR       = "data/raw/train2014"
-VQA_E_JSON      = "data/vqa_e/VQA-E_train_set.json"
+IMAGE_DIR       = "data/raw/images/train2014"
+VQA_E_JSON      = "data/raw/vqa_e_json/VQA-E_train_set.json"
 VOCAB_Q_PATH    = "data/processed/vocab_questions.json"
 VOCAB_A_PATH    = "data/processed/vocab_answers.json"
 
