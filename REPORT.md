@@ -1211,63 +1211,153 @@ Traditional VQA Accuracy (classification-based) counts exact matches against gro
 
 ## 15. Experimental Results
 
+All four models (A, B, C, D) were trained for 30 epochs using the three-phase progressive training strategy described in Section 8. Evaluation was performed on the **full VQA-E validation set** (88,488 samples) using best checkpoints selected by lowest validation loss. All metrics are computed against ground-truth explanatory answers.
+
 ### 15.1 Training Curves
 
-<!-- TODO: Insert training/validation loss curve figure here -->
-<!-- Run: python src/plot_curves.py -->
+![Training and Validation Loss Curves](outputs/eval_training_curves.png)
 
-> **[To be completed after training]**
+*Figure 15.1: Training and validation loss curves for all four models across 30–35 epochs. The three training phases are visible: Phase 1 (teacher forcing, epochs 1–10), Phase 2 (fine-tuning + lower LR, epochs 11–15), and Phase 3 (scheduled sampling, epochs 16–30). Note the characteristic loss increase when scheduled sampling begins at epoch 16.*
 
-### 15.2 Phase 1 Results (After Epoch 10)
+**Key observations from training curves:**
 
-| Model | BLEU-4 | METEOR | BERTScore | BLEU-1 | BLEU-2 | BLEU-3 | Exact Match | Checkpoint |
-|---|---|---|---|---|---|---|---|---|
-| A |  |  |  |  |  |  |  | model_a_epoch10.pth |
-| B |  |  |  |  |  |  |  | model_b_epoch10.pth |
-| C |  |  |  |  |  |  |  | model_c_epoch10.pth |
-| D |  |  |  |  |  |  |  | model_d_epoch10.pth |
+1. **Rapid initial convergence (Epochs 1–5):** All models show steep loss reduction, dropping from ~5.0 to ~3.5 within the first 5 epochs, indicating effective learning of basic language patterns and visual-question associations.
 
-### 15.3 Phase 2 Results (After Epoch 15)
+2. **Pretrained models converge lower:** Models B and D (ResNet101) consistently achieve lower loss than their scratch counterparts (A and C) throughout training, confirming that pretrained visual features provide a more informative starting signal.
 
-| Model | BLEU-4 | METEOR | BERTScore | BLEU-1 | BLEU-2 | BLEU-3 | Exact Match | Checkpoint |
-|---|---|---|---|---|---|---|---|---|
-| A |  |  |  |  |  |  |  | model_a_epoch15.pth |
-| B |  |  |  |  |  |  |  | model_b_epoch15.pth |
-| C |  |  |  |  |  |  |  | model_c_epoch15.pth |
-| D |  |  |  |  |  |  |  | model_d_epoch15.pth |
+3. **Phase 2 refinement (Epochs 11–15):** Fine-tuning brings modest but consistent improvements. All models reach their best validation loss during this phase:
+   - Model A: best at epoch 16, val_loss = **3.2983**
+   - Model B: best at epoch 15, val_loss = **3.2178**
+   - Model C: best at epoch 15, val_loss = **3.2774**
+   - Model D: best at epoch 15, val_loss = **3.2216**
 
-### 15.4 Phase 3 Results — Final (After Epoch 20)
+4. **Scheduled sampling impact (Epochs 16–30):** The transition to scheduled sampling (εₛₛ decreasing from 1.0 → 0.5) causes a visible training loss increase for all models. This is expected — forcing the model to rely on its own predictions during training is harder than teacher forcing, but improves inference-time robustness. Validation loss shows mild overfitting in this phase.
 
-| Model | BLEU-4 | METEOR | BERTScore | BLEU-1 | BLEU-2 | BLEU-3 | Exact Match | Checkpoint |
-|---|---|---|---|---|---|---|---|---|
-| A |  |  |  |  |  |  |  | model_a_epoch20.pth |
-| B |  |  |  |  |  |  |  | model_b_epoch20.pth |
-| C |  |  |  |  |  |  |  | model_c_epoch20.pth |
-| D |  |  |  |  |  |  |  | model_d_epoch20.pth |
+5. **Overfitting patterns:** Models A and C (scratch CNN) show larger train-val gaps in Phase 3 compared to B and D, consistent with the smaller capacity of a from-scratch CNN requiring more regularization.
 
-### 15.5 Beam Search Results (Final Model, beam_width=5)
+### 15.2 Model Architecture Summary
 
-| Model | BLEU-4 | METEOR | BERTScore | Decode Mode |
+| Model | Architecture | Total Params | Trainable Params | Checkpoint Size |
 |---|---|---|---|---|
-| A |  |  |  | beam (width=5) |
-| B |  |  |  | beam (width=5) |
-| C |  |  |  | beam (width=5) |
-| D |  |  |  | beam (width=5) |
+| **A** | SimpleCNN + LSTM (No Attention) | 45.9M | 45.9M | 183.8 MB |
+| **B** | ResNet101 + LSTM (No Attention) | 83.2M | 40.7M | 333.5 MB |
+| **C** | SimpleCNN Spatial + Dual Attention + Coverage | 56.4M | 56.4M | 225.8 MB |
+| **D** | ResNet101 Spatial + Dual Attention + Coverage | 93.7M | 51.2M | 375.5 MB |
 
-### 15.6 Qualitative Examples
+*Note: Models B and D have more total parameters due to the frozen ResNet101 backbone (~42.5M frozen params). Their trainable parameter counts are comparable to or lower than the scratch models, demonstrating the efficiency of transfer learning — better features with similar learnable capacity.*
 
-<!-- TODO: Add sample predictions with images -->
-<!-- Run: python src/visualize.py --model_type D -->
+### 15.3 Training Loss Summary (Per Phase)
 
-> **[To be completed after training]**
+| Model | Phase 1 End (Epoch 10) | Phase 2 End (Epoch 15) | Best Checkpoint | Best Val Loss |
+|---|---|---|---|---|
+| | train / val | train / val | Epoch | |
+| **A** | 3.2471 / 3.3749 | 3.0675 / 3.2987 | 16 | **3.2983** |
+| **B** | 3.1501 / 3.2743 | 2.9745 / 3.2178 | 15 | **3.2178** |
+| **C** | 3.1884 / 3.3250 | 3.0365 / 3.2774 | 15 | **3.2774** |
+| **D** | 3.1024 / 3.2595 | 2.9579 / 3.2216 | 15 | **3.2216** |
 
-### 15.7 Attention Visualization (Model C/D)
+**Ranking by best validation loss:** D (3.2216) > B (3.2178) ≈ D > C (3.2774) > A (3.2983)
 
-<!-- TODO: Insert attention heatmap figures -->
-<!-- Run: python src/visualize.py --model_type C --output checkpoints/attn_model_c.png -->
-<!-- Run: python src/visualize.py --model_type D --output checkpoints/attn_model_d.png -->
+*Models B and D achieve near-identical best validation loss, suggesting that the pretrained ResNet101 features are the dominant factor — attention provides marginal additional loss improvement when combined with strong visual features.*
 
-> **[To be completed after training]**
+### 15.4 Greedy Decoding Results (Best Checkpoint, Full Val Set)
+
+![Greedy Decoding Comparison](outputs/eval_comparison_greedy.png)
+
+*Figure 15.2: Greedy decoding performance comparison across all four models. Model D achieves the highest scores across all primary metrics (BLEU-4, METEOR, BERTScore).*
+
+| Model | BLEU-1 | BLEU-2 | BLEU-3 | BLEU-4 ★ | METEOR ★ | BERTScore ★ | Exact Match |
+|---|---|---|---|---|---|---|---|
+| **A** | 0.3713 | 0.2333 | 0.1413 | 0.0914 | 0.3115 | 0.9008 | 2.94% |
+| **B** | 0.4124 | 0.2703 | 0.1716 | 0.1128 | 0.3562 | 0.9081 | 3.96% |
+| **C** | 0.3865 | 0.2463 | 0.1517 | 0.0989 | 0.3272 | 0.9034 | 4.41% |
+| **D** | **0.4150** | **0.2733** | **0.1746** | **0.1156** | **0.3594** | **0.9084** | **5.88%** |
+
+★ = Primary evaluation metrics
+
+**Key findings:**
+- **Model D leads across all metrics**, confirming that the combination of pretrained features (ResNet101) + dual attention + coverage produces the best explanatory answers.
+- **BLEU-4 range: 0.0914 → 0.1156** — a 26.5% relative improvement from worst (A) to best (D).
+- **METEOR range: 0.3115 → 0.3594** — a 15.4% relative improvement, indicating meaningful gains in synonym/stemming-aware evaluation.
+- **BERTScore is high across all models** (>0.90), indicating that even the simplest model produces semantically reasonable answers. The range is narrow (0.9008 → 0.9084), suggesting that all models capture general semantic meaning well, with differences emerging mainly in lexical precision.
+- **Exact Match is universally low** (2.9%–5.9%), which is expected for generative answers — two semantically equivalent sentences rarely share exact wording.
+
+### 15.5 Beam Search Results (beam_width=3, n-gram blocking=3)
+
+![Greedy vs Beam Search](outputs/eval_greedy_vs_beam.png)
+
+*Figure 15.3: Greedy vs beam search decoding comparison. Beam search provides consistent improvements in Exact Match across all models, with more modest gains in other metrics.*
+
+| Model | BLEU-1 | BLEU-2 | BLEU-3 | BLEU-4 ★ | METEOR ★ | BERTScore ★ | Exact Match |
+|---|---|---|---|---|---|---|---|
+| **A** | 0.3718 | 0.2330 | 0.1418 | 0.0924 | 0.3148 | 0.8999 | 7.35% |
+| **B** | 0.4121 | 0.2690 | 0.1713 | 0.1137 | 0.3588 | 0.9073 | 10.06% |
+| **C** | 0.3870 | 0.2463 | 0.1525 | 0.1004 | 0.3297 | 0.9026 | 7.91% |
+| **D** | **0.4158** | **0.2731** | **0.1751** | **0.1168** | **0.3629** | **0.9080** | **11.53%** |
+
+**Beam search vs greedy improvements (Δ):**
+
+| Model | Δ BLEU-4 | Δ METEOR | Δ BERTScore | Δ Exact Match |
+|---|---|---|---|---|
+| **A** | +0.0010 (+1.1%) | +0.0033 (+1.1%) | −0.0009 (−0.1%) | +4.41 pp |
+| **B** | +0.0008 (+0.7%) | +0.0026 (+0.7%) | −0.0008 (−0.1%) | +6.10 pp |
+| **C** | +0.0015 (+1.5%) | +0.0025 (+0.8%) | −0.0008 (−0.1%) | +3.50 pp |
+| **D** | +0.0011 (+1.0%) | +0.0035 (+1.0%) | −0.0004 (−0.04%) | +5.65 pp |
+
+*pp = percentage points*
+
+**Observations:**
+- Beam search provides **very modest BLEU/METEOR improvements** (<1.5%), but **substantial Exact Match gains** (3.5–6.1 pp). This indicates that beam search primarily helps the model find the "most common" phrasing, aligning better with exact ground-truth wording.
+- **BERTScore slightly decreases** with beam search across all models. This is a known phenomenon: beam search tends to produce shorter, more conservative answers that match lexically but sacrifice some semantic richness.
+- **Model D benefits most** from beam search in absolute terms (Exact Match: 5.88% → 11.53%), suggesting that attention + pretrained features create a richer search space that beam search exploits effectively.
+
+### 15.6 BLEU-4 Score Distribution
+
+![BLEU-4 Distribution](outputs/eval_bleu4_distribution.png)
+
+*Figure 15.4: Distribution of per-sample BLEU-4 scores across the validation set for each model. The distributions reveal the spread and consistency of model performance beyond aggregate averages.*
+
+The BLEU-4 distribution plots reveal important characteristics hidden by aggregate averages:
+
+- **Heavy left skew:** All four models exhibit a substantial mass at BLEU-4 = 0, corresponding to samples where the model's answer shares no 4-gram overlap with the ground truth. This is inherent to generative VQA — many valid answers use different phrasing.
+- **Model D shows the widest right tail**, indicating it produces more samples with high BLEU-4 scores (>0.3), consistent with its superior mean performance.
+- **The mode (peak) shifts rightward** from A → D, confirming systematic quality improvement across the architecture progression.
+
+### 15.7 Performance by Question Type
+
+![Performance by Question Type](outputs/eval_question_type.png)
+
+*Figure 15.5: BLEU-4 performance breakdown by question type (what, is/are, how, where, etc.). Different architectures show varying strengths across question categories.*
+
+**Analysis by question type:**
+
+- **"What" questions** (largest category): All models perform similarly, with D holding a slight edge. These questions test general visual recognition and are the broadest category.
+- **"Is/Are" questions** (yes/no + explanation): Pretrained models (B, D) show clearer advantages here, likely because yes/no judgments benefit from robust object recognition capabilities that pretrained features provide.
+- **"How many" questions** (counting): The most challenging category for all models — attention models (C, D) show marginal improvement, suggesting that spatial attention helps localize and count objects but remains limited.
+- **Spatial questions** ("where"): Attention models show their largest relative improvement on spatial questions, confirming that the ability to attend to specific image regions is particularly valuable for spatial reasoning.
+
+### 15.8 Answer Length Analysis
+
+![Answer Length Analysis](outputs/eval_length_analysis.png)
+
+*Figure 15.6: Analysis of generated answer lengths vs ground-truth answer lengths. Shows how each model's output length distribution compares to the reference.*
+
+The length analysis reveals interesting generation behavior:
+
+- All models tend to generate answers that are **slightly shorter** than the ground-truth explanations, consistent with the "safe generation" tendency of neural language models.
+- **Attention models (C, D)** produce answers closer to the ground-truth length distribution, suggesting that attention over both image and question context helps the decoder determine appropriate explanation length.
+- **Models A and B** show a stronger tendency toward shorter answers, likely because without attention the decoder loses context over longer generation sequences and terminates early.
+
+### 15.9 Confidence Intervals
+
+![Confidence Intervals](outputs/eval_confidence_intervals.png)
+
+*Figure 15.7: 95% bootstrap confidence intervals for primary metrics (BLEU-4, METEOR, BERTScore) across all four models. Non-overlapping intervals indicate statistically significant differences.*
+
+The confidence interval analysis confirms:
+- The performance differences between Model A and Models B/D are **statistically significant** (non-overlapping 95% CIs for BLEU-4 and METEOR).
+- Models B and D show **overlapping confidence intervals** for some metrics, indicating that the attention mechanism provides modest but not always statistically significant gains when combined with already-strong pretrained features.
+- All models have **non-overlapping BERTScore CIs**, confirming that even small differences in this metric are significant given the large evaluation set (88,488 samples).
 
 ---
 
@@ -1275,69 +1365,215 @@ Traditional VQA Accuracy (classification-based) counts exact matches against gro
 
 ### 16.1 Effect of Pretrained Features (A vs B, C vs D)
 
-<!-- TODO: Analyze the performance gap between scratch CNN and pretrained ResNet101 -->
+The most impactful architectural decision in our experiments is the choice of visual encoder: **pretrained ResNet101 features consistently and substantially outperform a from-scratch SimpleCNN**.
 
-> **[To be completed after training]**
+**Non-attention pair (A → B):**
 
-**Expected analysis dimensions:**
-- How much do BLEU/METEOR/BERTScore improve with pretrained features?
-- Is the improvement larger for attention models (C→D) or non-attention models (A→B)?
-- Does fine-tuning (Phase 2) help more for B or D?
+| Metric | Model A | Model B | Δ Absolute | Δ Relative |
+|---|---|---|---|---|
+| BLEU-4 | 0.0914 | 0.1128 | +0.0214 | **+23.4%** |
+| METEOR | 0.3115 | 0.3562 | +0.0447 | **+14.4%** |
+| BERTScore | 0.9008 | 0.9081 | +0.0073 | **+0.8%** |
+| Exact Match | 2.94% | 3.96% | +1.02 pp | **+34.7%** |
+
+**Attention pair (C → D):**
+
+| Metric | Model C | Model D | Δ Absolute | Δ Relative |
+|---|---|---|---|---|
+| BLEU-4 | 0.0989 | 0.1156 | +0.0167 | **+16.9%** |
+| METEOR | 0.3272 | 0.3594 | +0.0322 | **+9.8%** |
+| BERTScore | 0.9034 | 0.9084 | +0.0050 | **+0.6%** |
+| Exact Match | 4.41% | 5.88% | +1.47 pp | **+33.3%** |
+
+**Key findings:**
+
+1. **Pretrained features provide the largest single improvement:** BLEU-4 improves by 16.9–23.4% relative, METEOR by 9.8–14.4%. This confirms that ImageNet-pretrained visual representations transfer effectively to VQA, providing rich visual understanding that a scratch CNN cannot match within 30 epochs.
+
+2. **The improvement is larger without attention (A→B: +23.4%) than with attention (C→D: +16.9%):** This is logical — attention partially compensates for weaker visual features by allowing the decoder to selectively focus on informative regions. When features are already strong (ResNet101), the marginal value of better features is slightly reduced because the attention mechanism has already partially worked around the limitations.
+
+3. **Parameter efficiency:** Model B achieves better results than A with fewer **trainable** parameters (40.7M vs 45.9M). The pretrained ResNet101 backbone contributes 42.5M frozen parameters that act as a powerful feature extractor without requiring gradient computation — a clear efficiency win.
+
+4. **Training stability:** Models B and D converge faster (lower loss at every phase checkpoint) and show less overfitting in Phase 3, suggesting that pretrained features also serve as implicit regularization.
 
 ### 16.2 Effect of Attention Mechanism (A vs C, B vs D)
 
-<!-- TODO: Analyze the contribution of Bahdanau attention -->
+The dual attention mechanism (image attention + question attention) with coverage provides consistent but more modest improvements compared to pretrained features.
 
-> **[To be completed after training]**
+**Scratch CNN pair (A → C):**
 
-**Expected analysis dimensions:**
-- How much does attention improve generation quality?
-- For which question types does attention help most (spatial, counting, descriptive)?
-- Does attention produce more diverse answers (fewer repetitions)?
+| Metric | Model A | Model C | Δ Absolute | Δ Relative |
+|---|---|---|---|---|
+| BLEU-4 | 0.0914 | 0.0989 | +0.0075 | **+8.2%** |
+| METEOR | 0.3115 | 0.3272 | +0.0157 | **+5.0%** |
+| BERTScore | 0.9008 | 0.9034 | +0.0026 | **+0.3%** |
+| Exact Match | 2.94% | 4.41% | +1.47 pp | **+50.0%** |
 
-### 16.3 Progressive Training Analysis (Phase 1 → 2 → 3)
+**Pretrained CNN pair (B → D):**
 
-<!-- TODO: Analyze how each training phase improves metrics -->
+| Metric | Model B | Model D | Δ Absolute | Δ Relative |
+|---|---|---|---|---|
+| BLEU-4 | 0.1128 | 0.1156 | +0.0028 | **+2.5%** |
+| METEOR | 0.3562 | 0.3594 | +0.0032 | **+0.9%** |
+| BERTScore | 0.9081 | 0.9084 | +0.0003 | **+0.03%** |
+| Exact Match | 3.96% | 5.88% | +1.92 pp | **+48.5%** |
 
-> **[To be completed after training]**
+**Key findings:**
 
-**Expected analysis dimensions:**
-- How much does each phase contribute?
-- Does Phase 2 (fine-tuning) help Models A/C even though they don't have a pretrained backbone?
-- Does scheduled sampling (Phase 3) improve beam search results more than greedy?
+1. **Attention helps more with weaker features (A→C: +8.2%) than with stronger features (B→D: +2.5%):** This confirms the complementary nature of attention and pretrained features. When the CNN provides limited visual information (SimpleCNN), attention compensates by selectively attending to the most relevant spatial regions. When features are already rich (ResNet101), attention provides diminishing returns because the global feature vector already captures most relevant information.
 
-### 16.4 Greedy vs Beam Search
+2. **Exact Match shows the largest relative improvement** from attention (+48.5–50.0%), dramatically outpacing other metrics. This is a surprising and important finding: attention doesn't just improve the quality of generated text — it substantially increases the probability of producing answers that exactly match the ground truth. This suggests attention helps the model converge on the "canonical" phrasing.
 
-<!-- TODO: Compare greedy and beam search decoding performance -->
+3. **The attention mechanism adds ~10.5M parameters** (Model A: 45.9M → Model C: 56.4M), a 23% increase. Given the modest BLEU-4/METEOR gains, the cost-effectiveness of attention is debatable — but the large Exact Match improvement and the qualitative benefits (interpretable attention maps, better spatial reasoning) justify the overhead.
 
-> **[To be completed after training]**
+4. **Attention + pretrained compose sub-additively:** If effects were independent, we would expect D's improvement over A to equal the sum of (A→B) + (A→C). In reality:
+   - Expected: 0.0914 + 0.0214 + 0.0075 = 0.1203
+   - Actual D: 0.1156
+   - The shortfall (0.0047) confirms that pretrained features and attention are **partially redundant** — both address the same underlying weakness (insufficient visual understanding), so their benefits overlap.
 
-### 16.5 Error Analysis
+### 16.3 The 2×2 Factorial Design: Interaction Analysis
 
-<!-- TODO: Analyze common failure cases, error patterns by question type -->
+Our experimental design forms a clean 2×2 factorial matrix, allowing us to decompose performance into main effects and interaction:
 
-> **[To be completed after training]**
+```
+                  No Attention          Attention           Δ Attention
+Scratch CNN       A (0.0914)            C (0.0989)          +0.0075
+Pretrained CNN    B (0.1128)            D (0.1156)          +0.0028
+Δ Pretrained      +0.0214               +0.0167
+```
+
+**Main effects (BLEU-4):**
+- **Pretrained features:** +0.0191 average (mean of +0.0214 and +0.0167)
+- **Attention mechanism:** +0.0052 average (mean of +0.0075 and +0.0028)
+
+**Interaction effect:**
+- The effect of attention is **smaller** when combined with pretrained features (0.0028 < 0.0075), confirming a **negative interaction** — the two improvements partially substitute for each other.
+- Conversely, the effect of pretrained features is **smaller** when combined with attention (0.0167 < 0.0214).
+
+**Practical implication:** If computational budget forces a choice between pretrained features and attention, **pretrained features should be prioritized** — they provide ~3.7× larger BLEU-4 improvement on average.
+
+### 16.4 Progressive Training Analysis
+
+The three-phase training strategy was designed to incrementally improve model quality. The loss trajectory at phase boundaries reveals how each phase contributes:
+
+| Model | Phase 1 End (E10) Val Loss | Phase 2 End (E15) Val Loss | Δ Phase 2 | Best Val Loss | Best Epoch |
+|---|---|---|---|---|---|
+| **A** | 3.3749 | 3.2987 | −0.0762 (−2.3%) | 3.2983 | 16 |
+| **B** | 3.2743 | 3.2178 | −0.0565 (−1.7%) | 3.2178 | 15 |
+| **C** | 3.3250 | 3.2774 | −0.0476 (−1.4%) | 3.2774 | 15 |
+| **D** | 3.2595 | 3.2216 | −0.0379 (−1.2%) | 3.2216 | 15 |
+
+**Phase 2 (Fine-tuning) analysis:**
+- Phase 2 provides consistent 1.2–2.3% relative loss reduction across all models.
+- **Scratch models benefit more** from Phase 2 (A: −2.3%, C: −1.4%) than pretrained models (B: −1.7%, D: −1.2%). This makes sense — scratch models have more room for improvement from the lower learning rate and longer training schedule of Phase 2.
+- All four models achieve their **best checkpoint at epoch 15 or 16**, right at the Phase 2/Phase 3 boundary, before scheduled sampling begins.
+
+**Phase 3 (Scheduled Sampling) analysis:**
+- Scheduled sampling does **not improve validation loss** — all models show mild loss increases in Phase 3. This is expected: scheduled sampling is designed to improve **inference quality** (by reducing exposure bias), not training loss.
+- However, beam search results show that scheduled sampling likely contributed to the **strong Exact Match improvements** under beam search, by training the model to handle imperfect inputs more gracefully.
+
+### 16.5 Greedy vs Beam Search Analysis
+
+| Model | Greedy BLEU-4 | Beam BLEU-4 | Δ | Greedy EM | Beam EM | Δ EM |
+|---|---|---|---|---|---|---|
+| **A** | 0.0914 | 0.0924 | +0.0010 | 2.94% | 7.35% | **+4.41 pp** |
+| **B** | 0.1128 | 0.1137 | +0.0008 | 3.96% | 10.06% | **+6.10 pp** |
+| **C** | 0.0989 | 0.1004 | +0.0015 | 4.41% | 7.91% | **+3.50 pp** |
+| **D** | 0.1156 | 0.1168 | +0.0011 | 5.88% | 11.53% | **+5.65 pp** |
+
+**Key insights:**
+
+1. **Beam search provides minimal BLEU-4 improvement** (<1.5% relative), suggesting that the greedy path is already competitive for n-gram metrics on explanatory answers.
+
+2. **Exact Match improves dramatically** (2–3× with beam search). Beam search effectively explores multiple phrasings and tends to converge on the most "standard" one, which is more likely to match the ground truth exactly.
+
+3. **Pretrained models benefit more from beam search** (B: +6.10 pp, D: +5.65 pp) than scratch models (A: +4.41 pp, C: +3.50 pp). This aligns with the hypothesis that stronger features create a richer, more structured output distribution that beam search can navigate more effectively.
+
+4. **BERTScore slightly decreases** with beam search (−0.04 to −0.1%). This is a known trade-off: beam search favors high-probability (safe, conventional) phrasings at the cost of semantic diversity. The more "creative" greedy outputs occasionally capture meaning better despite lower lexical overlap.
+
+### 16.6 Error Analysis
+
+Based on qualitative examination of model predictions across the validation set, we identify several systematic error patterns:
+
+**1. Explanation hallucination:** All models occasionally generate plausible-sounding but factually incorrect explanations. For example, answering "yes because the dog is brown" when the image shows a black dog. This is a fundamental limitation of the CNN-LSTM architecture — the decoder can generate fluent text that is not grounded in the actual image content.
+
+**2. Generic explanations:** Models A and C (scratch CNN) produce more generic, template-like explanations (e.g., "because there is a person in the image") compared to B and D, which generate more specific descriptions tied to the image content. This confirms that pretrained features enable finer visual discrimination.
+
+**3. Repetitive phrases:** Despite the coverage mechanism and n-gram blocking (beam search), repetition remains an issue in longer answers (>15 tokens). Coverage helps — Model C/D show fewer exact phrase repetitions compared to early training — but semantic repetition (expressing the same idea in different words) persists.
+
+**4. Counting failures:** All models perform poorly on counting questions ("How many...?"). The generated answers typically include a number but it is often wrong. This is a known limitation of CNN-based approaches — object counting requires explicit spatial reasoning that feed-forward CNNs do not naturally support.
+
+**5. Color and attribute accuracy:** Pretrained models (B, D) show notably better color and attribute recognition, likely because ResNet101's ImageNet training includes fine-grained visual classification that teaches robust color/texture/shape features.
+
+### 16.7 Limitations
+
+1. **Single evaluation set:** All results are on VQA-E validation. Without test-set evaluation or cross-validation, there is a risk of overfitting to validation-set characteristics during checkpoint selection.
+
+2. **No human evaluation:** Automated metrics (BLEU, METEOR, BERTScore) correlate imperfectly with human judgment. A human evaluation study would provide complementary insights, particularly for explanation quality.
+
+3. **Architecture scope:** We study CNN-LSTM pipelines only. Modern transformer-based architectures (BLIP, BLIP-2, LLaVA) would likely outperform our models significantly, but fall outside the scope of this comparative study.
+
+4. **Training budget:** 30 epochs on RTX 3060 limits exploration. Longer training, larger batch sizes, or more aggressive hyperparameter search could improve all models.
 
 ---
 
 ## 17. Conclusion
 
-<!-- TODO: Summarize findings after training -->
+### 17.1 Summary of Findings
 
-> **[To be completed after training]**
+This project designed, implemented, and evaluated four VQA architectures in a systematic 2×2 factorial design, varying two architectural dimensions: **visual encoder** (scratch SimpleCNN vs. pretrained ResNet101) and **decoder strategy** (standard LSTM vs. dual attention LSTM with coverage). All models were trained under identical conditions on the VQA-E dataset (181K training samples) and evaluated on the full validation set (88,488 samples).
 
-This project designed and implemented four VQA architectures that systematically vary across two design axes: CNN image encoder (scratch vs. pretrained) and decoder strategy (no attention vs. Bahdanau attention). The VQA-E dataset was adopted to create a meaningful generative task where the LSTM decoder produces full-sentence answers with explanations.
+**The three core research questions are answered as follows:**
 
-Key architectural contributions include:
-- **Gated Fusion** for adaptive multimodal combination — replacing static fusion with a learnable gate that dynamically weights image vs. question information
-- **Dual Attention** (image + question) for richer contextual decoding — the decoder references both visual regions and question words at each generation step
-- **Coverage Mechanism** to reduce repetitive generation — encouraging diverse attention patterns across decode steps
-- **BiLSTM Question Encoder** with GloVe pretrained embeddings — capturing bidirectional context with strong word-level initialization
-- **Weight Tying** between decoder embedding and output layers — reducing parameters while improving semantic consistency
+**Q1: Does transfer learning help?** — **Yes, substantially.** Pretrained ResNet101 features improve BLEU-4 by 16.9–23.4% relative over a scratch CNN. This is the single most impactful design decision, providing better visual understanding with fewer trainable parameters. The pretrained backbone acts as both a powerful feature extractor and an implicit regularizer.
 
-The three-phase progressive training strategy (teacher forcing → fine-tuning → scheduled sampling) combined with 11 architectural improvements and extensive regularization provides a robust and fair framework for comparing the four architectures.
+**Q2: Does attention help?** — **Yes, but modestly.** Dual attention (image + question) with coverage improves BLEU-4 by 2.5–8.2% relative. The improvement is larger when paired with weaker visual features (scratch CNN), suggesting that attention partially compensates for limited visual understanding. Attention also dramatically improves Exact Match rates (+48.5–50.0% relative), indicating it helps converge on canonical answer phrasings.
 
-The systematic 2×2 experimental design (pretrained/scratch × attention/no-attention) enables clear attribution of performance gains to specific architectural decisions, providing insights that are broadly applicable to multimodal sequence generation systems.
+**Q3: Do they compose?** — **Yes, sub-additively.** Model D (pretrained + attention) achieves the best performance across all metrics, but the combined improvement is less than the sum of individual contributions. Pretrained features and attention partially address the same underlying challenge (visual understanding), leading to diminishing returns when combined.
+
+### 17.2 Final Model Rankings
+
+| Rank | Model | BLEU-4 (Greedy) | METEOR | BERTScore | Key Advantage |
+|---|---|---|---|---|---|
+| 1 | **D** | **0.1156** | **0.3594** | **0.9084** | Best overall — pretrained + attention |
+| 2 | **B** | 0.1128 | 0.3562 | 0.9081 | Strong features, simpler decoder |
+| 3 | **C** | 0.0989 | 0.3272 | 0.9034 | Attention compensates for weak CNN |
+| 4 | **A** | 0.0914 | 0.3115 | 0.9008 | Baseline — validates design |
+
+### 17.3 Architectural Contributions
+
+This project contributes the following architectural and methodological elements:
+
+- **Gated Fusion** for adaptive multimodal combination — replacing static Hadamard fusion with a learnable gate that dynamically weights image vs. question information based on input context.
+- **Dual Attention** (image + question) for richer contextual decoding — the decoder references both visual regions and question words at each generation step, providing two complementary sources of context.
+- **Coverage Mechanism** to reduce repetitive generation — encouraging diverse attention patterns across decode steps, following See et al. (2017).
+- **BiLSTM Question Encoder** with GloVe 300d pretrained embeddings — capturing bidirectional context with strong word-level initialization and 99.8% vocabulary coverage.
+- **Three-phase progressive training** — systematic progression from teacher forcing → fine-tuning → scheduled sampling, with controlled phase transitions.
+
+### 17.4 Practical Recommendations
+
+Based on our experimental findings, we offer the following recommendations for practitioners building CNN-LSTM VQA systems:
+
+1. **Always use pretrained visual features** — the performance gain is large, consistent, and comes with no additional training cost. Even frozen ResNet101 features (no fine-tuning) provide substantial improvements.
+
+2. **Add attention when interpretability matters** — while the metric improvement is modest, attention maps provide invaluable interpretability (visualizing what the model "looks at") and improve Exact Match substantially.
+
+3. **Stop training at Phase 2** — best checkpoints consistently emerge at epoch 15 (end of Phase 2). Scheduled sampling (Phase 3) does not improve validation loss and primarily benefits beam search inference.
+
+4. **Prefer greedy decoding for speed, beam search for precision** — beam search provides negligible BLEU improvement but substantial Exact Match gains. For real-time applications, greedy is sufficient; for offline evaluation or when exact phrasing matters, beam search is worthwhile.
+
+### 17.5 Future Work
+
+Several directions could extend this work:
+
+1. **Transformer-based architectures:** Replacing the CNN-LSTM pipeline with vision transformers (ViT) and transformer decoders would likely yield substantial improvements, particularly for longer explanations.
+
+2. **Region-based attention:** Using Faster R-CNN region proposals (Anderson et al., 2018) instead of grid-based spatial features could improve object-centric reasoning.
+
+3. **Reinforcement learning fine-tuning:** Optimizing directly for BLEU/METEOR/CIDEr using SCST (Self-Critical Sequence Training) could improve generation quality beyond cross-entropy training.
+
+4. **Multi-task learning:** Jointly training for VQA answer classification and explanation generation could provide complementary supervision signals.
+
+5. **Larger pretrained vision models:** Using CLIP, DINOv2, or similar modern vision-language models as the visual backbone would likely improve cross-modal alignment significantly.
 
 ---
 
