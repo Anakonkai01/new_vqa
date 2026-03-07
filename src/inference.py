@@ -154,7 +154,7 @@ def greedy_decode(model, image_tensor, question_tensor, vocab_a,
                 break 
             
             result.append(pred)
-            token = torch.tensor([[pred]], dtype=torch.long)
+            token = torch.tensor([[pred]], dtype=torch.long).to(device)
 
             
         words = [vocab_a.idx2word.get(i, '<unk>') for i in result]
