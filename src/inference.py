@@ -52,12 +52,21 @@ def _block_repeated_ngrams(log_probs, token_ids, no_repeat_ngram_size):
             log_probs[ng[-1]] = float('-inf')
 
 
-def get_model(model_type, vocab_q_size, vocab_a_size, glove_dim=300):
+def _has_coverage_keys(state_dict):
+    """Detect if a state_dict was trained with coverage enabled."""
+    return any('W_cov' in k for k in state_dict.keys())
+
+
+def get_model(model_type, vocab_q_size, vocab_a_size, glove_dim=300, use_coverage=False):
     """Create a model with architecture matching checkpoints trained with --glove.
     
     When glove_dim > 0, dummy embeddings of that dimension are created so the
     model has the correct layers (embedding + embed_proj). The actual weights
     are overwritten when loading the checkpoint via load_state_dict().
+    
+    Args:
+        use_coverage: If True, create C/D models with coverage layers (W_cov).
+                      Set this when loading checkpoints trained with --coverage.
     """
     # Create dummy GloVe embeddings to match training architecture
     if glove_dim > 0:
@@ -73,11 +82,27 @@ def get_model(model_type, vocab_q_size, vocab_a_size, glove_dim=300):
     elif model_type == 'B':
         return VQAModelB(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
     elif model_type == 'C':
-        return VQAModelC(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
+        return VQAModelC(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+                         use_coverage=use_coverage, **kw)
     elif model_type == 'D':
-        return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
+        return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+                         use_coverage=use_coverage, **kw)
     else:
         raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D.")
+
+
+def load_model_from_checkpoint(model_type, checkpoint, vocab_q_size, vocab_a_size,
+                               device='cpu', glove_dim=300):
+    """Load a model from checkpoint, auto-detecting coverage from state_dict."""
+    state_dict = torch.load(checkpoint, map_location=lambda storage, loc: storage)
+    state_dict = strip_compiled_prefix(state_dict)
+    use_coverage = _has_coverage_keys(state_dict)
+    model = get_model(model_type, vocab_q_size, vocab_a_size,
+                      glove_dim=glove_dim, use_coverage=use_coverage)
+    model.load_state_dict(state_dict)
+    model.to(device)
+    model.eval()
+    return model
 
 
 def greedy_decode(model, image_tensor, question_tensor, vocab_a,
@@ -483,10 +508,9 @@ if __name__ == "__main__":
     vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
 
     # Load model
-    model = get_model(MODEL_TYPE, len(vocab_q), len(vocab_a))
-    state_dict = torch.load(CHECKPOINT, map_location=lambda storage, loc: storage)
-    model.load_state_dict(strip_compiled_prefix(state_dict))
-    model.to(DEVICE)
+    model = load_model_from_checkpoint(
+        MODEL_TYPE, CHECKPOINT, len(vocab_q), len(vocab_a), device=DEVICE
+    )
 
     # Load 1 sample
     transform = transforms.Compose([

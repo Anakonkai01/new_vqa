@@ -335,16 +335,27 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         ckpt = torch.load(resume, map_location=lambda storage, loc: storage)
         # Strip '_orig_mod.' prefix (backward compat with torch.compile checkpoints)
         clean_sd = {k.replace('_orig_mod.', ''): v for k, v in ckpt['model_state_dict'].items()}
-        model.load_state_dict(clean_sd)
 
-        # Optimizer/scheduler state can only be restored when the number of
-        # parameter groups matches.  Phase transitions (e.g. Phase 1 → 2)
-        # change the optimizer layout (frozen → unfreeze adds a param group),
-        # so we skip restoring optimizer/scheduler in that case and start
-        # with a fresh optimizer + the new LR from CLI args.
+        # Use strict=False to handle phase transitions (e.g. Phase 1→2 enabling
+        # coverage adds W_cov layers that don't exist in Phase 1 checkpoints).
+        # Missing keys are freshly initialized by the model constructor.
+        incompatible = model.load_state_dict(clean_sd, strict=False)
+        if incompatible.missing_keys:
+            print(f"  [INFO] Newly initialized keys (not in checkpoint): "
+                  f"{incompatible.missing_keys}")
+        if incompatible.unexpected_keys:
+            print(f"  [WARN] Unexpected keys in checkpoint (ignored): "
+                  f"{incompatible.unexpected_keys}")
+
+        # Optimizer/scheduler state can only be restored when the model
+        # architecture AND optimizer layout are unchanged.  Skip restore when:
+        #  1. Param group count changed (e.g. frozen → unfreeze adds a group)
+        #  2. Model gained new parameters (e.g. Phase 1→2 adds W_cov for coverage)
+        # In both cases, start with a fresh optimizer + the new LR from CLI args.
         saved_groups = len(ckpt['optimizer_state_dict']['param_groups'])
         current_groups = len(optimizer.param_groups)
-        if saved_groups == current_groups:
+        model_changed = bool(incompatible.missing_keys or incompatible.unexpected_keys)
+        if saved_groups == current_groups and not model_changed:
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
             if 'warmup_scheduler_state_dict' in ckpt:
                 warmup_scheduler.load_state_dict(ckpt['warmup_scheduler_state_dict'])
@@ -353,7 +364,12 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
             scaler.load_state_dict(ckpt['scaler_state_dict'])
             print("  Optimizer & scheduler state restored.")
         else:
-            print(f"  Optimizer layout changed ({saved_groups} → {current_groups} param groups) "
+            reason = []
+            if saved_groups != current_groups:
+                reason.append(f"param groups {saved_groups} → {current_groups}")
+            if model_changed:
+                reason.append(f"model architecture changed ({len(incompatible.missing_keys)} new keys)")
+            print(f"  Optimizer state skipped ({', '.join(reason)}) "
                   f"— using fresh optimizer with current LR settings.")
 
         start_epoch   = ckpt['epoch']          # last completed epoch

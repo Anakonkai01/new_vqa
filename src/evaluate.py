@@ -21,6 +21,7 @@ from dataset import VQAEDataset, vqa_collate_fn
 from vocab import Vocabulary
 from inference import (
     get_model,
+    load_model_from_checkpoint,
     batch_greedy_decode,
     batch_greedy_decode_with_attention,
     batch_beam_search_decode,
@@ -61,11 +62,9 @@ def evaluate(model_type='A', checkpoint=None, num_samples=None, beam_width=1,
         max_samples=num_samples
     )
 
-    model = get_model(model_type, len(vocab_q), len(vocab_a))
-    state_dict = torch.load(checkpoint, map_location=lambda storage, loc: storage)
-    model.load_state_dict(strip_compiled_prefix(state_dict))
-    model.to(DEVICE)
-    model.eval()
+    model = load_model_from_checkpoint(
+        model_type, checkpoint, len(vocab_q), len(vocab_a), device=DEVICE
+    )
 
     use_attention = model_type in ('C', 'D')
     if beam_width > 1:

@@ -27,7 +27,7 @@ from torchvision import transforms
 
 sys.path.append(os.path.dirname(__file__))
 from vocab import Vocabulary
-from inference import get_model, greedy_decode, strip_compiled_prefix
+from inference import get_model, load_model_from_checkpoint, greedy_decode, strip_compiled_prefix
 
 # ── Config ───────────────────────────────────────────────────────
 DEVICE          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -212,12 +212,10 @@ if __name__ == "__main__":
     vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
 
     # load model
-    from inference import strip_compiled_prefix
-    model = get_model(args.model_type, len(vocab_q), len(vocab_a))
-    state_dict = torch.load(checkpoint, map_location=lambda storage, loc: storage)
-    model.load_state_dict(strip_compiled_prefix(state_dict))
-    model.to(DEVICE)
-    model.eval()
+    from inference import load_model_from_checkpoint
+    model = load_model_from_checkpoint(
+        args.model_type, checkpoint, len(vocab_q), len(vocab_a), device=DEVICE
+    )
 
     # load sample (VQA-E format: list of dicts with 'question', 'img_id', etc.)
     with open(VQA_E_JSON, 'r') as f:
