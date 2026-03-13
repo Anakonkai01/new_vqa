@@ -1,29 +1,40 @@
-"""
-GloVe embedding utilities.
+"""GloVe embedding utilities.
 
-Provides functions to:
-  1. Download GloVe 6B vectors (if not already cached)
-  2. Build an embedding matrix aligned with a Vocabulary object
+Downloads GloVe 6B pre-trained vectors (if not cached locally) and builds
+an embedding weight matrix aligned with a ``Vocabulary`` object.
 
-Usage:
+Typical usage::
+
     from glove_utils import build_glove_matrix
-    matrix = build_glove_matrix(vocab, glove_dim=300, glove_path="data/glove")
-    # matrix: (vocab_size, glove_dim) numpy array, rows aligned with vocab.word2idx
+
+    matrix, coverage = build_glove_matrix(vocab, glove_dim=300)
+    # matrix   : np.ndarray of shape (vocab_size, 300)
+    # coverage : float in [0, 1] — fraction of vocab words found in GloVe
 """
+
+from __future__ import annotations
 
 import os
-import sys
 import zipfile
+from typing import Dict, Tuple
+
 import numpy as np
 
-GLOVE_URL  = "https://nlp.stanford.edu/data/glove.6B.zip"
-GLOVE_DIR  = "data/glove"
+from vocab import Vocabulary
+
+_GLOVE_URL:     str = "https://nlp.stanford.edu/data/glove.6B.zip"
+_DEFAULT_DIR:   str = "data/glove"
 
 
-def download_glove(glove_dir=GLOVE_DIR, dim=300):
-    """
-    Download and extract GloVe 6B vectors if not already present.
-    Returns the path to the extracted .txt file.
+def _download_glove(glove_dir: str, dim: int) -> str:
+    """Download and extract GloVe 6B vectors if not already cached.
+
+    Args:
+        glove_dir: Directory in which to store the downloaded files.
+        dim: Embedding dimension — one of 50, 100, 200, 300.
+
+    Returns:
+        Absolute path to the extracted ``.txt`` file.
     """
     os.makedirs(glove_dir, exist_ok=True)
     txt_path = os.path.join(glove_dir, f"glove.6B.{dim}d.txt")
@@ -33,29 +44,32 @@ def download_glove(glove_dir=GLOVE_DIR, dim=300):
 
     zip_path = os.path.join(glove_dir, "glove.6B.zip")
     if not os.path.exists(zip_path):
-        print(f"Downloading GloVe 6B from {GLOVE_URL} ...")
-        print(f"  (822 MB — this may take a few minutes)")
         import urllib.request
-        urllib.request.urlretrieve(GLOVE_URL, zip_path)
-        print(f"  Downloaded to {zip_path}")
+        print(f"Downloading GloVe 6B (~822 MB) from {_GLOVE_URL} ...")
+        urllib.request.urlretrieve(_GLOVE_URL, zip_path)
+        print(f"  Saved to {zip_path}")
 
     print(f"Extracting glove.6B.{dim}d.txt ...")
-    with zipfile.ZipFile(zip_path, 'r') as z:
-        target = f"glove.6B.{dim}d.txt"
-        z.extract(target, glove_dir)
+    with zipfile.ZipFile(zip_path, "r") as z:
+        z.extract(f"glove.6B.{dim}d.txt", glove_dir)
     print(f"  Extracted to {txt_path}")
-
     return txt_path
 
 
-def load_glove_vectors(glove_path, dim=300):
+def _load_glove_vectors(glove_path: str, dim: int) -> Dict[str, np.ndarray]:
+    """Load GloVe vectors from a ``.txt`` file into a word → vector mapping.
+
+    Args:
+        glove_path: Path to the GloVe ``.txt`` file.
+        dim: Expected embedding dimension (used for row validation).
+
+    Returns:
+        Dict mapping each word string to its ``np.ndarray`` of shape ``(dim,)``.
     """
-    Load GloVe vectors from a .txt file into a dict {word: np.array}.
-    """
-    vectors = {}
-    with open(glove_path, 'r', encoding='utf-8') as f:
+    vectors: Dict[str, np.ndarray] = {}
+    with open(glove_path, "r", encoding="utf-8") as f:
         for line in f:
-            parts = line.rstrip().split(' ')
+            parts = line.rstrip().split(" ")
             word  = parts[0]
             vec   = np.array(parts[1:], dtype=np.float32)
             if len(vec) == dim:
@@ -64,29 +78,38 @@ def load_glove_vectors(glove_path, dim=300):
     return vectors
 
 
-def build_glove_matrix(vocab, glove_dim=300, glove_dir=GLOVE_DIR):
-    """
-    Build an embedding matrix of shape (vocab_size, glove_dim).
+def build_glove_matrix(
+    vocab: Vocabulary,
+    glove_dim: int = 300,
+    glove_dir: str = _DEFAULT_DIR,
+) -> Tuple[np.ndarray, float]:
+    """Build a pre-trained embedding weight matrix aligned with *vocab*.
 
-    - Words found in GloVe → use pretrained vector
-    - Words NOT found (OOV) → random init from N(0, 0.1)
-    - <pad> (index 0) → zeros
+    Initialisation rules:
+
+    - Words found in GloVe → use the pre-trained vector.
+    - OOV words → random ``N(0, 0.1)`` (matches scale of GloVe vectors).
+    - ``<pad>`` (index 0) → all-zeros. This is consistent with
+      ``nn.Embedding(padding_idx=0)`` where the pad embedding is never
+      updated by gradients regardless, but explicit zeros prevent any
+      accidental contribution in the first forward pass.
 
     Args:
-        vocab     : Vocabulary object with word2idx dict
-        glove_dim : 50, 100, 200, or 300
-        glove_dir : directory to cache GloVe files
+        vocab: ``Vocabulary`` object whose ``word2idx`` defines the row order.
+        glove_dim: Embedding dimension — one of 50, 100, 200, 300.
+        glove_dir: Local directory to cache the GloVe zip and txt files.
 
     Returns:
-        matrix    : np.ndarray of shape (len(vocab), glove_dim)
-        coverage  : float — fraction of vocab words found in GloVe
+        Tuple of:
+            matrix   – ``np.ndarray`` of shape ``(vocab_size, glove_dim)``.
+            coverage – Fraction of vocab words found in GloVe (float in 0–1).
     """
-    glove_path = download_glove(glove_dir, glove_dim)
-    vectors    = load_glove_vectors(glove_path, glove_dim)
+    glove_path = _download_glove(glove_dir, glove_dim)
+    vectors    = _load_glove_vectors(glove_path, glove_dim)
 
     vocab_size = len(vocab)
-    matrix     = np.random.normal(0, 0.1, (vocab_size, glove_dim)).astype(np.float32)
-    matrix[0]  = 0.0  # <pad> should be zeros
+    matrix     = np.random.normal(0.0, 0.1, (vocab_size, glove_dim)).astype(np.float32)
+    matrix[vocab.pad_idx] = 0.0  # <pad> is always explicitly zeroed
 
     found = 0
     for word, idx in vocab.word2idx.items():
@@ -100,13 +123,13 @@ def build_glove_matrix(vocab, glove_dim=300, glove_dir=GLOVE_DIR):
 
 
 if __name__ == "__main__":
-    # Quick test — download + build matrix for a dummy vocab
+    import sys
     sys.path.append(os.path.dirname(__file__))
-    from vocab import Vocabulary
 
-    vocab = Vocabulary()
-    vocab.load("data/processed/vocab_questions.json")
+    test_vocab = Vocabulary()
+    test_vocab.load("data/processed/vocab_questions.json")
+    print(f"Vocab: {test_vocab}")
 
-    matrix, cov = build_glove_matrix(vocab, glove_dim=300)
-    print(f"Matrix shape: {matrix.shape}")   # (4546, 300)
-    print(f"Coverage    : {cov:.1%}")
+    mat, cov = build_glove_matrix(test_vocab, glove_dim=300)
+    print(f"Matrix shape : {mat.shape}")
+    print(f"Coverage     : {cov:.1%}")

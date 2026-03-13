@@ -21,13 +21,20 @@ import matplotlib
 matplotlib.use('Agg')   # no display server needed (Kaggle / headless)
 import matplotlib.pyplot as plt
 
-# colors for 4 models
-MODEL_COLORS = {'A': '#1f77b4', 'B': '#ff7f0e', 'C': '#2ca02c', 'D': '#d62728'}
+# colors for all 5 models
+MODEL_COLORS = {
+    'A': '#1f77b4',
+    'B': '#ff7f0e',
+    'C': '#2ca02c',
+    'D': '#d62728',
+    'E': '#9467bd',
+}
 MODEL_LABELS = {
-    'A': 'Model A (Scratch, No Attn)',
-    'B': 'Model B (Pretrained, No Attn)',
-    'C': 'Model C (Scratch, Attn)',
-    'D': 'Model D (Pretrained, Attn)',
+    'A': 'Model A (SimpleCNN, No Attn)',
+    'B': 'Model B (ResNet101, No Attn)',
+    'C': 'Model C (SimpleCNN, Dual Attn)',
+    'D': 'Model D (ResNet101, Dual Attn)',
+    'E': 'Model E (CLIP ViT, FiLM + Dual Attn)',
 }
 
 
@@ -71,7 +78,7 @@ def plot_curves(model_types, output_path):
         ax.legend(fontsize=8)
         ax.grid(True, alpha=0.3)
 
-    fig.suptitle('Training Curves — 4 VQA Models', fontsize=15, fontweight='bold')
+    fig.suptitle('Training Curves — VQA Models', fontsize=15, fontweight='bold')
     plt.tight_layout()
 
     os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
@@ -82,8 +89,8 @@ def plot_curves(model_types, output_path):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--models', type=str, default='A,B,C,D',
-                        help='Comma-separated model types to plot (default: A,B,C,D)')
+    parser.add_argument('--models', type=str, default='A,B,C,D,E',
+                        help='Comma-separated model types to plot (default: A,B,C,D,E)')
     parser.add_argument('--output', type=str, default='checkpoints/training_curves.png',
                         help='Output path for the figure')
     args = parser.parse_args()

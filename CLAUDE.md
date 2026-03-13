@@ -31,7 +31,9 @@ python src/train.py --model E --epochs 5 --lr 2e-4 --batch_size 256 \
 
 ### Phase 4 — RL SCST
 ```bash
-python src/train_rl.py  # config inside the file
+python src/train_rl.py --model_type E \
+    --base_checkpoint checkpoints/model_e_best.pth \
+    --epochs 3 --batch_size 32 --lr 1e-5
 ```
 
 ### Evaluation
@@ -43,13 +45,13 @@ python src/llm_eval.py  # Gemini LLM-as-judge evaluation
 
 ### Model Comparison
 ```bash
-python src/compare.py --models A,B,C,D --epoch 20
+python src/compare.py --models A,B,C,D,E --epoch 20
 ```
 
 ### Visualization
 ```bash
-python src/plot_curves.py --models A,B,C,D
-python src/visualize.py --model_type D --sample_idx 0  # attention heatmap (C/D only)
+python src/plot_curves.py --models A,B,C,D,E
+python src/visualize.py --model_type E --sample_idx 0  # attention heatmap (C/D/E)
 ```
 
 ## Architecture
