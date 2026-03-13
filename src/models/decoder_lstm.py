@@ -102,6 +102,49 @@ class LSTMDecoder(nn.Module):
         # logits (batch, maxlen, vocab_size)
 
         return logits 
+        
+    def decode_step(self, token, hidden):
+        embed = self.dropout(self.embedding(token))
+        if self.embed_proj is not None:
+            embed = self.embed_proj(embed)
+            
+        output, hidden = self.lstm(embed, hidden)
+        logit = self.fc(self.out_proj(output.squeeze(1)))
+        return logit, hidden
+
+    def sample(self, encoder_hidden, max_len, start_idx, end_idx, method='greedy'):
+        import torch.nn.functional as F
+        hidden = encoder_hidden
+        batch = hidden[0].size(1)
+        
+        token = torch.full((batch, 1), start_idx, dtype=torch.long, device=hidden[0].device)
+        
+        seqs = []
+        log_probs = []
+        unfinished = torch.ones(batch, dtype=torch.bool, device=hidden[0].device)
+
+        for t in range(max_len):
+            logit, hidden = self.decode_step(token, hidden)
+            probs = F.softmax(logit, dim=-1)
+
+            if method == 'sample':
+                predicted_token = torch.multinomial(probs, 1)
+            else:
+                predicted_token = torch.argmax(logit, dim=-1, keepdim=True)
+
+            step_log_probs = F.log_softmax(logit, dim=-1)
+            selected_log_probs = step_log_probs.gather(1, predicted_token)
+
+            seqs.append(predicted_token)
+            log_probs.append(selected_log_probs)
+
+            token = predicted_token * unfinished.unsqueeze(1).long()
+            unfinished = unfinished & (predicted_token.squeeze(1) != end_idx)
+
+        seqs = torch.cat(seqs, dim=1)
+        log_probs = torch.cat(log_probs, dim=1)
+
+        return seqs, log_probs 
     
     
     

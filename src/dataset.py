@@ -31,8 +31,9 @@ def vqa_collate_fn(batch):
     # Stack image tensors along the batch dimension
     imgs_stacked = torch.stack(imgs, dim=0)
     # Pad question and answer sequences to equal length within the batch
-    questions_padded = pad_sequence(questions, batch_first=True)
-    answer_padded = pad_sequence(answers, batch_first=True)
+    # padding_value=0 assumes 0 is <pad> in vocabulary
+    questions_padded = pad_sequence(questions, batch_first=True, padding_value=0)
+    answer_padded = pad_sequence(answers, batch_first=True, padding_value=0)
 
     return imgs_stacked, questions_padded, answer_padded
     
@@ -41,21 +42,23 @@ def vqa_collate_fn(batch):
 
 class VQAEDataset(Dataset):
     """
-    Dataset for VQA-E: loads a single annotation JSON that contains
+    Multi-task Dataset for VQA-E and Captioning: 
+    Loads a single annotation JSON for VQA-E and an optional COCO Captions JSON.
     question + answer + explanation per entry.
     Target sequence: "<start> answer because explanation <end>"
     Images: same COCO 2014 images as VQA 2.0 (no new download needed).
     """
     def __init__(self, image_dir, vqa_e_json_path, vocab_q, vocab_a,
-                 split='train2014', max_samples=None, augment=False):
+                 caption_json_path=None, split='train2014', max_samples=None, augment=False):
         """
-        image_dir      : path to COCO images (train2014 or val2014)
-        vqa_e_json_path: path to VQA-E annotation JSON (single file)
-        vocab_q        : question Vocabulary object
-        vocab_a        : answer Vocabulary object
-        split          : 'train2014' or 'val2014' — used in image filename
-        max_samples    : cap number of samples (useful for quick tests)
-        augment        : apply data augmentation (train only)
+        image_dir         : path to COCO images (train2014 or val2014)
+        vqa_e_json_path   : path to VQA-E annotation JSON
+        vocab_q           : question Vocabulary object
+        vocab_a           : answer Vocabulary object
+        caption_json_path : optional path to COCO Captions JSON for multi-task
+        split             : 'train2014' or 'val2014'
+        max_samples       : cap number of samples
+        augment           : apply data augmentation (train only)
         """
         self.image_dir = image_dir
         self.vocab_q   = vocab_q
@@ -80,26 +83,50 @@ class VQAEDataset(Dataset):
                                      std=[0.229, 0.224, 0.225])
             ])
 
-        with open(vqa_e_json_path, 'r') as f:
-            self.annotations = json.load(f)  # root is a list
+        self.annotations = []
+        if vqa_e_json_path:
+            if not os.path.exists(vqa_e_json_path):
+                raise FileNotFoundError(f"VQA-E JSON not found: {vqa_e_json_path}")
+            with open(vqa_e_json_path, 'r') as f:
+                vqa_data = json.load(f)
+                for item in vqa_data:
+                    item['task_type'] = 'vqa'
+                self.annotations.extend(vqa_data)
+
+        if caption_json_path:
+            if not os.path.exists(caption_json_path):
+                raise FileNotFoundError(f"Caption JSON not found: {caption_json_path}")
+            with open(caption_json_path, 'r') as f:
+                cap_data = json.load(f)['annotations']
+                for item in cap_data:
+                    item['task_type'] = 'caption'
+                self.annotations.extend(cap_data)
 
         if max_samples is not None:
+            import random
+            random.seed(42)
+            random.shuffle(self.annotations)
             self.annotations = self.annotations[:max_samples]
 
     def __len__(self):
         return len(self.annotations)
 
     def __getitem__(self, index):
-        ann    = self.annotations[index]
-        q_text = ann['question']
-        img_id = ann['img_id']  # VQA-E uses 'img_id' (not 'image_id')
+        ann = self.annotations[index]
+        task_type = ann.get('task_type', 'vqa')
 
-        answer   = ann.get('multiple_choice_answer', '')
-        exp_list = ann.get('explanation', [])
-        # explanation = [text_string, confidence_score] — text is index 0
-        explanation = exp_list[0] if exp_list and isinstance(exp_list[0], str) else ''
+        if task_type == 'vqa':
+            q_text = f"<task_vqa> {ann['question']}"
+            img_id = ann['img_id']  # VQA-E uses 'img_id'
 
-        a_text = f"{answer} because {explanation}" if explanation else answer
+            answer   = ann.get('multiple_choice_answer', '')
+            exp_list = ann.get('explanation', [])
+            explanation = exp_list[0] if exp_list and isinstance(exp_list[0], str) else ''
+            a_text = f"{answer} because {explanation}" if explanation else answer
+        else:
+            q_text = "<task_cap>"
+            img_id = ann['image_id'] # COCO captions uses 'image_id'
+            a_text = ann['caption']
 
         q_tensor = torch.tensor(self.vocab_q.numericalize(q_text), dtype=torch.long)
         a_tensor = torch.tensor(self.vocab_a.numericalize(a_text), dtype=torch.long)

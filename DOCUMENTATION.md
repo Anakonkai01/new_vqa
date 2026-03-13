@@ -1,5 +1,9 @@
 # VQA System — Software Documentation
 
+> **[IMPORTANT NOTICE]**
+> This document refers to the Legacy VQA 2.0 and the baseline Models A/B/C/D.
+> For the new, final state of the project (Model E, VQA-E Dataset, Multi-Task Captioning, Reinforcement Learning SCST), please read `CONTEXT_HANDOFF.md`.
+
 **Phiên bản:** 2.0.0  
 **Ngày cập nhật:** 2025-06-26  
 **Repository:** https://github.com/Anakonkai01/new_vqa  

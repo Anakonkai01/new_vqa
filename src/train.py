@@ -15,7 +15,7 @@ sys.path.append(os.path.dirname(__file__))
 
 # Import modules
 from dataset import VQAEDataset, vqa_collate_fn
-from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD
+from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, VQAModelE
 from glove_utils import build_glove_matrix
 from vocab import Vocabulary
 
@@ -83,8 +83,11 @@ def get_model(model_type, vocab_q_size, vocab_a_size,
     elif model_type == 'D':
         return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
                          use_coverage=use_coverage, **kw)
+    elif model_type == 'E':
+        return VQAModelE(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+                         use_coverage=use_coverage, **kw)
     else:
-        raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D.")
+        raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D, E.")
 
 
 def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
@@ -118,17 +121,30 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
     max_len = decoder_input.size(1)
 
     # ── Encode image + question ──────────────────────────────────────
-    if model_type in ('C', 'D'):
+    if model_type in ('C', 'D', 'E'):
         img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B, 49, H)
         q_feat, q_hidden = model.q_encoder(questions)                    # (B, H), (B, qlen, H)
-        fusion       = model.fusion(img_features.mean(dim=1), q_feat)    # (B, H)
+        if hasattr(model, 'q_norm'): q_feat = model.q_norm(q_feat)
+        
+        if model_type == 'E':
+             img_mean = img_features.mean(dim=1)
+             fusion_global = model.fusion(img_mean, q_feat)
+             h_0_base = model.init_h_proj(fusion_global)
+             c_0_base = model.init_c_proj(fusion_global)
+             h = h_0_base.unsqueeze(0).repeat(model.num_layers, 1, 1)
+             c = c_0_base.unsqueeze(0).repeat(model.num_layers, 1, 1)
+             img_features = model.fusion(img_features, q_feat) # Modulate spatial features 
+        else:
+             fusion = model.fusion(img_features.mean(dim=1), q_feat)    # (B, H)
+             h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (L, B, H)
+             c = torch.zeros_like(h)
     else:
         img_feat = F.normalize(model.i_encoder(imgs), p=2, dim=1)       # (B, H)
         q_feat, _ = model.q_encoder(questions)                           # (B, H)
         fusion    = model.fusion(img_feat, q_feat)                       # (B, H)
+        h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (L, B, H)
+        c = torch.zeros_like(h)
 
-    h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (L, B, H)
-    c = torch.zeros_like(h)
     hidden = (h, c)
 
     # Coverage vector for models C/D
@@ -143,7 +159,7 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
     for t in range(max_len):
         tok = current_token.unsqueeze(1)  # (B, 1)
 
-        if model_type in ('C', 'D'):
+        if model_type in ('C', 'D', 'E'):
             logit, hidden, _, coverage = model.decoder.decode_step(tok, hidden, img_features, q_hidden, coverage)
             # logit: (B, vocab), hidden: updated (h, c)
         else:
@@ -166,12 +182,12 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
 
 
 # ── Training set (train2014) ─────────────────────────────────────
-TRAIN_IMAGE_DIR  = "data/raw/images/train2014"
-TRAIN_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_train_set.json"
+TRAIN_IMAGE_DIR  = "data/raw/train2014"
+TRAIN_VQA_E_JSON = "data/vqa_e/VQA-E_train_set.json"
 
 # ── Validation set (val2014) ──────────────────────────────────────
-VAL_IMAGE_DIR  = "data/raw/images/val2014"
-VAL_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_val_set.json"
+VAL_IMAGE_DIR  = "data/raw/val2014"
+VAL_VQA_E_JSON = "data/vqa_e/VQA-E_val_set.json"
 
 VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
 VOCAB_A_PATH  = "data/processed/vocab_answers.json"
@@ -181,10 +197,10 @@ MAX_TRAIN_SAMPLES = None
 MAX_VAL_SAMPLES   = None
 
 
-def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
+def train(model_type='A', epochs=10, lr=1e-3, batch_size=256, resume=None,
           scheduled_sampling=False, ss_k=5,
           finetune_cnn=False, cnn_lr_factor=0.1,
-          num_workers=4, weight_decay=1e-5,
+          num_workers=12, weight_decay=1e-5,
           early_stopping_patience=0, augment=False,
           use_glove=False, glove_dim=300,
           use_coverage=False, coverage_lambda=1.0,
@@ -263,10 +279,10 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
     # ── Optimizer — differential LR when fine-tuning the CNN backbone ──────────
     # Models A/C use scratch CNN → finetune_cnn flag has no effect on them.
-    # Models B/D use frozen ResNet → finetune_cnn selectively unfreezes
-    # layer3 + layer4 with a smaller LR (cnn_lr_factor × base_lr) to avoid
-    # catastrophic forgetting of pretrained ImageNet knowledge.
-    if finetune_cnn and model_type in ('B', 'D'):
+    # Models B/D/E use frozen CNN/ViT → finetune_cnn selectively unfreezes
+    # layer3 + layer4 / top blocks with a smaller LR (cnn_lr_factor × base_lr) to avoid
+    # catastrophic forgetting of pretrained knowledge.
+    if finetune_cnn and model_type in ('B', 'D', 'E'):
         model.i_encoder.unfreeze_top_layers()
         backbone_param_ids = {id(p) for p in model.i_encoder.backbone_params()}
         backbone_params = [p for p in model.parameters()
@@ -286,30 +302,38 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     if weight_decay > 0:
         print(f"Weight decay     : {weight_decay:.1e}")
 
-    # ── LR Warmup + ReduceLROnPlateau ─────────────────────────────
-    # Warm up linearly from lr/10 → lr over first warmup_epochs epochs,
-    # then switch to ReduceLROnPlateau (halve when val loss plateaus).
-    #
-    # IMPORTANT: LinearLR auto-calls .step() at init (last_epoch=-1 → 0),
-    # which immediately multiplies LR by start_factor. When warmup_epochs=0
-    # (Phase 2/3 resume), we must use start_factor=1.0 so the LR is unchanged.
+    # ── LR Warmup + CosineAnnealing using SequentialLR ────────────
+    # SequentialLR securely strings the two schedulers together.
+    # We must start CosineAnnealingLR from epoch 0 of its own phase, otherwise it jumps.
+    
+    # 1. Warmup Scheduler: from lr/10 to lr
+    warmup_epochs = max(warmup_epochs, 0)
+    warmup_iters = max(warmup_epochs, 1)
     warmup_scheduler = optim.lr_scheduler.LinearLR(
         optimizer,
         start_factor=0.1 if warmup_epochs > 0 else 1.0,
         end_factor=1.0,
-        total_iters=max(warmup_epochs, 1)
+        total_iters=warmup_iters
     )
-    # CosineAnnealingLR: smooth decay from peak LR to eta_min over remaining epochs
-    # Much better than ReduceLROnPlateau for fixed-length training runs
+    
+    # 2. Cosine Scheduler: from lr to lr*0.01 over the remaining epochs
     remaining_epochs = max(epochs - warmup_epochs, 1)
     cosine_scheduler = optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=remaining_epochs, eta_min=lr * 0.01
     )
+    
+    # 3. Stitch them together
+    scheduler = optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, cosine_scheduler],
+        milestones=[warmup_iters]
+    )
+
     if warmup_epochs > 0:
         print(f"LR Warmup        : {warmup_epochs} epochs (lr/10 → lr)")
     else:
         print(f"LR Warmup        : DISABLED (resume training)")
-    print(f"LR Schedule      : CosineAnnealing (T_max={remaining_epochs}, eta_min={lr*0.01:.1e})")
+    print(f"LR Schedule      : CosineAnnealing (T_max={remaining_epochs}, eta_min={lr*0.01:.1e}) via SequentialLR")
 
     # Mixed precision — BF16 on Ampere+ (A100, etc.), FP16 elsewhere
     use_amp  = torch.cuda.is_available()
@@ -357,12 +381,15 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         model_changed = bool(incompatible.missing_keys or incompatible.unexpected_keys)
         if saved_groups == current_groups and not model_changed:
             optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-            if 'warmup_scheduler_state_dict' in ckpt:
-                warmup_scheduler.load_state_dict(ckpt['warmup_scheduler_state_dict'])
-                if 'cosine_scheduler_state_dict' in ckpt:
-                    cosine_scheduler.load_state_dict(ckpt['cosine_scheduler_state_dict'])
-            scaler.load_state_dict(ckpt['scaler_state_dict'])
-            print("  Optimizer & scheduler state restored.")
+            if 'scheduler_state_dict' in ckpt:
+                scheduler.load_state_dict(ckpt['scheduler_state_dict'])
+            # Support fallback for older checkpoints that had the dual scheduler setup
+            elif 'warmup_scheduler_state_dict' in ckpt:
+                print("  [WARN] Old scheduler state found. LR might jump. Using fresh SequentialLR state.")
+                
+            if 'scaler_state_dict' in ckpt:
+                scaler.load_state_dict(ckpt['scaler_state_dict'])
+            print("  Optimizer & scaler state restored. (Scheduler uses fresh SequentialLR to fix jump bug)")
         else:
             reason = []
             if saved_groups != current_groups:
@@ -375,7 +402,13 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         start_epoch   = ckpt['epoch']          # last completed epoch
         best_val_loss = ckpt['best_val_loss']
         history       = ckpt.get('history', history)
-        print(f"  Resumed at epoch {start_epoch} | best_val_loss: {best_val_loss:.4f}")
+        
+        # Fast-forward the fresh SequentialLR to the resumed epoch
+        # This guarantees the LR matches the cosine schedule correctly.
+        for _ in range(start_epoch):
+            scheduler.step()
+            
+        print(f"  Resumed at epoch {start_epoch} | best_val_loss: {best_val_loss:.4f} | Current LR: {scheduler.get_last_lr()[0]:.2e}")
 
     print(f"Model: {model_type} | Device: {DEVICE} | Dropout: {dropout}")
     if use_coverage and model_type in ('C', 'D'):
@@ -566,7 +599,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a VQA model.")
-    parser.add_argument('--model',      type=str,   default='A', choices=['A', 'B', 'C', 'D'],
+    parser.add_argument('--model',      type=str,   default='A', choices=['A', 'B', 'C', 'D', 'E'],
                         help='Model architecture (default: A)')
     parser.add_argument('--epochs',     type=int,   default=10,
                         help='Number of training epochs (default: 10)')

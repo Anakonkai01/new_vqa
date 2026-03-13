@@ -6,26 +6,51 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from vocab import Vocabulary
 
 # VQA-E single annotation file (contains question + answer + explanation)
-TRAIN_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_train_set.json"
+TRAIN_VQA_E_PATHS = [
+    "data/vqa_e/VQA-E_train_set.json",
+    "data/raw/vqa_e_json/VQA-E_train_set.json",
+]
+TRAIN_CAPTIONS_PATHS = [
+    "data/raw/annotations/captions_train2014.json",
+    "data/vqa_data_json/captions_train2014.json"
+]
 
 OUTPUT_DIR = "data/processed"
 
+
+def get_first_existing_path(paths):
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return None
 
 def main():
     if not os.path.exists(OUTPUT_DIR):
         os.makedirs(OUTPUT_DIR)
         print(f"Created directory: {OUTPUT_DIR}")
 
-    print(f"\nReading VQA-E annotation file: {TRAIN_VQA_E_JSON}")
-    try:
-        with open(TRAIN_VQA_E_JSON, 'r') as f:
-            annotations = json.load(f)  # root is a list
-    except FileNotFoundError:
-        print(f"ERROR: File not found: {TRAIN_VQA_E_JSON}")
+    vqa_path = get_first_existing_path(TRAIN_VQA_E_PATHS)
+    if not vqa_path:
+        print(f"ERROR: VQA-E train set not found in any of {TRAIN_VQA_E_PATHS}")
         print("Please download VQA-E and place it in data/vqa_e/")
         return
+        
+    print(f"\nReading VQA-E annotation file: {vqa_path}")
+    with open(vqa_path, 'r') as f:
+        annotations = json.load(f)  # root is a list
 
-    print(f"Loaded {len(annotations)} annotations.")
+
+    print(f"Loaded {len(annotations)} VQA-E annotations.")
+    
+    cap_path = get_first_existing_path(TRAIN_CAPTIONS_PATHS)
+    captions = []
+    if cap_path:
+        print(f"Reading COCO Captions file: {cap_path}")
+        with open(cap_path, 'r') as f:
+            captions = json.load(f)['annotations']
+        print(f"Loaded {len(captions)} COCO Captions.")
+    else:
+        print("COCO Captions not found, vocab will be built for VQA-E only.")
 
     # Build question vocabulary from 'question' field
     print("\n1. Building question vocabulary...")
@@ -51,6 +76,9 @@ def main():
         else:
             a_text = answer
         answers_list.append(a_text)
+        
+    for cap in captions:
+        answers_list.append(cap['caption'])
 
     # threshold=3: VQA-E is ~6x smaller than VQA 2.0, need to keep more words
     a_vocab = Vocabulary()

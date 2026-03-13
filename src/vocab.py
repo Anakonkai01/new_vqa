@@ -2,6 +2,7 @@
 import json
 import re
 from collections import Counter
+import nltk
 
 class Vocabulary:
     def __init__(self):
@@ -15,10 +16,16 @@ class Vocabulary:
         self.end_token = "<end>"    # signals end of sequence
         self.unk_token = "<unk>"    # out-of-vocabulary token
         
+        # 2 special tokens for multi-task learning
+        self.task_vqa_token = "<task_vqa>"
+        self.task_cap_token = "<task_cap>"
+        
         self.add_word(self.pad_token)   # idx 0
         self.add_word(self.start_token) # idx 1
         self.add_word(self.end_token)   # idx 2
         self.add_word(self.unk_token)   # idx 3
+        self.add_word(self.task_vqa_token) # idx 4
+        self.add_word(self.task_cap_token) # idx 5
 
     def add_word(self, word):
         if word not in self.word2idx:
@@ -44,10 +51,14 @@ class Vocabulary:
         print(f" -> Done. Vocab size: {len(self.word2idx)}")
 
     def tokenize(self, sentence):
-        """Lowercase and tokenize a sentence using simple word splitting."""
+        """Lowercase and tokenize a sentence using nltk word_tokenize."""
         sentence = sentence.lower().strip()
-        # Keep alphanumeric characters, strip punctuation
-        tokens = re.findall(r"\w+", sentence)
+        try:
+            tokens = nltk.word_tokenize(sentence)
+        except LookupError:
+            nltk.download('punkt', quiet=True)
+            nltk.download('punkt_tab', quiet=True)
+            tokens = nltk.word_tokenize(sentence)
         return tokens
 
     def numericalize(self, sentence):

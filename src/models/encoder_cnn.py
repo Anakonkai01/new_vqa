@@ -12,6 +12,7 @@ Docstring for models.encoder_cnn
 
 import torch.nn as nn 
 import torchvision.models as models
+from transformers import CLIPVisionModel
 
 # helper function 
 # note: W_out = W_in - kernel + 2 * padding
@@ -197,6 +198,49 @@ class ResNetSpatialEncoder(nn.Module):
         return out                  # (batch, 49, output_size)
 
 
+# CLIP ViT-B/32 Spatial — used for Model E
+class CLIPViTEncoder(nn.Module):
+    def __init__(self, output_size=1024, freeze=True):
+        super().__init__()
+        # Load pretrained CLIP ViT-B/32
+        self.clip = CLIPVisionModel.from_pretrained("openai/clip-vit-base-patch32")
+        
+        if freeze:
+            for param in self.clip.parameters():
+                param.requires_grad = False
+                
+        # CLIP features are 768-d. We project each region to output_size
+        self.proj = nn.Linear(768, output_size)
+
+    def unfreeze_top_layers(self):
+        """Unfreeze the top transformer layer and the projection."""
+        for param in self.clip.parameters():
+            param.requires_grad = False
+        # Unfreeze the last layer in the vision model (layer 11)
+        for param in self.clip.vision_model.encoder.layers[-1].parameters():
+            param.requires_grad = True
+        for param in self.proj.parameters():
+            param.requires_grad = True
+
+    def backbone_params(self):
+        """Return params belonging to the pretrained backbone."""
+        return [p for p in self.clip.vision_model.encoder.layers[-1].parameters() if p.requires_grad]
+
+    def forward(self, x):
+        # x: (batch, 3, 224, 224)
+        outputs = self.clip(x)
+        # outputs.last_hidden_state: (batch, sequence_length, hidden_size)
+        # Sequence length = 50 (1 CLS + 49 patch tokens for 224x224 and patch size 32)
+        hidden_states = outputs.last_hidden_state
+        
+        # Discard the CLS token (index 0) and keep the 49 spatial patches
+        patch_features = hidden_states[:, 1:, :]  # (batch, 49, 768)
+        
+        # Project to the target hidden size
+        out = self.proj(patch_features) # (batch, 49, output_size)
+        return out
+
+
 # test 
 if __name__ == "__main__":
     import torch
@@ -204,4 +248,5 @@ if __name__ == "__main__":
     x = torch.randn(4, 3, 224, 224)
     out = model(x)
     print(out.shape) # expect (4, 1024)
+
 

@@ -278,6 +278,60 @@ class LSTMDecoderWithAttention(nn.Module):
 
         return logit, hidden, img_alpha, coverage
 
+    def sample(self, encoder_hidden, img_features, q_hidden_states, max_len, start_idx, end_idx, method='greedy'):
+        """
+        Generates a sequence autoregressively and calculates log probabilities.
+        Used for RL (Self-Critical Sequence Training) where we need gradients w.r.t the action probabilities.
+
+        method: 'greedy' (baseline) or 'sample' (exploration via multinomial distribution)
+
+        returns:
+          seqs      : (batch, max_len) — containing token IDs
+          log_probs : (batch, max_len) — log_softmax probabilities of the chosen tokens (used for REINFORCE)
+        """
+        batch = img_features.size(0)
+        hidden = encoder_hidden  # (num_layers, batch, hidden_size)
+
+        # First input token is <start>
+        token = torch.full((batch, 1), start_idx, dtype=torch.long, device=img_features.device)
+
+        seqs = []
+        log_probs = []
+
+        coverage = img_features.new_zeros(batch, img_features.size(1)) if self.use_coverage else None
+        
+        # boolean mask to track which sequences within the batch have reached <end> token 
+        unfinished = torch.ones(batch, dtype=torch.bool, device=img_features.device)
+
+        for t in range(max_len):
+            logit, hidden, _, coverage = self.decode_step(token, hidden, img_features, q_hidden_states, coverage)
+
+            probs = F.softmax(logit, dim=-1) # (batch, vocab_size)
+
+            if method == 'sample':
+                predicted_token = torch.multinomial(probs, 1)  # (batch, 1)
+            else:
+                predicted_token = torch.argmax(logit, dim=-1, keepdim=True)  # (batch, 1)
+
+            # fetch log probabilities of the selected tokens
+            step_log_probs = F.log_softmax(logit, dim=-1)
+            selected_log_probs = step_log_probs.gather(1, predicted_token)  # (batch, 1)
+
+            seqs.append(predicted_token)
+            log_probs.append(selected_log_probs)
+
+            # Mask out the token if the sequence already finished
+            # If unfinished, keep the predicted token, else force to padding (0)
+            token = predicted_token * unfinished.unsqueeze(1).long()
+
+            # Update unfinished mask (turns False when end_token generated)
+            unfinished = unfinished & (predicted_token.squeeze(1) != end_idx)
+
+        seqs = torch.cat(seqs, dim=1)           # (batch, max_len)
+        log_probs = torch.cat(log_probs, dim=1) # (batch, max_len)
+
+        return seqs, log_probs
+
 
 # ── Quick test ─────────────────────────────────────────────────────────────────
 if __name__ == "__main__":

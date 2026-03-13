@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import sys, os 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from models.encoder_cnn import SimpleCNN, ResNetEncoder, SimpleCNNSpatial, ResNetSpatialEncoder
+from models.encoder_cnn import SimpleCNN, ResNetEncoder, SimpleCNNSpatial, ResNetSpatialEncoder, CLIPViTEncoder
 from models.encoder_question import QuestionEncoder
 from models.decoder_lstm import LSTMDecoder
 from models.decoder_attention import LSTMDecoderWithAttention
@@ -51,6 +51,45 @@ class GatedFusion(nn.Module):
         h_q   = torch.tanh(self.fc_q(q_feature))       # (batch, hidden)
         gate  = torch.sigmoid(self.fc_gate(torch.cat([img_feature, q_feature], dim=1)))  # (batch, hidden)
         return gate * h_img + (1 - gate) * h_q          # (batch, hidden)
+
+# FiLM Fusion — Feature-wise Linear Modulation
+class FiLMFusion(nn.Module):
+    """
+    Feature-wise Linear Modulation (FiLM) Fusion.
+    The question feature generates gamma (scale) and beta (shift) vectors.
+    These are applied to the image features element-wise.
+    """
+    def __init__(self, hidden_size):
+        super().__init__()
+        # MLP to generate gamma and beta from question feature
+        # Using a bottleneck to reduce parameters 
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size // 2),
+            nn.ReLU(),
+            nn.Dropout(0.2), # Dropout added as per Master Blueprint
+            nn.Linear(hidden_size // 2, hidden_size * 2) # Outputs [gamma, beta]
+        )
+        self.layer_norm = nn.LayerNorm(hidden_size)
+
+    def forward(self, img_features, q_feature):
+        """
+        img_features: (batch, 49, hidden) or (batch, hidden)
+        q_feature   : (batch, hidden)
+        """
+        film_params = self.mlp(q_feature) # (batch, hidden * 2)
+        gamma, beta = torch.chunk(film_params, 2, dim=-1) # Each is (batch, hidden)
+        
+        # If img_features is spatial (batch, 49, hidden), reshape gamma/beta to broadcast
+        if img_features.dim() == 3:
+            gamma = gamma.unsqueeze(1) # (batch, 1, hidden)
+            beta = beta.unsqueeze(1)   # (batch, 1, hidden)
+            
+        # Normalize img_features before modulation to keep activations stable
+        img_features = self.layer_norm(img_features)
+        
+        # Modulate
+        modulated_img = gamma * img_features + beta
+        return modulated_img
 
 
 
@@ -282,4 +321,87 @@ class VQAModelD(nn.Module):
 
         # Decode with dual attention — pass img_features + q_hidden_states
         logits, coverage_loss = self.decoder((h_0, c_0), img_features, q_hidden_states, target_seq)
+        return logits, coverage_loss
+
+# Model E: CLIP ViT-B/32 Spatial + FiLM Fusion + Bahdanau Attention + Init Projection
+class VQAModelE(nn.Module):
+    def __init__(self, vocab_size, answer_vocab_size,
+                 embed_size=512, hidden_size=1024, num_layers=2,
+                 attn_dim=512, freeze_cnn=True, dropout=0.5,
+                 pretrained_q_emb=None, pretrained_a_emb=None,
+                 use_coverage=False):
+        super().__init__()
+
+        self.num_layers = num_layers
+        self.hidden_size = hidden_size
+
+        # CLIP ViT-B/32 Spatial Encoder: returns (batch, 49, hidden_size)
+        self.i_encoder = CLIPViTEncoder(output_size=hidden_size, freeze=freeze_cnn)
+
+        # Question encoder
+        self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
+                                         hidden_size=hidden_size, num_layers=num_layers,
+                                         dropout=dropout,
+                                         pretrained_embeddings=pretrained_q_emb)
+        
+        # Question feature normalization
+        self.q_norm = nn.LayerNorm(hidden_size)
+
+        # FiLM Fusion
+        self.fusion = FiLMFusion(hidden_size)
+        
+        # Init State Projection (Non-linear projection to generate h_0 and c_0)
+        self.init_h_proj = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh()
+        )
+        self.init_c_proj = nn.Sequential(
+            nn.Linear(hidden_size, hidden_size),
+            nn.Tanh()
+        )
+
+        # Decoder with dual attention
+        self.decoder = LSTMDecoderWithAttention(
+            vocab_size=answer_vocab_size,
+            embed_size=embed_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            attn_dim=attn_dim,
+            dropout=dropout,
+            pretrained_embeddings=pretrained_a_emb,
+            use_coverage=use_coverage
+        )
+
+    def forward(self, images, questions, target_seq):
+        """
+        images    : (batch, 3, 224, 224)
+        questions : (batch, max_q_len)
+        target_seq: (batch, max_a_len)
+        returns   :
+          logits        : (batch, max_a_len, answer_vocab_size)
+          coverage_loss : scalar tensor (0.0 if coverage disabled)
+        """
+        # CLIP spatial: (batch, 49, hidden_size)
+        img_features = self.i_encoder(images)
+        img_features = F.normalize(img_features, p=2, dim=-1)
+
+        q_feature, q_hidden_states = self.q_encoder(questions)
+        q_feature = self.q_norm(q_feature) # Stable FiLM generation
+
+        # Mean-pool 49 regions for the global fusion vector -> (batch, hidden_size)
+        img_mean = img_features.mean(dim=1)    
+        fusion_global = self.fusion(img_mean, q_feature) # (batch, hidden_size)
+
+        # Create h_0 and c_0 using non-linear projection from fusion state
+        h_0_base = self.init_h_proj(fusion_global) # (batch, hidden)
+        c_0_base = self.init_c_proj(fusion_global) # (batch, hidden)
+        
+        h_0 = h_0_base.unsqueeze(0).repeat(self.num_layers, 1, 1) # (num_layers, batch, hidden)
+        c_0 = c_0_base.unsqueeze(0).repeat(self.num_layers, 1, 1)
+
+        # Apply FiLM directly to the 49 spatial regions to pass into Dual Attention
+        modulated_img_features = self.fusion(img_features, q_feature) # (batch, 49, hidden_size)
+
+        # Decode with dual attention — pass modulated_img_features + q_hidden_states
+        logits, coverage_loss = self.decoder((h_0, c_0), modulated_img_features, q_hidden_states, target_seq)
         return logits, coverage_loss

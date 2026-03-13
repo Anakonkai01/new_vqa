@@ -1,4 +1,11 @@
-# **Bài 2 (7đ):**
+# **Bài 2 (7đ): VQA Project**
+
+> **[IMPORTANT NOTICE]**
+> This repository has been heavily upgraded to feature **Model E** combining CLIP ViT, BiLSTM, FiLM Fusion, and Reinforcement Learning on VQA-E dataset.
+> For the new, final and complete codebase architecture and training instructions, please read `CONTEXT_HANDOFF.md`.
+> To run the training pipeline, see `train_model_e.ipynb`.
+
+---
 
 Sử dụng model LSTM và model CNN xây dựng kiến trúc cho bài toán Visual Question Answering.
 

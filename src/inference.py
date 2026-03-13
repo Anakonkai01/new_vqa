@@ -106,7 +106,7 @@ def load_model_from_checkpoint(model_type, checkpoint, vocab_q_size, vocab_a_siz
 
 
 def greedy_decode(model, image_tensor, question_tensor, vocab_a,
-                  max_len=50, device='cpu'):
+                  max_len=100, device='cpu'):
     """
     image_tensor (3, 224, 224)
     question_tensor (max_q_len)
@@ -163,7 +163,7 @@ def greedy_decode(model, image_tensor, question_tensor, vocab_a,
 
 
 def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
-                                 max_len=50, device='cpu'):
+                                 max_len=100, device='cpu'):
     """
     For Model C and D (with Bahdanau attention).
     image_tensor : (3, 224, 224)
@@ -213,7 +213,7 @@ def greedy_decode_with_attention(model, image_tensor, question_tensor, vocab_a,
 
 
 def batch_greedy_decode(model, img_tensors, q_tensors, vocab_a,
-                        max_len=50, device='cpu'):
+                        max_len=100, device='cpu'):
     """
     Batch greedy decode for models A/B (no attention).
 
@@ -268,7 +268,7 @@ def batch_greedy_decode(model, img_tensors, q_tensors, vocab_a,
 
 
 def batch_greedy_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
-                                       max_len=50, device='cpu'):
+                                       max_len=100, device='cpu'):
     """
     Batch greedy decode for models C/D (Bahdanau attention).
 
@@ -334,7 +334,7 @@ def batch_greedy_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
 # ──────────────────────────────────────────────────────────────────────────────
 
 def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
-                       beam_width=5, max_len=50, device='cpu',
+                       beam_width=5, max_len=100, device='cpu',
                        no_repeat_ngram_size=3):
     """
     Single-sample beam search for models A/B (no attention).
@@ -401,7 +401,7 @@ def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
 
 
 def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
-                                      beam_width=5, max_len=50, device='cpu',
+                                      beam_width=5, max_len=100, device='cpu',
                                       no_repeat_ngram_size=3):
     """
     Single-sample beam search for models C/D (Bahdanau attention).
@@ -464,7 +464,7 @@ def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
 
 
 def batch_beam_search_decode(model, img_tensors, q_tensors, vocab_a,
-                             beam_width=5, max_len=50, device='cpu',
+                             beam_width=5, max_len=100, device='cpu',
                              no_repeat_ngram_size=3):
     """Batch wrapper for beam_search_decode (models A/B)."""
     return [
@@ -478,7 +478,7 @@ def batch_beam_search_decode(model, img_tensors, q_tensors, vocab_a,
 
 
 def batch_beam_search_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
-                                            beam_width=5, max_len=50, device='cpu',
+                                            beam_width=5, max_len=100, device='cpu',
                                             no_repeat_ngram_size=3):
     """Batch wrapper for beam_search_decode_with_attention (models C/D)."""
     return [
