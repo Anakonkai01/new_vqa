@@ -46,6 +46,7 @@ from inference import (
     greedy_decode,
     greedy_decode_with_attention,
 )
+from transformers import CLIPProcessor
 from vocab import Vocabulary
 
 
@@ -57,6 +58,9 @@ MODEL_DESCRIPTIONS: Dict[str, str] = {
     "C": "SimpleCNN, Dual Attn + Coverage",
     "D": "ResNet101, Dual Attn + Coverage",
     "E": "CLIP ViT-B/32, FiLM + Dual Attn",
+    "F": "CLIP ViT+Text, FiLM + Bahdanau",
+    "G": "CLIP ViT+Text, FiLM + MHA",
+    "H": "CLIP ViT+Text, FiLM + Transformer",
 }
 
 _TRANSFORM = transforms.Compose([
@@ -104,6 +108,9 @@ class InteractiveVQA:
         self.device          = device
         self.beam_width      = beam_width
         self.no_repeat_ngram = no_repeat_ngram
+
+        # Lazy-loaded CLIP processor for F/G/H question tokenisation.
+        self._clip_processor: Optional[CLIPProcessor] = None
 
         self.all_images: list[str] = sorted(
             glob.glob(os.path.join(image_dir, "*.jpg"))
@@ -162,7 +169,24 @@ class InteractiveVQA:
             return {}
 
         img_tensor = _TRANSFORM(self.current_img_pil)
-        q_tensor   = torch.tensor(self.vocab_q.numericalize(question), dtype=torch.long)
+
+        # Standard vocab_q tokenisation (A–E)
+        q_tensor_vocab = torch.tensor(
+            self.vocab_q.numericalize(question), dtype=torch.long
+        )
+
+        # CLIP BPE tokenisation (F–H) — lazy-load processor on first use.
+        q_tensor_clip: Optional[torch.Tensor] = None
+        if any(m in ("F", "G", "H") for m in self.models):
+            if self._clip_processor is None:
+                self._clip_processor = CLIPProcessor.from_pretrained(
+                    "openai/clip-vit-base-patch32"
+                )
+            enc = self._clip_processor(
+                text=question, return_tensors="pt",
+                padding="max_length", max_length=77, truncation=True,
+            )
+            q_tensor_clip = enc["input_ids"].squeeze(0)   # (77,)
 
         print(f"Image   : {os.path.basename(self.current_img_path)}")
         print(f"Question: {question}")
@@ -172,8 +196,10 @@ class InteractiveVQA:
         results: Dict[str, Dict[str, str]] = {}
         with torch.no_grad():
             for m in sorted(self.models.keys()):
-                model     = self.models[m]
-                use_attn  = m in ("C", "D", "E")
+                model    = self.models[m]
+                use_attn = m in ("C", "D", "E", "F", "G", "H")
+                is_clip  = m in ("F", "G", "H")
+                q_tensor = q_tensor_clip if is_clip else q_tensor_vocab
 
                 # Greedy decode
                 if use_attn:

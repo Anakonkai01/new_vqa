@@ -52,6 +52,7 @@ except ImportError:
     _HAS_BERTSCORE = False
 
 from dataset import VQAEDataset, vqa_collate_fn
+from dataset_clip import VQAEDatasetCLIP, clip_collate_fn
 from inference import (
     batch_beam_search_decode,
     batch_beam_search_decode_with_attention,
@@ -120,23 +121,35 @@ def evaluate(
     vocab_a = Vocabulary()
     vocab_a.load(VOCAB_A_PATH)
 
-    val_dataset = VQAEDataset(
-        image_dir=VAL_IMAGE_DIR,
-        vqa_e_json_path=VAL_VQA_E_JSON,
-        vocab_q=vocab_q,
-        vocab_a=vocab_a,
-        split="val2014",
-        max_samples=num_samples,
-    )
+    is_clip_model = model_type in ("F", "G", "H")
+    if is_clip_model:
+        val_dataset = VQAEDatasetCLIP(
+            image_dir=VAL_IMAGE_DIR,
+            vqa_e_json_path=VAL_VQA_E_JSON,
+            vocab_a=vocab_a,
+            split="val2014",
+            max_samples=num_samples,
+        )
+        collate = clip_collate_fn
+    else:
+        val_dataset = VQAEDataset(
+            image_dir=VAL_IMAGE_DIR,
+            vqa_e_json_path=VAL_VQA_E_JSON,
+            vocab_q=vocab_q,
+            vocab_a=vocab_a,
+            split="val2014",
+            max_samples=num_samples,
+        )
+        collate = vqa_collate_fn
 
     model = load_model_from_checkpoint(
         model_type, checkpoint, len(vocab_q), len(vocab_a), device=DEVICE
     )
 
     # ── Decode function routing ───────────────────────────────────────────────
-    # Spatial-attention models (C, D, E) use the attention-aware decode path;
+    # Spatial-attention models (C–H) use the attention-aware decode path;
     # global-vector models (A, B) use the simpler path.
-    use_attention = model_type in ("C", "D", "E")
+    use_attention = model_type in ("C", "D", "E", "F", "G", "H")
 
     if beam_width > 1:
         decode_fn = (
@@ -158,7 +171,7 @@ def evaluate(
         val_dataset,
         batch_size=64,
         shuffle=False,
-        collate_fn=vqa_collate_fn,
+        collate_fn=collate,
         num_workers=2,
     )
 
@@ -170,8 +183,8 @@ def evaluate(
     print(f"Evaluating Model {model_type} | checkpoint: {checkpoint} | samples: {n}")
 
     with torch.no_grad():
-        for imgs, questions, answers in tqdm.tqdm(val_loader, desc="Evaluating"):
-            preds = decode_fn(model, imgs, questions, vocab_a, device=DEVICE, **decode_kwargs)
+        for imgs, q_input, answers in tqdm.tqdm(val_loader, desc="Evaluating"):
+            preds = decode_fn(model, imgs, q_input, vocab_a, device=DEVICE, **decode_kwargs)
             all_predictions.extend(preds)
             for a_tensor in answers:
                 all_gt_strings.append(_decode_answer_tensor(a_tensor, vocab_a))
@@ -251,7 +264,7 @@ if __name__ == "__main__":
         description="Evaluate a VQA checkpoint on NLP metrics."
     )
     parser.add_argument("--model_type",    type=str, default="A",
-                        choices=["A", "B", "C", "D", "E"],
+                        choices=["A", "B", "C", "D", "E", "F", "G", "H"],
                         help="Model variant.")
     parser.add_argument("--checkpoint",    type=str, default=None,
                         help="Path to checkpoint. Default: checkpoints/model_X_best.pth")

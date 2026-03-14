@@ -1,21 +1,24 @@
-"""Autoregressive decoding utilities for all VQA models (A–E).
+"""Autoregressive decoding utilities for all VQA models (A–H).
 
 Provides greedy decode and beam-search decode for both global-vector models
-(A, B) and spatial-attention models (C, D, E).  Batch variants run each item
+(A, B) and spatial-attention models (C–H).  Batch variants run each item
 in the batch through a shared encoder then decode in parallel, which is much
 faster than calling the single-sample functions in a loop.
 
 Model routing
 -------------
 * **A / B** — global image vector, no attention.  Use ``batch_greedy_decode``
-  or ``batch_beam_search_decode``.
-* **C / D** — spatial (49-region) image features, dual Bahdanau attention,
-  GatedFusion init.  Use ``batch_greedy_decode_with_attention`` or
-  ``batch_beam_search_decode_with_attention``.
-* **E** — same as C/D but with FiLM modulation: ``init_h_proj``/``init_c_proj``
-  project the FiLM-fused global vector into the LSTM init states, and the 49
-  spatial patches are FiLM-modulated before being passed to the attention
-  decoder.  Detected automatically via ``hasattr(model, 'init_h_proj')``.
+  or ``batch_beam_search_decode``.  Question input: ``LongTensor (B, Q)``.
+* **C / D** — spatial features, dual Bahdanau attention, GatedFusion init.
+  Use ``batch_greedy_decode_with_attention``.  Question: ``LongTensor (B, Q)``.
+* **E** — same as C/D but FiLM.  Detected via ``hasattr(model, 'init_h_proj')``.
+  Question: ``LongTensor (B, Q)``.
+* **F / G** — CLIP text encoder replaces BiLSTM.  Same ``_with_attention``
+  decode functions; question input is ``LongTensor (B, 77)`` CLIP BPE ids.
+  F uses Bahdanau; G uses MHA. Decoder hidden state is LSTM (h, c).
+* **H** — CLIP encoders + Transformer decoder.  Same ``_with_attention``
+  functions auto-dispatch via ``_is_transformer(model.decoder)``.  Hidden
+  state is the KV cache (accumulated embedding buffer), not an LSTM state.
 
 Checkpoint compatibility
 ------------------------
@@ -250,44 +253,56 @@ def _encode_global(
     return h, c
 
 
+def _is_transformer(decoder: nn.Module) -> bool:
+    """Return True if *decoder* is a ``TransformerDecoder`` (Model H).
+
+    Detected by the presence of ``final_norm`` (LayerNorm after the last
+    Transformer layer), which is absent in all LSTM-based decoders.
+    """
+    return hasattr(decoder, "final_norm")
+
+
 def _encode_spatial(
     model: nn.Module,
     imgs: Tensor,
-    questions: Tensor,
+    q_input: Tensor,
     device: Union[torch.device, str],
 ) -> Tuple[Tuple[Tensor, Tensor], Tensor, Tensor]:
-    """Encode images and questions for spatial-attention models (C, D, E).
+    """Encode images and questions for spatial-attention models (C, D, E, F, G, H).
 
-    Handles both GatedFusion/concat (C, D) and FiLM (E) variants:
+    Handles all three fusion variants:
 
-    * **C / D**: ``h_0 = repeat(fusion_global)``, ``c_0 = zeros``,
-      spatial features passed to decoder un-modulated.
-    * **E**: ``h_0`` and ``c_0`` come from ``init_h_proj``/``init_c_proj``
-      applied to the FiLM-fused global vector; spatial features are
-      FiLM-modulated before being passed to the attention decoder.
+    * **C / D**: GatedFusion, ``h_0 = repeat(fusion_global)``, ``c_0 = zeros``,
+      spatial features un-modulated.
+    * **E / F / G / H**: FiLM, ``h_0`` and ``c_0`` from
+      ``init_h_proj``/``init_c_proj``; spatial features FiLM-modulated.
+      Detected via ``hasattr(model, 'init_h_proj')``.
 
-    Model E is detected automatically via ``hasattr(model, 'init_h_proj')``.
+    For **Model H** (TransformerDecoder), the returned ``encoder_hidden`` tuple
+    is computed but ignored by the decoder — state is maintained via KV cache.
 
     Args:
-        model: ``VQAModelC``, ``VQAModelD``, or ``VQAModelE``.
+        model: Any spatial-attention VQA model (C–H).
         imgs: ``FloatTensor (B, 3, 224, 224)``.
-        questions: ``LongTensor (B, Q)``.
+        q_input: ``LongTensor (B, Q)`` vocab tokens (C/D/E) **or**
+            ``LongTensor (B, 77)`` CLIP BPE ids (F/G/H).
         device: Device to move tensors to.
 
     Returns:
         Tuple of:
-            encoder_hidden – ``(h_0, c_0)``, each ``(num_layers, B, H)``.
-            spatial_feats  – ``FloatTensor (B, 49, H)`` for attention decoder.
-            q_hidden       – ``FloatTensor (B, Q, H)`` question hidden states.
+            encoder_hidden – ``(h_0, c_0)``, each ``(num_layers, B, H)``
+                             (ignored by TransformerDecoder).
+            spatial_feats  – ``FloatTensor (B, 49, H)`` — FiLM-modulated or raw.
+            q_hidden       – ``FloatTensor (B, Q_or_77, H)`` question states.
     """
-    imgs      = imgs.to(device)
-    questions = questions.to(device)
+    imgs    = imgs.to(device)
+    q_input = q_input.to(device)
 
     img_features         = F.normalize(model.i_encoder(imgs), p=2, dim=-1)
     # img_features: (B, 49, H)
 
-    q_feat, q_hidden     = model.q_encoder(questions)
-    # q_feat: (B, H) | q_hidden: (B, Q, H)
+    q_feat, q_hidden     = model.q_encoder(q_input)
+    # q_feat: (B, H) | q_hidden: (B, Q_or_77, H)
 
     if hasattr(model, "q_norm"):
         q_feat = model.q_norm(q_feat)
@@ -295,20 +310,20 @@ def _encode_spatial(
     img_mean = img_features.mean(dim=1)  # (B, H)
 
     if hasattr(model, "init_h_proj"):
-        # ── Model E: FiLM-based fusion ────────────────────────────────────────
-        fusion_global  = model.fusion(img_mean, q_feat)          # (B, H) FiLM-fused
+        # ── Models E / F / G / H: FiLM-based fusion ──────────────────────────
+        fusion_global  = model.fusion(img_mean, q_feat)          # (B, H)
         h_0 = (model.init_h_proj(fusion_global)
                .unsqueeze(0).repeat(model.num_layers, 1, 1))     # (L, B, H)
         c_0 = (model.init_c_proj(fusion_global)
                .unsqueeze(0).repeat(model.num_layers, 1, 1))     # (L, B, H)
-        # FiLM-modulate all 49 spatial patches (same γ/β as global init)
+        # FiLM-modulate all 49 spatial patches
         spatial_feats = model.fusion(img_features, q_feat)       # (B, 49, H)
     else:
-        # ── Models C / D: gate or concat fusion ───────────────────────────────
+        # ── Models C / D: GatedFusion ─────────────────────────────────────────
         fusion_global  = model.fusion(img_mean, q_feat)          # (B, H)
         h_0 = fusion_global.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (L, B, H)
-        c_0 = torch.zeros_like(h_0)                                       # (L, B, H)
-        spatial_feats  = img_features                            # (B, 49, H) — un-modulated
+        c_0 = torch.zeros_like(h_0)
+        spatial_feats  = img_features                            # (B, 49, H) un-modulated
 
     return (h_0, c_0), spatial_feats, q_hidden
 
@@ -446,16 +461,17 @@ def batch_greedy_decode_with_attention(
     max_len: int = 100,
     device: Union[torch.device, str] = "cpu",
 ) -> List[str]:
-    """Batch greedy decode for spatial-attention models (C, D, E).
+    """Batch greedy decode for spatial-attention models (C–H).
 
-    Uses ``model.decoder.decode_step()`` with spatial image features and
-    question hidden states.  Coverage vector is initialised to ``None`` and
-    accumulated step-by-step if the decoder was trained with coverage.
+    Routes automatically:
+    - LSTM decoders (C/D/E/F/G): LSTM ``(h, c)`` hidden state, optional coverage.
+    - Transformer decoder (H): KV-cache (accumulated embedding buffer).
 
     Args:
-        model: ``VQAModelC``, ``VQAModelD``, or ``VQAModelE``.
+        model: Any spatial-attention VQA model (C–H).
         img_tensors: ``FloatTensor (B, 3, 224, 224)``.
-        q_tensors: ``LongTensor (B, Q)``.
+        q_tensors: ``LongTensor (B, Q)`` vocab ids (C/D/E) or
+            ``LongTensor (B, 77)`` CLIP ids (F/G/H).
         vocab_a: Answer vocabulary.
         max_len: Maximum tokens per sequence.
         device: Device for computation.
@@ -472,30 +488,46 @@ def batch_greedy_decode_with_attention(
         )
 
         token    = torch.full((B, 1), vocab_a.start_idx, dtype=torch.long, device=device)
-        hidden   = encoder_hidden
         finished = torch.zeros(B, dtype=torch.bool, device=device)
         results: List[List[int]] = [[] for _ in range(B)]
-        coverage: Optional[Tensor] = None
 
-        for _ in range(max_len):
-            logit, hidden, _alpha, coverage = model.decoder.decode_step(
-                token, hidden, spatial_feats, q_hidden, coverage
-            )
-            # logit: (B, vocab_size)
-            preds = logit.argmax(dim=-1)  # (B,)
-
-            for i in range(B):
-                if not finished[i]:
-                    p = preds[i].item()
-                    if p == vocab_a.end_idx:
-                        finished[i] = True
-                    else:
-                        results[i].append(p)
-
-            if finished.all():
-                break
-
-            token = preds.unsqueeze(1)  # (B, 1)
+        if _is_transformer(model.decoder):
+            # ── Model H: Transformer KV-cache decode ──────────────────────────
+            kv_cache: Optional[Tensor] = None
+            for _ in range(max_len):
+                logit, kv_cache, _alpha, _ = model.decoder.decode_step(
+                    token, kv_cache, spatial_feats, q_hidden
+                )
+                preds = logit.argmax(dim=-1)
+                for i in range(B):
+                    if not finished[i]:
+                        p = preds[i].item()
+                        if p == vocab_a.end_idx:
+                            finished[i] = True
+                        else:
+                            results[i].append(p)
+                if finished.all():
+                    break
+                token = preds.unsqueeze(1)
+        else:
+            # ── LSTM decoders (C/D/E/F/G) ─────────────────────────────────────
+            hidden   = encoder_hidden
+            coverage: Optional[Tensor] = None
+            for _ in range(max_len):
+                logit, hidden, _alpha, coverage = model.decoder.decode_step(
+                    token, hidden, spatial_feats, q_hidden, coverage
+                )
+                preds = logit.argmax(dim=-1)
+                for i in range(B):
+                    if not finished[i]:
+                        p = preds[i].item()
+                        if p == vocab_a.end_idx:
+                            finished[i] = True
+                        else:
+                            results[i].append(p)
+                if finished.all():
+                    break
+                token = preds.unsqueeze(1)
 
         return [
             " ".join(vocab_a.idx2word.get(i, "<unk>") for i in seq)
@@ -600,15 +632,16 @@ def beam_search_decode_with_attention(
     device: Union[torch.device, str] = "cpu",
     no_repeat_ngram_size: int = 3,
 ) -> str:
-    """Single-sample beam search for spatial-attention models (C, D, E).
+    """Single-sample beam search for spatial-attention models (C–H).
 
-    Each beam carries its own coverage tensor so that spatial attention is
-    tracked independently across beams.
+    Automatically routes LSTM models (C/D/E/F/G) via ``(h, c)`` state and
+    Transformer (H) via KV-cache state.  Each beam carries its own state
+    independently.
 
     Args:
-        model: ``VQAModelC``, ``VQAModelD``, or ``VQAModelE``.
+        model: Any spatial-attention VQA model (C–H).
         img_tensor: ``FloatTensor (3, 224, 224)`` — single image.
-        q_tensor: ``LongTensor (Q,)`` — single tokenised question.
+        q_tensor: ``LongTensor (Q,)`` or ``LongTensor (77,)`` — tokenised question.
         vocab_a: Answer vocabulary.
         beam_width: Number of beams to maintain.
         max_len: Maximum tokens per beam.
@@ -623,49 +656,77 @@ def beam_search_decode_with_attention(
         encoder_hidden, spatial_feats, q_hidden = _encode_spatial(
             model, img_tensor.unsqueeze(0), q_tensor.unsqueeze(0), device
         )
-        h0, c0 = encoder_hidden
+        is_tx = _is_transformer(model.decoder)
 
-        # Each beam: (log_score, token_ids, h, c, coverage)
-        beams: List[Tuple[float, List[int], Tensor, Tensor, Optional[Tensor]]] = [
-            (0.0, [vocab_a.start_idx], h0, c0, None)
-        ]
-        completed: List[Tuple[float, List[int]]] = []
+        if is_tx:
+            # Each beam: (log_score, token_ids, kv_cache)
+            beams_tx: List[Tuple[float, List[int], Optional[Tensor]]] = [
+                (0.0, [vocab_a.start_idx], None)
+            ]
+            completed: List[Tuple[float, List[int]]] = []
 
-        for _ in range(max_len):
-            if not beams:
-                break
-            candidates: List[Tuple[float, List[int], Tensor, Tensor, Optional[Tensor]]] = []
+            for _ in range(max_len):
+                if not beams_tx:
+                    break
+                cands_tx: List[Tuple[float, List[int], Optional[Tensor]]] = []
 
-            for log_score, tokens, bh, bc, b_cov in beams:
-                if tokens[-1] == vocab_a.end_idx:
-                    completed.append((log_score, tokens))
-                    continue
+                for log_score, tokens, b_kv in beams_tx:
+                    if tokens[-1] == vocab_a.end_idx:
+                        completed.append((log_score, tokens))
+                        continue
+                    tok   = torch.tensor([[tokens[-1]]], dtype=torch.long, device=device)
+                    logit, new_kv, _alpha, _ = model.decoder.decode_step(
+                        tok, b_kv, spatial_feats, q_hidden
+                    )
+                    lp = F.log_softmax(logit[0], dim=-1)
+                    _block_repeated_ngrams(lp, tokens, no_repeat_ngram_size)
+                    topk_vals, topk_ids = lp.topk(beam_width)
+                    for v, idx in zip(topk_vals.tolist(), topk_ids.tolist()):
+                        cands_tx.append((log_score + v, tokens + [idx], new_kv))
 
-                tok   = torch.tensor([[tokens[-1]]], dtype=torch.long, device=device)
-                logit, (nh, nc), _alpha, new_cov = model.decoder.decode_step(
-                    tok, (bh, bc), spatial_feats, q_hidden, b_cov
-                )
-                # logit: (1, vocab_size)
-                lp    = F.log_softmax(logit[0], dim=-1)  # (vocab_size,)
-                _block_repeated_ngrams(lp, tokens, no_repeat_ngram_size)
+                cands_tx.sort(key=lambda x: x[0], reverse=True)
+                beams_tx = cands_tx[:beam_width]
 
-                topk_vals, topk_ids = lp.topk(beam_width)
-                for v, idx in zip(topk_vals.tolist(), topk_ids.tolist()):
-                    candidates.append((log_score + v, tokens + [idx], nh, nc, new_cov))
+            for log_score, tokens, _ in beams_tx:
+                completed.append((log_score, tokens))
+        else:
+            # ── LSTM beams: (log_score, token_ids, h, c, coverage) ───────────
+            h0, c0 = encoder_hidden
+            beams_lstm: List[Tuple[float, List[int], Tensor, Tensor, Optional[Tensor]]] = [
+                (0.0, [vocab_a.start_idx], h0, c0, None)
+            ]
+            completed = []
 
-            candidates.sort(key=lambda x: x[0], reverse=True)
-            beams = candidates[:beam_width]
+            for _ in range(max_len):
+                if not beams_lstm:
+                    break
+                cands_lstm: List[Tuple[float, List[int], Tensor, Tensor, Optional[Tensor]]] = []
 
-        for log_score, tokens, _, _, _ in beams:
-            completed.append((log_score, tokens))
+                for log_score, tokens, bh, bc, b_cov in beams_lstm:
+                    if tokens[-1] == vocab_a.end_idx:
+                        completed.append((log_score, tokens))
+                        continue
+                    tok   = torch.tensor([[tokens[-1]]], dtype=torch.long, device=device)
+                    logit, (nh, nc), _alpha, new_cov = model.decoder.decode_step(
+                        tok, (bh, bc), spatial_feats, q_hidden, b_cov
+                    )
+                    lp = F.log_softmax(logit[0], dim=-1)
+                    _block_repeated_ngrams(lp, tokens, no_repeat_ngram_size)
+                    topk_vals, topk_ids = lp.topk(beam_width)
+                    for v, idx in zip(topk_vals.tolist(), topk_ids.tolist()):
+                        cands_lstm.append((log_score + v, tokens + [idx], nh, nc, new_cov))
+
+                cands_lstm.sort(key=lambda x: x[0], reverse=True)
+                beams_lstm = cands_lstm[:beam_width]
+
+            for log_score, tokens, _, _, _ in beams_lstm:
+                completed.append((log_score, tokens))
 
         if not completed:
             return ""
 
-        completed.sort(
-            key=lambda x: x[0] / max(len(x[1]) - 1, 1), reverse=True
-        )
-        best  = completed[0][1][1:]  # strip <start>
+        completed.sort(key=lambda x: x[0] / max(len(x[1]) - 1, 1), reverse=True)
+        best  = completed[0][1][1:]   # strip <start>
         words = [vocab_a.idx2word.get(t, "<unk>") for t in best if t != vocab_a.end_idx]
         return " ".join(words)
 

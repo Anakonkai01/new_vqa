@@ -1,13 +1,16 @@
 """VQA model wrappers combining encoder, fusion, and decoder modules.
 
-Five model variants are defined, each combining a different image encoder
-with the shared question encoder and one of two decoder types:
+Eight model variants are defined, each combining a different image encoder
+with a question encoder and one of three decoder types:
 
-    Model A — SimpleCNN       + GatedFusion + LSTMDecoder
-    Model B — ResNetEncoder   + GatedFusion + LSTMDecoder
+    Model A — SimpleCNN        + GatedFusion + LSTMDecoder
+    Model B — ResNetEncoder    + GatedFusion + LSTMDecoder
     Model C — SimpleCNNSpatial + GatedFusion + LSTMDecoderWithAttention
-    Model D — ResNetSpatial   + GatedFusion + LSTMDecoderWithAttention
-    Model E — CLIPViTEncoder  + FiLMFusion  + LSTMDecoderWithAttention  ← flagship
+    Model D — ResNetSpatial    + GatedFusion + LSTMDecoderWithAttention
+    Model E — CLIPViTEncoder   + FiLMFusion  + LSTMDecoderWithAttention  ← flagship
+    Model F — CLIPViTEncoder   + FiLMFusion  + LSTMDecoderWithAttention  (CLIP text Q)
+    Model G — CLIPViTEncoder   + FiLMFusion  + LSTMDecoderWithMHA        (+MH cross-attn)
+    Model H — CLIPViTEncoder   + FiLMFusion  + TransformerDecoder        (full Transformer)
 
 Common Design Pattern (Models A–D)
 ------------------------------------
@@ -17,12 +20,13 @@ Common Design Pattern (Models A–D)
 4. ``h_0 = fusion.unsqueeze(0).repeat(num_layers, 1, 1)``
 5. ``logits = decoder(h_0, target_seq [, img_features, q_hidden_states])``
 
-Model E additionally uses FiLMFusion and non-linear state projections.
+Models E–H additionally use FiLMFusion and non-linear state projections.
+Models F–H replace the BiLSTM question encoder with the CLIP text transformer.
 
 Return types
 ------------
 - Models A and B: ``forward()`` returns ``logits`` only — ``FloatTensor (B, T, V)``
-- Models C, D, E: ``forward()`` returns ``(logits, coverage_loss)``
+- Models C–H:     ``forward()`` returns ``(logits, coverage_loss)``
 """
 
 from __future__ import annotations
@@ -42,8 +46,11 @@ from models.encoder_cnn import (
     SimpleCNNSpatial,
 )
 from models.encoder_question import QuestionEncoder
+from models.encoder_text_clip import CLIPTextEncoder
 from models.decoder_lstm import LSTMDecoder
 from models.decoder_attention import LSTMDecoderWithAttention
+from models.decoder_mha_attention import LSTMDecoderWithMHA
+from models.decoder_transformer import TransformerDecoder
 
 
 # ── Fusion modules ────────────────────────────────────────────────────────────
@@ -600,4 +607,297 @@ class VQAModelE(nn.Module):
             (h_0, c_0), modulated_img, q_hidden_states, target_seq
         )
         # logits: (B, T, answer_vocab_size)
+        return logits, coverage_loss
+
+
+# ── Model F ───────────────────────────────────────────────────────────────────
+
+class VQAModelF(nn.Module):
+    """VQA Model F — CLIP ViT-B/32 image + CLIP Text encoder + Bahdanau attention.
+
+    Identical to Model E except the BiLSTM question encoder is replaced by the
+    **CLIP Text Transformer** (``CLIPTextEncoder``).  The CLIP text encoder
+    produces features in the same pre-aligned embedding space as the CLIP image
+    encoder, giving the FiLM generator a richer, cross-modally aligned signal
+    from the first training step.
+
+    The question input is now ``LongTensor (B, 77)`` CLIP BPE token ids produced
+    by ``VQAEDatasetCLIP``, not ``vocab_q`` indices.
+
+    Args:
+        answer_vocab_size: Size of the answer vocabulary.
+        embed_size: Answer token embedding dimension.
+        hidden_size: Feature dimension throughout the pipeline (default 1024).
+        num_layers: Number of LSTM decoder layers.
+        attn_dim: Internal Bahdanau attention projection dimension.
+        freeze_image_enc: Freeze the CLIP ViT image backbone.
+        freeze_text_enc: Freeze the CLIP text backbone.
+        dropout: Dropout probability.
+        pretrained_a_emb: Optional GloVe matrix for answer embeddings.
+        use_coverage: Enable coverage penalty on image attention.
+    """
+
+    def __init__(
+        self,
+        answer_vocab_size: int,
+        embed_size: int = 512,
+        hidden_size: int = 1024,
+        num_layers: int = 2,
+        attn_dim: int = 512,
+        freeze_image_enc: bool = True,
+        freeze_text_enc: bool = True,
+        dropout: float = 0.5,
+        pretrained_a_emb: Optional[Tensor] = None,
+        use_coverage: bool = False,
+    ) -> None:
+        super().__init__()
+        self.num_layers  = num_layers
+        self.hidden_size = hidden_size
+
+        self.i_encoder = CLIPViTEncoder(output_size=hidden_size, freeze=freeze_image_enc)
+        self.q_encoder = CLIPTextEncoder(hidden_size=hidden_size, freeze=freeze_text_enc)
+        self.q_norm    = nn.LayerNorm(hidden_size)
+
+        self.fusion = FiLMFusion(hidden_size)
+
+        self.init_h_proj = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.Tanh())
+        self.init_c_proj = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.Tanh())
+
+        self.decoder = LSTMDecoderWithAttention(
+            vocab_size=answer_vocab_size, embed_size=embed_size,
+            hidden_size=hidden_size, num_layers=num_layers,
+            attn_dim=attn_dim, dropout=dropout,
+            pretrained_embeddings=pretrained_a_emb,
+            use_coverage=use_coverage,
+        )
+
+    def forward(
+        self,
+        images: Tensor,
+        clip_input_ids: Tensor,
+        target_seq: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        """Teacher-forcing forward pass.
+
+        Args:
+            images:         ``FloatTensor (B, 3, 224, 224)``
+            clip_input_ids: ``LongTensor  (B, 77)`` — CLIP BPE token ids.
+            target_seq:     ``LongTensor  (B, T)``
+
+        Returns:
+            Tuple of:
+                logits        – ``FloatTensor (B, T, answer_vocab_size)``
+                coverage_loss – scalar tensor
+        """
+        img_features = F.normalize(self.i_encoder(images), p=2, dim=-1)
+        # img_features: (B, 49, hidden_size)
+
+        q_feat, q_hidden_states = self.q_encoder(clip_input_ids)
+        q_feat = self.q_norm(q_feat)
+        # q_feat:          (B, hidden_size)
+        # q_hidden_states: (B, 77, hidden_size)
+
+        img_mean      = img_features.mean(dim=1)         # (B, hidden_size)
+        fusion_global = self.fusion(img_mean, q_feat)    # (B, hidden_size)
+
+        h_0 = self.init_h_proj(fusion_global).unsqueeze(0).repeat(self.num_layers, 1, 1)
+        c_0 = self.init_c_proj(fusion_global).unsqueeze(0).repeat(self.num_layers, 1, 1)
+
+        modulated_img = self.fusion(img_features, q_feat)   # (B, 49, hidden_size)
+
+        logits, coverage_loss = self.decoder(
+            (h_0, c_0), modulated_img, q_hidden_states, target_seq
+        )
+        return logits, coverage_loss
+
+
+# ── Model G ───────────────────────────────────────────────────────────────────
+
+class VQAModelG(nn.Module):
+    """VQA Model G — Model F + Multi-Head Cross-Attention decoder.
+
+    Identical to Model F except ``LSTMDecoderWithAttention`` (single-head
+    Bahdanau) is replaced by ``LSTMDecoderWithMHA`` (8-head scaled dot-product
+    attention).  Eight parallel attention heads can simultaneously specialise
+    in different query intents (location, colour, task type, …).
+
+    Args:
+        answer_vocab_size: Size of the answer vocabulary.
+        embed_size: Answer token embedding dimension.
+        hidden_size: Feature dimension throughout the pipeline.
+        num_layers: Number of LSTM decoder layers.
+        num_heads: Number of MHA heads (default 8; must divide ``hidden_size``).
+        freeze_image_enc: Freeze the CLIP ViT backbone.
+        freeze_text_enc: Freeze the CLIP text backbone.
+        dropout: Dropout probability.
+        pretrained_a_emb: Optional GloVe matrix for answer embeddings.
+    """
+
+    def __init__(
+        self,
+        answer_vocab_size: int,
+        embed_size: int = 512,
+        hidden_size: int = 1024,
+        num_layers: int = 2,
+        num_heads: int = 8,
+        freeze_image_enc: bool = True,
+        freeze_text_enc: bool = True,
+        dropout: float = 0.5,
+        pretrained_a_emb: Optional[Tensor] = None,
+    ) -> None:
+        super().__init__()
+        self.num_layers  = num_layers
+        self.hidden_size = hidden_size
+
+        self.i_encoder = CLIPViTEncoder(output_size=hidden_size, freeze=freeze_image_enc)
+        self.q_encoder = CLIPTextEncoder(hidden_size=hidden_size, freeze=freeze_text_enc)
+        self.q_norm    = nn.LayerNorm(hidden_size)
+
+        self.fusion = FiLMFusion(hidden_size)
+
+        self.init_h_proj = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.Tanh())
+        self.init_c_proj = nn.Sequential(nn.Linear(hidden_size, hidden_size), nn.Tanh())
+
+        self.decoder = LSTMDecoderWithMHA(
+            vocab_size=answer_vocab_size, embed_size=embed_size,
+            hidden_size=hidden_size, num_layers=num_layers,
+            num_heads=num_heads, dropout=dropout,
+            pretrained_embeddings=pretrained_a_emb,
+        )
+
+    def forward(
+        self,
+        images: Tensor,
+        clip_input_ids: Tensor,
+        target_seq: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        """Teacher-forcing forward pass.
+
+        Args:
+            images:         ``FloatTensor (B, 3, 224, 224)``
+            clip_input_ids: ``LongTensor  (B, 77)``
+            target_seq:     ``LongTensor  (B, T)``
+
+        Returns:
+            Tuple of:
+                logits        – ``FloatTensor (B, T, answer_vocab_size)``
+                coverage_loss – scalar 0.0 (MHA has no coverage mechanism)
+        """
+        img_features = F.normalize(self.i_encoder(images), p=2, dim=-1)
+        # img_features: (B, 49, hidden_size)
+
+        q_feat, q_hidden_states = self.q_encoder(clip_input_ids)
+        q_feat = self.q_norm(q_feat)
+
+        img_mean      = img_features.mean(dim=1)
+        fusion_global = self.fusion(img_mean, q_feat)
+
+        h_0 = self.init_h_proj(fusion_global).unsqueeze(0).repeat(self.num_layers, 1, 1)
+        c_0 = self.init_c_proj(fusion_global).unsqueeze(0).repeat(self.num_layers, 1, 1)
+
+        modulated_img = self.fusion(img_features, q_feat)
+
+        logits, coverage_loss = self.decoder(
+            (h_0, c_0), modulated_img, q_hidden_states, target_seq
+        )
+        return logits, coverage_loss
+
+
+# ── Model H ───────────────────────────────────────────────────────────────────
+
+class VQAModelH(nn.Module):
+    """VQA Model H — CLIP encoders + Pre-norm Transformer decoder.
+
+    Replaces the LSTM decoder of Model G with a full **pre-norm Transformer
+    decoder** (``TransformerDecoder``, 4 layers × 8 heads).  The Transformer
+    eliminates the sequential hidden-state bottleneck: all T token positions
+    are processed in parallel during training via a causal mask, and inference
+    uses a KV-cache (accumulated embedding buffer).
+
+    The ``encoder_hidden`` tuple passed to ``decoder.forward()`` and
+    ``decoder.sample()`` is ignored by ``TransformerDecoder`` (no LSTM state).
+
+    Args:
+        answer_vocab_size: Size of the answer vocabulary.
+        hidden_size: Model dimension ``d_model`` (default 1024).
+        num_dec_layers: Number of Transformer decoder layers (default 4).
+        num_heads: Number of attention heads (default 8).
+        d_ff: FFN hidden size (default ``4 × hidden_size``).
+        freeze_image_enc: Freeze the CLIP ViT backbone.
+        freeze_text_enc: Freeze the CLIP text backbone.
+        dropout: Dropout probability.
+        pretrained_a_emb: Optional GloVe matrix for answer token embeddings.
+    """
+
+    def __init__(
+        self,
+        answer_vocab_size: int,
+        hidden_size: int = 1024,
+        num_dec_layers: int = 4,
+        num_heads: int = 8,
+        d_ff: Optional[int] = None,
+        freeze_image_enc: bool = True,
+        freeze_text_enc: bool = True,
+        dropout: float = 0.1,
+        pretrained_a_emb: Optional[Tensor] = None,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+
+        self.num_layers = 1  # placeholder; TransformerDecoder ignores encoder_hidden
+
+        self.i_encoder = CLIPViTEncoder(output_size=hidden_size, freeze=freeze_image_enc)
+        self.q_encoder = CLIPTextEncoder(hidden_size=hidden_size, freeze=freeze_text_enc)
+        self.q_norm    = nn.LayerNorm(hidden_size)
+
+        self.fusion = FiLMFusion(hidden_size)
+
+        # TransformerDecoder does not use encoder_hidden, but we still compute
+        # FiLM-modulated spatial features as key/value for the cross-attention layers.
+
+        self.decoder = TransformerDecoder(
+            vocab_size=answer_vocab_size,
+            embed_size=hidden_size,
+            hidden_size=hidden_size,
+            num_layers=num_dec_layers,
+            num_heads=num_heads,
+            d_ff=d_ff,
+            dropout=dropout,
+            pretrained_embeddings=pretrained_a_emb,
+        )
+
+    def forward(
+        self,
+        images: Tensor,
+        clip_input_ids: Tensor,
+        target_seq: Tensor,
+    ) -> Tuple[Tensor, Tensor]:
+        """Teacher-forcing forward pass (all positions in parallel).
+
+        Args:
+            images:         ``FloatTensor (B, 3, 224, 224)``
+            clip_input_ids: ``LongTensor  (B, 77)``
+            target_seq:     ``LongTensor  (B, T)``
+
+        Returns:
+            Tuple of:
+                logits        – ``FloatTensor (B, T, answer_vocab_size)``
+                coverage_loss – scalar 0.0
+        """
+        img_features = F.normalize(self.i_encoder(images), p=2, dim=-1)
+        # img_features: (B, 49, hidden_size)
+
+        q_feat, q_hidden_states = self.q_encoder(clip_input_ids)
+        q_feat = self.q_norm(q_feat)
+
+        # FiLM-modulate spatial features so cross-attention attends to
+        # question-conditioned image regions.
+        modulated_img = self.fusion(img_features, q_feat)   # (B, 49, hidden_size)
+
+        # encoder_hidden is ignored by TransformerDecoder.
+        dummy_hidden = (img_features.new_zeros(1), img_features.new_zeros(1))
+
+        logits, coverage_loss = self.decoder(
+            dummy_hidden, modulated_img, q_hidden_states, target_seq
+        )
         return logits, coverage_loss

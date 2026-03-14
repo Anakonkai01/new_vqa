@@ -46,8 +46,12 @@ from torch.utils.data import DataLoader
 sys.path.append(os.path.dirname(__file__))
 
 from dataset import VQAEDataset, vqa_collate_fn
+from dataset_clip import VQAEDatasetCLIP, clip_collate_fn
 from glove_utils import build_glove_matrix
-from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, VQAModelE
+from models.vqa_models import (
+    VQAModelA, VQAModelB, VQAModelC, VQAModelD, VQAModelE,
+    VQAModelF, VQAModelG, VQAModelH,
+)
 from vocab import Vocabulary
 
 
@@ -101,13 +105,15 @@ def get_model(
     """Instantiate and return the model corresponding to *model_type*.
 
     Args:
-        model_type: One of ``'A'``, ``'B'``, ``'C'``, ``'D'``, ``'E'``.
-        vocab_q_size: Size of the question vocabulary.
+        model_type: One of ``'A'``–``'H'``.
+        vocab_q_size: Size of the question vocabulary (used for A–E only;
+            F/G/H use the CLIP BPE vocabulary internally).
         vocab_a_size: Size of the answer vocabulary.
-        pretrained_q_emb: Optional GloVe weight matrix for the question encoder.
+        pretrained_q_emb: Optional GloVe weight matrix for the question encoder
+            (A–E only).
         pretrained_a_emb: Optional GloVe weight matrix for the answer decoder.
-        use_coverage: Enable the coverage mechanism in attention decoders (C/D/E).
-        dropout: Dropout probability for embeddings and LSTM inter-layer dropout.
+        use_coverage: Enable the coverage mechanism (C/D/E/F only).
+        dropout: Dropout probability.
 
     Returns:
         Initialised ``nn.Module``.
@@ -133,7 +139,29 @@ def get_model(
     if model_type == "E":
         return VQAModelE(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
                          use_coverage=use_coverage, **kw)
-    raise ValueError(f"Unknown model type: '{model_type}'. Choose from A, B, C, D, E.")
+    # ── CLIP-based models (F/G/H) — no vocab_q_size, no pretrained_q_emb ──────
+    if model_type == "F":
+        return VQAModelF(
+            answer_vocab_size=vocab_a_size,
+            pretrained_a_emb=pretrained_a_emb,
+            use_coverage=use_coverage,
+            dropout=dropout,
+        )
+    if model_type == "G":
+        return VQAModelG(
+            answer_vocab_size=vocab_a_size,
+            pretrained_a_emb=pretrained_a_emb,
+            dropout=dropout,
+        )
+    if model_type == "H":
+        return VQAModelH(
+            answer_vocab_size=vocab_a_size,
+            pretrained_a_emb=pretrained_a_emb,
+            dropout=0.1,   # Transformer uses lower dropout than LSTM models
+        )
+    raise ValueError(
+        f"Unknown model type: '{model_type}'. Choose from A, B, C, D, E, F, G, H."
+    )
 
 
 # ── Scheduled Sampling forward pass ──────────────────────────────────────────
@@ -142,7 +170,7 @@ def ss_forward(
     model: nn.Module,
     model_type: str,
     imgs: Tensor,
-    questions: Tensor,
+    questions_or_clip_ids: Tensor,
     decoder_input: Tensor,
     epsilon: float,
 ) -> Tensor:
@@ -162,13 +190,17 @@ def ss_forward(
     which starts near 1.0 and decays smoothly, forcing the model to
     learn to recover from its own prediction errors.
 
+    **Model H note**: The Transformer decoder processes all positions in
+    parallel during training (causal mask).  True token-by-token scheduled
+    sampling is not applicable; this function falls back to a plain teacher-
+    forcing forward pass for Model H.
+
     Args:
-        model: VQA model (must expose ``i_encoder``, ``q_encoder``,
-            ``decoder``, ``fusion``, and ``num_layers``).
-        model_type: ``'A'``/``'B'`` (no attention) or ``'C'``/``'D'``/``'E'``
-            (spatial attention).
+        model: VQA model.
+        model_type: Architecture selector (``'A'``–``'H'``).
         imgs: ``FloatTensor (B, 3, 224, 224)``.
-        questions: ``LongTensor (B, Q)``.
+        questions_or_clip_ids: ``LongTensor (B, Q)`` for A–E (vocab_q token ids)
+            or ``LongTensor (B, 77)`` for F–H (CLIP BPE token ids).
         decoder_input: ``LongTensor (B, T)`` — GT tokens ``[<start>, w_1, ...]``.
         epsilon: Mixing probability for GT tokens ∈ ``[0, 1]``.
 
@@ -178,43 +210,52 @@ def ss_forward(
     B       = imgs.size(0)
     max_len = decoder_input.size(1)
 
-    # ── Encode image + question ───────────────────────────────────────────────
-    if model_type in ("C", "D", "E"):
+    # ── Model H: Transformer — teacher forcing only ───────────────────────────
+    if model_type == "H":
+        logits, _ = model(imgs, questions_or_clip_ids, decoder_input)
+        return logits
+
+    # ── Encode image ──────────────────────────────────────────────────────────
+    if model_type in ("C", "D", "E", "F", "G"):
         img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)
         # img_features: (B, 49, H)
 
-        q_feat, q_hidden = model.q_encoder(questions)
+        q_feat, q_hidden = model.q_encoder(questions_or_clip_ids)
         # q_feat: (B, H) | q_hidden: (B, Q, H)
 
         if hasattr(model, "q_norm"):
-            q_feat = model.q_norm(q_feat)       # Model E: stabilise FiLM generation
+            q_feat = model.q_norm(q_feat)       # stabilise FiLM generation
 
-        if model_type == "E":
+        if model_type in ("E", "F", "G"):
             img_mean      = img_features.mean(dim=1)             # (B, H)
             fusion_global = model.fusion(img_mean, q_feat)       # (B, H)
             h_0_base      = model.init_h_proj(fusion_global)     # (B, H)
             c_0_base      = model.init_c_proj(fusion_global)     # (B, H)
             h = h_0_base.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (L, B, H)
             c = c_0_base.unsqueeze(0).repeat(model.num_layers, 1, 1)  # (L, B, H)
-            # FiLM-modulate the 49 spatial features (same as VQAModelE.forward)
+            # FiLM-modulate the 49 spatial features
             img_features = model.fusion(img_features, q_feat)    # (B, 49, H)
         else:
             fusion = model.fusion(img_features.mean(dim=1), q_feat)   # (B, H)
             h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)    # (L, B, H)
             c = torch.zeros_like(h)
     else:
-        img_feat  = F.normalize(model.i_encoder(imgs), p=2, dim=1)    # (B, H)
-        q_feat, _ = model.q_encoder(questions)                         # (B, H)
-        fusion    = model.fusion(img_feat, q_feat)                     # (B, H)
-        h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)         # (L, B, H)
+        img_feat  = F.normalize(model.i_encoder(imgs), p=2, dim=1)         # (B, H)
+        q_feat, _ = model.q_encoder(questions_or_clip_ids)                  # (B, H)
+        fusion    = model.fusion(img_feat, q_feat)                          # (B, H)
+        h = fusion.unsqueeze(0).repeat(model.num_layers, 1, 1)             # (L, B, H)
         c = torch.zeros_like(h)
 
     hidden: Tuple[Tensor, Tensor] = (h, c)
 
-    # Coverage accumulator for attention models (C/D/E with use_coverage=True).
-    # BUG FIX: original code excluded Model E from coverage init.
+    # Coverage accumulator for attention models with use_coverage enabled.
     coverage: Optional[Tensor] = None
-    if model_type in ("C", "D", "E") and model.decoder.use_coverage:
+    has_coverage = (
+        model_type in ("C", "D", "E", "F")
+        and hasattr(model.decoder, "use_coverage")
+        and model.decoder.use_coverage
+    )
+    if has_coverage:
         coverage = imgs.new_zeros(B, img_features.size(1))  # (B, 49)
 
     # ── Step-by-step decode ───────────────────────────────────────────────────
@@ -224,7 +265,7 @@ def ss_forward(
     for t in range(max_len):
         tok = current_token.unsqueeze(1)  # (B, 1)
 
-        if model_type in ("C", "D", "E"):
+        if model_type in ("C", "D", "E", "F", "G"):
             logit, hidden, _, coverage = model.decoder.decode_step(
                 tok, hidden, img_features, q_hidden, coverage
             )
@@ -321,28 +362,52 @@ def train(
     vocab_a.load(VOCAB_A_PATH)
 
     # ── Datasets & DataLoaders ────────────────────────────────────────────────
-    train_dataset = VQAEDataset(
-        image_dir=TRAIN_IMAGE_DIR,
-        vqa_e_json_path=TRAIN_VQA_E_JSON,
-        vocab_q=vocab_q,
-        vocab_a=vocab_a,
-        split="train2014",
-        max_samples=max_train_samples,
-        augment=augment,
-    )
-    val_dataset = VQAEDataset(
-        image_dir=VAL_IMAGE_DIR,
-        vqa_e_json_path=VAL_VQA_E_JSON,
-        vocab_q=vocab_q,
-        vocab_a=vocab_a,
-        split="val2014",
-        max_samples=max_val_samples,
-    )
+    # F/G/H use the CLIP BPE tokeniser for questions (VQAEDatasetCLIP +
+    # clip_collate_fn).  A–E use the custom vocab_q tokeniser.
+    is_clip_model = model_type in ("F", "G", "H")
+
+    if is_clip_model:
+        train_dataset: Dataset = VQAEDatasetCLIP(
+            image_dir=TRAIN_IMAGE_DIR,
+            vqa_e_json_path=TRAIN_VQA_E_JSON,
+            vocab_a=vocab_a,
+            split="train2014",
+            max_samples=max_train_samples,
+            augment=augment,
+        )
+        val_dataset: Dataset = VQAEDatasetCLIP(
+            image_dir=VAL_IMAGE_DIR,
+            vqa_e_json_path=VAL_VQA_E_JSON,
+            vocab_a=vocab_a,
+            split="val2014",
+            max_samples=max_val_samples,
+        )
+        collate = clip_collate_fn
+    else:
+        train_dataset = VQAEDataset(
+            image_dir=TRAIN_IMAGE_DIR,
+            vqa_e_json_path=TRAIN_VQA_E_JSON,
+            vocab_q=vocab_q,
+            vocab_a=vocab_a,
+            split="train2014",
+            max_samples=max_train_samples,
+            augment=augment,
+        )
+        val_dataset = VQAEDataset(
+            image_dir=VAL_IMAGE_DIR,
+            vqa_e_json_path=VAL_VQA_E_JSON,
+            vocab_q=vocab_q,
+            vocab_a=vocab_a,
+            split="val2014",
+            max_samples=max_val_samples,
+        )
+        collate = vqa_collate_fn
+
     print(f"Train: {len(train_dataset):,} | Val: {len(val_dataset):,}")
 
     pin_memory = torch.cuda.is_available()
     loader_kwargs = dict(
-        collate_fn=vqa_collate_fn,
+        collate_fn=collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=(num_workers > 0),
@@ -375,7 +440,7 @@ def train(
     criterion = nn.CrossEntropyLoss(ignore_index=0, label_smoothing=label_smoothing)
 
     # ── Optimizer — differential LR when fine-tuning CNN backbone ────────────
-    if finetune_cnn and model_type in ("B", "D", "E"):
+    if finetune_cnn and model_type in ("B", "D", "E", "F", "G", "H"):
         model.i_encoder.unfreeze_top_layers()
         backbone_ids  = {id(p) for p in model.i_encoder.backbone_params()}
         backbone_params = [p for p in model.parameters()
@@ -484,7 +549,7 @@ def train(
         print("AMP: BFloat16 (Ampere+ detected)")
     elif use_amp:
         print("AMP: Float16 + GradScaler")
-    if use_coverage and model_type in ("C", "D", "E"):
+    if use_coverage and model_type in ("C", "D", "E", "F"):
         print(f"Coverage         : ON | λ = {coverage_lambda}")
     if accum_steps > 1:
         print(f"Grad accumulation: {accum_steps} steps "
@@ -518,10 +583,11 @@ def train(
         total_loss = 0.0
         optimizer.zero_grad()
 
-        for step_idx, (imgs, questions, answer) in enumerate(train_loader):
-            imgs      = imgs.to(DEVICE)
-            questions = questions.to(DEVICE)
-            answer    = answer.to(DEVICE)
+        for step_idx, batch in enumerate(train_loader):
+            imgs, q_input, answer = batch
+            imgs    = imgs.to(DEVICE)
+            q_input = q_input.to(DEVICE)   # vocab_q ids (A–E) or CLIP ids (F–H)
+            answer  = answer.to(DEVICE)
 
             # Teacher forcing layout:
             #   decoder_input  = answer[:, :-1]  →  [<start>, w_1, ..., w_{T-1}]
@@ -532,11 +598,11 @@ def train(
             with autocast("cuda", enabled=use_amp, dtype=amp_dtype):
                 if scheduled_sampling:
                     epsilon = ss_k / (ss_k + math.exp(epoch / ss_k))
-                    logits  = ss_forward(model, model_type, imgs, questions,
+                    logits  = ss_forward(model, model_type, imgs, q_input,
                                          decoder_input, epsilon)
                     coverage_loss = torch.tensor(0.0, device=DEVICE)
                 else:
-                    result = model(imgs, questions, decoder_input)
+                    result = model(imgs, q_input, decoder_input)
                     if isinstance(result, tuple):
                         logits, coverage_loss = result
                     else:
@@ -568,16 +634,17 @@ def train(
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
-            for imgs, questions, answer in val_loader:
-                imgs      = imgs.to(DEVICE)
-                questions = questions.to(DEVICE)
-                answer    = answer.to(DEVICE)
+            for batch in val_loader:
+                imgs, q_input, answer = batch
+                imgs    = imgs.to(DEVICE)
+                q_input = q_input.to(DEVICE)
+                answer  = answer.to(DEVICE)
 
                 decoder_input  = answer[:, :-1]
                 decoder_target = answer[:, 1:]
 
                 with autocast("cuda", enabled=use_amp, dtype=amp_dtype):
-                    result = model(imgs, questions, decoder_input)
+                    result = model(imgs, q_input, decoder_input)
                     logits = result[0] if isinstance(result, tuple) else result
                     vocab_size = logits.size(-1)
                     loss = criterion(
@@ -665,7 +732,7 @@ def train(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a VQA model (Phases 1–3).")
     parser.add_argument("--model",           type=str,   default="A",
-                        choices=["A", "B", "C", "D", "E"])
+                        choices=["A", "B", "C", "D", "E", "F", "G", "H"])
     parser.add_argument("--epochs",          type=int,   default=10)
     parser.add_argument("--lr",              type=float, default=1e-3)
     parser.add_argument("--batch_size",      type=int,   default=128)

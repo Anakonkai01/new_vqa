@@ -42,6 +42,7 @@ except ImportError:
     _HAS_BERTSCORE = False
 
 from dataset import VQAEDataset, vqa_collate_fn
+from dataset_clip import VQAEDatasetCLIP, clip_collate_fn
 from inference import (
     batch_beam_search_decode,
     batch_beam_search_decode_with_attention,
@@ -121,7 +122,9 @@ def evaluate_one_model(
         model_type, checkpoint, len(vocab_q), len(vocab_a), device=DEVICE
     )
 
-    use_attention = model_type in ("C", "D", "E")
+    use_attention = model_type in ("C", "D", "E", "F", "G", "H")
+    collate = clip_collate_fn if model_type in ("F", "G", "H") else vqa_collate_fn
+
     if beam_width > 1:
         decode_fn = (
             batch_beam_search_decode_with_attention if use_attention
@@ -140,7 +143,7 @@ def evaluate_one_model(
 
     val_loader = DataLoader(
         val_dataset, batch_size=64, shuffle=False,
-        collate_fn=vqa_collate_fn, num_workers=2,
+        collate_fn=collate, num_workers=2,
     )
 
     smoothie        = SmoothingFunction().method1
@@ -148,8 +151,8 @@ def evaluate_one_model(
     all_gt_strings:  List[str] = []
 
     with torch.no_grad():
-        for imgs, questions, answers in tqdm.tqdm(val_loader, desc=f"Model {model_type}", leave=False):
-            preds = decode_fn(model, imgs, questions, vocab_a, device=DEVICE, **decode_kwargs)
+        for imgs, q_input, answers in tqdm.tqdm(val_loader, desc=f"Model {model_type}", leave=False):
+            preds = decode_fn(model, imgs, q_input, vocab_a, device=DEVICE, **decode_kwargs)
             all_predictions.extend(preds)
             for a_tensor in answers:
                 all_gt_strings.append(_decode_answer_tensor(a_tensor, vocab_a))
@@ -249,7 +252,7 @@ def main() -> None:
                         help="Epoch checkpoint to load (default: 10).")
     parser.add_argument("--num_samples", type=int, default=None,
                         help="Limit evaluation to N samples for speed.")
-    parser.add_argument("--models",      type=str, default="A,B,C,D,E",
+    parser.add_argument("--models",      type=str, default="A,B,C,D,E,F,G,H",
                         help="Comma-separated models to compare (default: A,B,C,D,E). "
                              "Missing checkpoints are skipped automatically.")
     parser.add_argument("--beam_width",  type=int, default=1,
@@ -265,7 +268,7 @@ def main() -> None:
     vocab_a = Vocabulary()
     vocab_a.load(VOCAB_A_PATH)
 
-    val_dataset = VQAEDataset(
+    val_dataset_std = VQAEDataset(
         image_dir=VAL_IMAGE_DIR,
         vqa_e_json_path=VAL_VQA_E_JSON,
         vocab_q=vocab_q,
@@ -274,16 +277,29 @@ def main() -> None:
         max_samples=args.num_samples,
     )
 
+    # Lazily create the CLIP dataset only if F/G/H are being compared.
+    clip_models = [m for m in model_types if m in ("F", "G", "H")]
+    val_dataset_clip: Optional[VQAEDatasetCLIP] = None
+    if clip_models:
+        val_dataset_clip = VQAEDatasetCLIP(
+            image_dir=VAL_IMAGE_DIR,
+            vqa_e_json_path=VAL_VQA_E_JSON,
+            vocab_a=vocab_a,
+            split="val2014",
+            max_samples=args.num_samples,
+        )
+
     decode_mode = f"beam (w={args.beam_width})" if args.beam_width > 1 else "greedy"
     print(
         f"Comparing: {model_types} | epoch={args.epoch} | "
-        f"samples={len(val_dataset)} | decode={decode_mode}"
+        f"samples={len(val_dataset_std)} | decode={decode_mode}"
     )
 
     results: Dict[str, Optional[Dict]] = {}
     for model_type in model_types:
+        ds = val_dataset_clip if model_type in ("F", "G", "H") else val_dataset_std
         results[model_type] = evaluate_one_model(
-            model_type, args.epoch, vocab_q, vocab_a, val_dataset,
+            model_type, args.epoch, vocab_q, vocab_a, ds,
             beam_width=args.beam_width,
             no_repeat_ngram_size=args.no_repeat_ngram,
         )
