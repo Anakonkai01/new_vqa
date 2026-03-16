@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>VQA Demo — Explanatory Visual Question Answering</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css"/>
+<style>
+  :root {
+    --a: #ef4444; --b: #f97316; --c: #3b82f6; --d: #8b5cf6;
+    --bg: #0f172a; --card: #1e293b; --border: #334155; --muted: #64748b;
+    --text: #e2e8f0; --accent: #6366f1;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--text); font-family: 'Segoe UI', system-ui, sans-serif; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  /* Drop Zone */
+  #dropzone {
+    border: 2px dashed var(--border); border-radius: 12px;
+    transition: all .2s; cursor: pointer;
+  }
+  #dropzone:hover, #dropzone.drag-over {
+    border-color: var(--accent); background: rgba(99,102,241,.08);
+  }
+
+  /* Model badge colors */
+  .badge-a { background: rgba(239,68,68,.15); color: var(--a); border: 1px solid rgba(239,68,68,.3); }
+  .badge-b { background: rgba(249,115,22,.15); color: var(--b); border: 1px solid rgba(249,115,22,.3); }
+  .badge-c { background: rgba(59,130,246,.15); color: var(--c); border: 1px solid rgba(59,130,246,.3); }
+  .badge-d { background: rgba(139,92,246,.15); color: var(--d); border: 1px solid rgba(139,92,246,.3); }
+
+  /* Prob bar colors */
+  .prob-bar { height: 6px; border-radius: 3px; transition: width .4s ease; }
+  .prob-high   { background: linear-gradient(90deg, #10b981, #34d399); }
+  .prob-medium { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+  .prob-low    { background: linear-gradient(90deg, #ef4444, #f87171); }
+
+  /* Token chip */
+  .token-chip {
+    display: inline-block; padding: 3px 8px; margin: 2px;
+    border-radius: 6px; font-size: 13px; cursor: pointer;
+    border: 1px solid transparent; transition: all .15s;
+    background: rgba(255,255,255,.06);
+  }
+  .token-chip:hover { border-color: var(--accent); }
+  .token-chip.active { border-color: white; background: rgba(255,255,255,.15); }
+
+  /* Attention heatmap container */
+  .attn-img { border-radius: 8px; width: 224px; height: 224px; object-fit: contain; }
+
+  /* Slider */
+  input[type=range] {
+    -webkit-appearance: none; width: 100%; height: 4px;
+    background: var(--border); border-radius: 2px; outline: none;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; width: 16px; height: 16px;
+    background: var(--accent); border-radius: 50%; cursor: pointer;
+  }
+
+  /* Model checkbox */
+  .model-cb input[type=checkbox] { display: none; }
+  .model-cb label {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 14px; border-radius: 8px; cursor: pointer;
+    border: 2px solid var(--border); font-weight: 600; font-size: 14px;
+    transition: all .15s; user-select: none;
+  }
+  .model-cb input:checked + label { border-color: currentColor; background: rgba(255,255,255,.07); }
+
+  /* Decode toggle */
+  .decode-btn {
+    padding: 7px 18px; border-radius: 8px; font-size: 13px; font-weight: 600;
+    border: 2px solid var(--border); cursor: pointer; transition: all .15s;
+    background: transparent; color: var(--muted);
+  }
+  .decode-btn.active { border-color: var(--accent); color: var(--text); background: rgba(99,102,241,.15); }
+
+  /* Run button */
+  #run-btn {
+    background: linear-gradient(135deg, #6366f1, #8b5cf6);
+    padding: 12px 28px; border-radius: 10px; font-size: 15px; font-weight: 700;
+    border: none; cursor: pointer; color: white; width: 100%;
+    transition: opacity .2s, transform .1s; letter-spacing: .02em;
+  }
+  #run-btn:hover { opacity: .9; }
+  #run-btn:active { transform: scale(.98); }
+  #run-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* Result card */
+  .result-card {
+    background: var(--card); border-radius: 14px; padding: 20px;
+    border: 1px solid var(--border); display: flex; flex-direction: column; gap: 14px;
+  }
+
+  /* Tab */
+  .tab-btn {
+    padding: 6px 14px; border-radius: 6px; font-size: 13px; font-weight: 600;
+    cursor: pointer; border: none; background: transparent;
+    color: var(--muted); transition: all .15s;
+  }
+  .tab-btn.active { background: rgba(255,255,255,.1); color: var(--text); }
+
+  /* Spinner */
+  .spinner {
+    width: 20px; height: 20px; border: 2px solid rgba(255,255,255,.2);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin .7s linear infinite; display: inline-block;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Toast */
+  #toast {
+    position: fixed; bottom: 24px; right: 24px; padding: 12px 20px;
+    background: #1e293b; border: 1px solid var(--border); border-radius: 10px;
+    color: var(--text); font-size: 14px; z-index: 9999;
+    transform: translateY(80px); opacity: 0; transition: all .3s;
+    pointer-events: none;
+  }
+  #toast.show { transform: translateY(0); opacity: 1; }
+
+  /* Comparison table */
+  .cmp-table th { background: rgba(255,255,255,.04); font-weight: 700; }
+  .cmp-table td, .cmp-table th { padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+  .cmp-best { font-weight: 700; }
+
+  .fade-in { animation: fadeIn .4s ease; }
+  @keyframes fadeIn { from { opacity:0; transform:translateY(10px); } to { opacity:1; transform:translateY(0); } }
+
+  /* Scrollable sample bar */
+  #sample-bar { display: flex; gap: 8px; overflow-x: auto; padding: 6px 0; }
+  .sample-thumb {
+    flex-shrink: 0; width: 80px; height: 60px; object-fit: cover;
+    border-radius: 6px; cursor: pointer; border: 2px solid transparent;
+    transition: border-color .15s;
+  }
+  .sample-thumb:hover, .sample-thumb.selected { border-color: var(--accent); }
+</style>
+</head>
+<body class="min-h-screen">
+
+<!-- ── Header ────────────────────────────────────────────────────────────── -->
+<header class="border-b border-slate-800 px-6 py-4 flex items-center justify-between sticky top-0 z-50"
+        style="background:rgba(15,23,42,.95);backdrop-filter:blur(8px);">
+  <div class="flex items-center gap-3">
+    <div class="w-8 h-8 rounded-lg flex items-center justify-center text-white font-black text-sm"
+         style="background:linear-gradient(135deg,#6366f1,#8b5cf6)">VQ</div>
+    <div>
+      <h1 class="font-bold text-base leading-none">VQA-E Interactive Demo</h1>
+      <p class="text-xs mt-0.5" style="color:var(--muted)">Visual Question Answering with Explanations</p>
+    </div>
+  </div>
+  <div class="flex items-center gap-4 text-xs" style="color:var(--muted)">
+    <span id="device-badge" class="px-2 py-1 rounded bg-slate-800"></span>
+    <span id="model-status-summary"></span>
+  </div>
+</header>
+
+<!-- ── Main Layout ─────────────────────────────────────────────────────────── -->
+<div class="max-w-screen-2xl mx-auto px-4 py-6">
+  <div class="grid gap-5" style="grid-template-columns: 360px 1fr;">
+
+    <!-- ── LEFT PANEL ──────────────────────────────────────────────────── -->
+    <div class="flex flex-col gap-4">
+
+      <!-- Image Upload -->
+      <div class="rounded-xl p-4" style="background:var(--card);border:1px solid var(--border);">
+        <h2 class="font-bold text-sm mb-3 uppercase tracking-wider" style="color:var(--muted)">
+          <i class="fa fa-image mr-2"></i>Image
+        </h2>
+
+        <!-- Drop Zone -->
+        <div id="dropzone" class="rounded-xl p-5 text-center mb-3"
+             onclick="document.getElementById('file-input').click()"
+             ondragover="event.preventDefault();this.classList.add('drag-over')"
+             ondragleave="this.classList.remove('drag-over')"
+             ondrop="handleDrop(event)">
+          <input type="file" id="file-input" accept="image/*" class="hidden" onchange="handleFileInput(event)"/>
+          <div id="upload-placeholder">
+            <i class="fa fa-cloud-upload-alt text-3xl mb-2" style="color:var(--muted)"></i>
+            <p class="text-sm" style="color:var(--muted)">Drop image here or click to browse</p>
+            <p class="text-xs mt-1" style="color:#475569">JPG, PNG, WebP supported</p>
+          </div>
+          <img id="img-preview" src="" alt="preview"
+               class="hidden rounded-lg w-full object-contain max-h-64"/>
+        </div>
+
+        <!-- Sample images -->
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-xs font-semibold uppercase tracking-wide" style="color:var(--muted)">
+            COCO Val Samples
+          </span>
+          <button onclick="refreshSamples()" class="text-xs px-2 py-1 rounded" style="color:var(--accent);background:rgba(99,102,241,.1);">
+            <i class="fa fa-refresh mr-1"></i>Shuffle
+          </button>
+        </div>
+        <div id="sample-bar">
+          <div class="text-xs py-3" style="color:var(--muted)">Loading samples…</div>
+        </div>
+      </div>
+
+      <!-- Question + Controls -->
+      <div class="rounded-xl p-4" style="background:var(--card);border:1px solid var(--border);">
+        <h2 class="font-bold text-sm mb-3 uppercase tracking-wider" style="color:var(--muted)">
+          <i class="fa fa-question-circle mr-2"></i>Question
+        </h2>
+        <textarea id="question-input" rows="2" placeholder="Ask a question about the image…"
+                  class="w-full rounded-lg px-3 py-2.5 text-sm resize-none outline-none transition"
+                  style="background:#0f172a;border:1.5px solid var(--border);color:var(--text);"
+                  onfocus="this.style.borderColor='var(--accent)'"
+                  onblur="this.style.borderColor='var(--border)'"
+                  onkeydown="if(event.ctrlKey&&event.key==='Enter')runInference()">
+        </textarea>
+        <p class="text-xs mt-1" style="color:var(--muted)">Ctrl+Enter to run</p>
+
+        <!-- Example questions -->
+        <div class="mt-3 flex flex-wrap gap-1.5">
+          <span class="text-xs font-semibold" style="color:var(--muted)">Examples:</span>
+          <script>
+            const EX_Q = ['What is the person doing?','What color is the vehicle?',
+              'How many people are there?','Is there a dog in the image?',
+              'What type of food is shown?','Where is this scene taking place?'];
+          </script>
+        </div>
+        <div class="flex flex-wrap gap-1 mt-1" id="example-chips"></div>
+
+        <!-- Model selection -->
+        <div class="mt-4">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-semibold uppercase tracking-wide" style="color:var(--muted)">Models</span>
+            <button onclick="toggleAllModels()" id="all-btn"
+                    class="text-xs px-2 py-0.5 rounded font-semibold"
+                    style="color:var(--accent);background:rgba(99,102,241,.1);">All</button>
+          </div>
+          <div class="grid grid-cols-2 gap-2">
+            <div class="model-cb" style="color:var(--a)">
+              <input type="checkbox" id="cb-A" value="A" checked/>
+              <label for="cb-A"><span class="w-4 h-4 rounded border-2 flex items-center justify-center" style="border-color:currentColor"><i class="fa fa-check text-xs hidden"></i></span>A · Scratch+NoAttn</label>
+            </div>
+            <div class="model-cb" style="color:var(--b)">
+              <input type="checkbox" id="cb-B" value="B" checked/>
+              <label for="cb-B"><span class="w-4 h-4 rounded border-2 flex items-center justify-center" style="border-color:currentColor"><i class="fa fa-check text-xs hidden"></i></span>B · ResNet+NoAttn</label>
+            </div>
+            <div class="model-cb" style="color:var(--c)">
+              <input type="checkbox" id="cb-C" value="C" checked/>
+              <label for="cb-C"><span class="w-4 h-4 rounded border-2 flex items-center justify-center" style="border-color:currentColor"><i class="fa fa-check text-xs hidden"></i></span>C · Scratch+Attn</label>
+            </div>
+            <div class="model-cb" style="color:var(--d)">
+              <input type="checkbox" id="cb-D" value="D" checked/>
+              <label for="cb-D"><span class="w-4 h-4 rounded border-2 flex items-center justify-center" style="border-color:currentColor"><i class="fa fa-check text-xs hidden"></i></span>D · ResNet+Attn</label>
+            </div>
+          </div>
+        </div>
+
+        <!-- Decode mode -->
+        <div class="mt-4">
+          <span class="text-xs font-semibold uppercase tracking-wide block mb-2" style="color:var(--muted)">Decoding</span>
+          <div class="flex gap-2">
+            <button class="decode-btn active" data-mode="greedy" onclick="setDecode('greedy',this)">
+              <i class="fa fa-bolt mr-1"></i>Greedy
+            </button>
+            <button class="decode-btn" data-mode="beam" onclick="setDecode('beam',this)">
+              <i class="fa fa-search mr-1"></i>Beam (w=3)
+            </button>
+            <button class="decode-btn" data-mode="both" onclick="setDecode('both',this)">
+              <i class="fa fa-layer-group mr-1"></i>Both
+            </button>
+          </div>
+        </div>
+
+        <!-- Run -->
+        <div class="mt-4">
+          <button id="run-btn" onclick="runInference()">
+            <span id="run-label"><i class="fa fa-play mr-2"></i>Run Inference</span>
+            <span id="run-spinner" class="hidden"><span class="spinner mr-2"></span>Running…</span>
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── RIGHT PANEL (results) ──────────────────────────────────────────── -->
+    <div id="results-area">
+      <!-- Placeholder before first run -->
+      <div id="results-placeholder" class="flex flex-col items-center justify-center h-full rounded-2xl"
+           style="background:var(--card);border:1px solid var(--border);min-height:400px;">
+        <div class="text-6xl mb-4 opacity-20"><i class="fa fa-eye"></i></div>
+        <p class="text-lg font-semibold opacity-30">Select an image, type a question, and run inference</p>
+        <div id="model-load-status" class="mt-6 flex gap-4"></div>
+      </div>
+      <!-- Results injected here -->
+      <div id="results-content" class="hidden flex flex-col gap-5"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ── Toast ──────────────────────────────────────────────────────────────── -->
+<div id="toast"></div>
+
+<!-- ── JS ────────────────────────────────────────────────────────────────── -->
+<script>
+// ── State ─────────────────────────────────────────────────────────────────
+let currentImageB64 = null;
+let decodeMode      = 'greedy';
+let lastResults     = null;
+
+// ── Init ──────────────────────────────────────────────────────────────────
+window.addEventListener('DOMContentLoaded', () => {
+  // Render example chips
+  const ec = document.getElementById('example-chips');
+  EX_Q.forEach(q => {
+    const btn = document.createElement('button');
+    btn.textContent = q;
+    btn.className = 'text-xs px-2.5 py-1 rounded-full border transition';
+    btn.style.cssText = 'border-color:#334155;color:#94a3b8;background:transparent;cursor:pointer;';
+    btn.onmouseover  = () => { btn.style.borderColor='var(--accent)'; btn.style.color='var(--text)'; };
+    btn.onmouseout   = () => { btn.style.borderColor='#334155'; btn.style.color='#94a3b8'; };
+    btn.onclick = () => { document.getElementById('question-input').value = q; };
+    ec.appendChild(btn);
+  });
+  // Update checkbox UI
+  ['A','B','C','D'].forEach(m => {
+    const cb = document.getElementById('cb-'+m);
+    cb.addEventListener('change', updateCheckboxUI);
+  });
+  updateCheckboxUI();
+  loadStatus();
+  loadSamples();
+});
+
+// ── Checkbox UI ──────────────────────────────────────────────────────────
+function updateCheckboxUI() {
+  ['A','B','C','D'].forEach(m => {
+    const cb   = document.getElementById('cb-'+m);
+    const icon = cb.nextElementSibling.querySelector('i');
+    icon.classList.toggle('hidden', !cb.checked);
+    icon.classList.toggle('inline', cb.checked);
+  });
+}
+function toggleAllModels() {
+  const all = ['A','B','C','D'].every(m => document.getElementById('cb-'+m).checked);
+  ['A','B','C','D'].forEach(m => {
+    document.getElementById('cb-'+m).checked = !all;
+  });
+  updateCheckboxUI();
+}
+
+// ── Decode mode ───────────────────────────────────────────────────────────
+function setDecode(mode, btn) {
+  decodeMode = mode;
+  document.querySelectorAll('.decode-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+}
+
+// ── Status polling ────────────────────────────────────────────────────────
+function loadStatus() {
+  fetch('/api/status').then(r => r.json()).then(d => {
+    const badge = document.getElementById('device-badge');
+    badge.textContent = d.device_name || d.device;
+    badge.style.color = d.device.includes('cuda') ? '#10b981' : '#f59e0b';
+
+    const summary = document.getElementById('model-status-summary');
+    const loaded  = Object.values(d.load_status).filter(s => s==='loaded').length;
+    summary.textContent = `${loaded}/4 models loaded`;
+    summary.style.color = loaded === 4 ? '#10b981' : '#f59e0b';
+
+    // Placeholder status pills
+    const pills = document.getElementById('model-load-status');
+    if (pills) {
+      pills.innerHTML = '';
+      Object.entries(d.load_status).forEach(([m, s]) => {
+        const div = document.createElement('div');
+        const ok  = s === 'loaded';
+        const warn= s === 'loading';
+        div.className = 'flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-semibold';
+        div.style.cssText = `background:${ok?'rgba(16,185,129,.15)':warn?'rgba(245,158,11,.15)':'rgba(239,68,68,.15)'};
+          color:${ok?'#10b981':warn?'#f59e0b':'#ef4444'}`;
+        div.innerHTML = `<i class="fa ${ok?'fa-check-circle':warn?'fa-spinner fa-spin':'fa-exclamation-circle'}"></i> Model ${m}: ${s}`;
+        pills.appendChild(div);
+      });
+    }
+
+    if (loaded < 4) setTimeout(loadStatus, 2000);
+  }).catch(() => setTimeout(loadStatus, 3000));
+}
+
+// ── Sample images ─────────────────────────────────────────────────────────
+function loadSamples() {
+  fetch('/api/samples').then(r => r.json()).then(imgs => {
+    const bar = document.getElementById('sample-bar');
+    if (!imgs.length) { bar.innerHTML = '<span style="color:var(--muted);font-size:12px">No val images found</span>'; return; }
+    bar.innerHTML = '';
+    imgs.forEach(img => {
+      const el = document.createElement('img');
+      el.src       = 'data:image/jpeg;base64,' + img.thumb;
+      el.alt       = img.filename;
+      el.className = 'sample-thumb';
+      el.title     = img.filename;
+      el.onclick   = () => loadSampleImage(img.filename, el);
+      bar.appendChild(el);
+    });
+  });
+}
+function refreshSamples() {
+  document.getElementById('sample-bar').innerHTML = '<div style="color:var(--muted);font-size:12px">Loading…</div>';
+  fetch('/api/refresh_samples').then(r => r.json()).then(imgs => {
+    const bar = document.getElementById('sample-bar');
+    bar.innerHTML = '';
+    imgs.forEach(img => {
+      const el = document.createElement('img');
+      el.src       = 'data:image/jpeg;base64,' + img.thumb;
+      el.alt       = img.filename;
+      el.className = 'sample-thumb';
+      el.onclick   = () => loadSampleImage(img.filename, el);
+      bar.appendChild(el);
+    });
+  });
+}
+function loadSampleImage(filename, thumbEl) {
+  document.querySelectorAll('.sample-thumb').forEach(t => t.classList.remove('selected'));
+  thumbEl.classList.add('selected');
+  fetch('/api/image/'+filename)
+    .then(r => r.blob())
+    .then(blob => {
+      const reader = new FileReader();
+      reader.onload = e => setImage(e.target.result);
+      reader.readAsDataURL(blob);
+    });
+}
+
+// ── Image handling ────────────────────────────────────────────────────────
+function handleFileInput(evt) {
+  const file = evt.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => setImage(e.target.result);
+  reader.readAsDataURL(file);
+}
+function handleDrop(evt) {
+  evt.preventDefault();
+  document.getElementById('dropzone').classList.remove('drag-over');
+  const file = evt.dataTransfer.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = e => setImage(e.target.result);
+  reader.readAsDataURL(file);
+}
+function setImage(dataUrl) {
+  currentImageB64 = dataUrl;
+  const preview = document.getElementById('img-preview');
+  const placeholder = document.getElementById('upload-placeholder');
+  preview.src = dataUrl;
+  preview.classList.remove('hidden');
+  placeholder.classList.add('hidden');
+}
+
+// ── Inference ─────────────────────────────────────────────────────────────
+async function runInference() {
+  const q = document.getElementById('question-input').value.trim();
+  if (!currentImageB64) { showToast('Please select or upload an image first.', 'warn'); return; }
+  if (!q)               { showToast('Please enter a question.', 'warn'); return; }
+
+  const selModels = ['A','B','C','D'].filter(m => document.getElementById('cb-'+m).checked);
+  if (!selModels.length) { showToast('Select at least one model.', 'warn'); return; }
+
+  // UI: running state
+  document.getElementById('run-btn').disabled = true;
+  document.getElementById('run-label').classList.add('hidden');
+  document.getElementById('run-spinner').classList.remove('hidden');
+
+  const t0 = performance.now();
+  try {
+    const resp = await fetch('/api/infer', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        image_b64:   currentImageB64,
+        question:    q,
+        models:      selModels,
+        decode_mode: decodeMode,
+        beam_width:  3,
+      })
+    });
+    const data = await resp.json();
+    if (data.error) { showToast(data.error, 'error'); return; }
+    const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
+    lastResults = data;
+    renderResults(data, q, elapsed);
+  } catch(e) {
+    showToast('Request failed: ' + e.message, 'error');
+  } finally {
+    document.getElementById('run-btn').disabled = false;
+    document.getElementById('run-label').classList.remove('hidden');
+    document.getElementById('run-spinner').classList.add('hidden');
+  }
+}
+
+// ── Render Results ────────────────────────────────────────────────────────
+function renderResults(data, question, elapsed) {
+  document.getElementById('results-placeholder').classList.add('hidden');
+  const content = document.getElementById('results-content');
+  content.classList.remove('hidden');
+  content.innerHTML = '';
+
+  const { results, display_image } = data;
+  const validModels = Object.entries(results).filter(([m,r]) => !r.skipped);
+
+  // ── Comparison summary bar ─────────────────────────────────────────────
+  if (validModels.length > 1) {
+    const summary = document.createElement('div');
+    summary.className = 'rounded-xl p-4 fade-in';
+    summary.style.cssText = 'background:var(--card);border:1px solid var(--border)';
+    summary.innerHTML = `
+      <div class="flex items-center justify-between mb-3">
+        <h2 class="font-bold text-sm uppercase tracking-wider" style="color:var(--muted)">
+          <i class="fa fa-table mr-2"></i>Model Comparison
+        </h2>
+        <span class="text-xs" style="color:var(--muted)">Total: ${elapsed}s</span>
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full cmp-table">
+          <thead>
+            <tr>
+              <th class="text-left rounded-l">Model</th>
+              <th class="text-left">Answer (Greedy)</th>
+              ${decodeMode !== 'greedy' ? '<th class="text-left">Answer (Beam)</th>' : ''}
+              <th class="text-right">Confidence</th>
+              <th class="text-right">Attention</th>
+              <th class="text-right rounded-r">Time</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${validModels.map(([m, r]) => {
+              const best = getBestConfidence(validModels.map(([,r])=>r.avg_confidence));
+              const isBest = r.avg_confidence === best;
+              const c = {A:'var(--a)',B:'var(--b)',C:'var(--c)',D:'var(--d)'}[m];
+              return `
+              <tr>
+                <td>
+                  <span class="px-2 py-0.5 rounded text-xs font-bold badge-${m.toLowerCase()}">${m}</span>
+                  <span class="text-xs ml-1" style="color:var(--muted)">${r.meta.desc}</span>
+                </td>
+                <td class="font-medium ${isBest?'cmp-best':''}" style="max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">${r.greedy_answer}</td>
+                ${decodeMode !== 'greedy' ? `<td style="max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:#94a3b8">${r.beam_answer||'—'}</td>` : ''}
+                <td class="text-right">
+                  <div class="flex items-center justify-end gap-2">
+                    <div class="w-16 rounded-full h-2" style="background:#1e293b">
+                      <div class="prob-bar ${probClass(r.avg_confidence)}" style="width:${Math.round(r.avg_confidence*100)}%"></div>
+                    </div>
+                    <span class="font-mono text-xs ${isBest?'':'opacity-70'}">${(r.avg_confidence*100).toFixed(1)}%</span>
+                  </div>
+                </td>
+                <td class="text-right text-xs" style="color:var(--muted)">${r.has_attention ? '<i class="fa fa-eye" style="color:'+c+'"></i> Yes' : '<i class="fa fa-eye-slash"></i> No'}</td>
+                <td class="text-right font-mono text-xs" style="color:var(--muted)">${r.inference_ms}ms</td>
+              </tr>`;
+            }).join('')}
+          </tbody>
+        </table>
+      </div>`;
+    content.appendChild(summary);
+  }
+
+  // ── Per-model cards ────────────────────────────────────────────────────
+  const grid = document.createElement('div');
+  grid.className = `grid gap-4 ${validModels.length === 1 ? '' : validModels.length <= 2 ? 'grid-cols-2' : 'grid-cols-2'}`;
+  validModels.forEach(([m, r]) => grid.appendChild(buildModelCard(m, r, display_image)));
+  content.appendChild(grid);
+}
+
+function getBestConfidence(vals) { return Math.max(...vals); }
+function probClass(p) { return p > 0.7 ? 'prob-high' : p > 0.4 ? 'prob-medium' : 'prob-low'; }
+
+// ── Model Card ────────────────────────────────────────────────────────────
+function buildModelCard(modelType, r, displayImg) {
+  const div  = document.createElement('div');
+  div.className = 'result-card fade-in';
+  const color = {A:'var(--a)',B:'var(--b)',C:'var(--c)',D:'var(--d)'}[modelType];
+
+  // ── Card header ─────────────────────────────────────────────────────
+  const hdr = `
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-2">
+        <span class="px-2.5 py-0.5 rounded-md text-sm font-black badge-${modelType.toLowerCase()}">${modelType}</span>
+        <div>
+          <p class="font-bold text-sm leading-tight">${r.meta.name}</p>
+          <p class="text-xs" style="color:var(--muted)">${r.meta.desc}</p>
+        </div>
+      </div>
+      <div class="text-xs text-right" style="color:var(--muted)">
+        <div>${r.inference_ms}ms</div>
+        <div class="font-mono font-bold" style="color:${color}">${(r.avg_confidence*100).toFixed(1)}% conf</div>
+      </div>
+    </div>`;
+
+  // ── Answer text ──────────────────────────────────────────────────────
+  let answerHTML = '';
+  if (decodeMode === 'greedy' || decodeMode === 'both') {
+    const tokenChips = r.tokens.map((t, i) =>
+      `<span class="token-chip" data-idx="${i}" data-model="${modelType}"
+             title="Confidence: ${(r.token_probs[i]*100).toFixed(1)}%"
+             style="background:rgba(255,255,255,${0.04 + r.token_probs[i]*0.12});">${t}</span>`
+    ).join('');
+    answerHTML += `
+      <div>
+        <p class="text-xs font-semibold uppercase tracking-wide mb-2" style="color:var(--muted)">
+          <i class="fa fa-bolt mr-1" style="color:#f59e0b"></i>Greedy
+        </p>
+        <div class="leading-relaxed">${tokenChips}</div>
+      </div>`;
+  }
+  if ((decodeMode === 'beam' || decodeMode === 'both') && r.beam_answer) {
+    answerHTML += `
+      <div class="pt-2" style="border-top:1px solid var(--border)">
+        <p class="text-xs font-semibold uppercase tracking-wide mb-1.5" style="color:var(--muted)">
+          <i class="fa fa-search mr-1" style="color:#6366f1"></i>Beam (w=3)
+        </p>
+        <p class="text-sm font-medium">${r.beam_answer}</p>
+      </div>`;
+  }
+
+  // ── Tabs: Attention | Tokens | Top-5 ────────────────────────────────
+  const tabsHTML = r.has_attention
+    ? `<div class="flex gap-1 border-b mb-3" style="border-color:var(--border)">
+         <button class="tab-btn active" onclick="switchTab(this,'attn-${modelType}')">
+           <i class="fa fa-fire mr-1" style="color:${color}"></i>Attention
+         </button>
+         <button class="tab-btn" onclick="switchTab(this,'conf-${modelType}')">
+           <i class="fa fa-chart-bar mr-1"></i>Confidence
+         </button>
+         <button class="tab-btn" onclick="switchTab(this,'top5-${modelType}')">
+           <i class="fa fa-list mr-1"></i>Top-5
+         </button>
+       </div>`
+    : `<div class="flex gap-1 border-b mb-3" style="border-color:var(--border)">
+         <button class="tab-btn active" onclick="switchTab(this,'conf-${modelType}')">
+           <i class="fa fa-chart-bar mr-1"></i>Confidence
+         </button>
+         <button class="tab-btn" onclick="switchTab(this,'top5-${modelType}')">
+           <i class="fa fa-list mr-1"></i>Top-5
+         </button>
+       </div>`;
+
+  // ── Attention panel ──────────────────────────────────────────────────
+  let attnPanelHTML = '';
+  if (r.has_attention && r.heatmaps.length > 0) {
+    const heatmapIds = r.heatmaps.map((_, i) => `hm-${modelType}-${i}`);
+    attnPanelHTML = `
+      <div id="attn-${modelType}" class="tab-panel">
+        <div class="flex gap-4">
+          <div class="flex-shrink-0">
+            <img id="attn-img-${modelType}" src="data:image/jpeg;base64,${r.avg_heatmap}"
+                 class="attn-img border" style="border-color:var(--border)"/>
+            <p class="text-xs text-center mt-1" style="color:var(--muted)" id="attn-label-${modelType}">Average attention</p>
+          </div>
+          <div class="flex-1 min-w-0">
+            <p class="text-xs font-semibold mb-2 uppercase tracking-wide" style="color:var(--muted)">Click word to view attention</p>
+            <div class="leading-relaxed mb-3">
+              ${r.tokens.map((t, i) => `
+                <span class="token-chip" onclick="showAttn('${modelType}',${i})" data-idx="${i}"
+                      title="Attn entropy: ${r.attn_entropy[i]||0}">${t}</span>`).join('')}
+            </div>
+            ${r.tokens.length > 1 ? `
+            <div class="mt-3">
+              <label class="text-xs mb-1 block" style="color:var(--muted)">
+                Step: <span id="step-label-${modelType}">avg</span>
+              </label>
+              <input type="range" id="attn-slider-${modelType}" min="-1" max="${r.tokens.length-1}" value="-1"
+                     oninput="onSlider('${modelType}',this.value,${JSON.stringify(r.heatmaps)},${JSON.stringify(r.avg_heatmap)},${JSON.stringify(r.tokens)})"/>
+            </div>` : ''}
+            <div class="mt-3">
+              <p class="text-xs font-semibold mb-1 uppercase tracking-wide" style="color:var(--muted)">Attention Entropy</p>
+              <div class="flex items-end gap-px h-12">
+                ${r.attn_entropy.map((e, i) => {
+                  const maxE = Math.log(49); // max entropy for uniform dist over 49
+                  const pct  = Math.round((e/maxE)*100);
+                  const col  = e < maxE*0.3 ? '#10b981' : e < maxE*0.6 ? '#f59e0b' : '#ef4444';
+                  return `<div class="flex-1 rounded-t cursor-pointer transition-opacity hover:opacity-80"
+                           style="height:${pct}%;min-height:2px;background:${col}"
+                           title="Token: ${r.tokens[i]}&#10;Entropy: ${e} (${pct}% of max)&#10;Low=focused, High=diffuse"
+                           onclick="showAttn('${modelType}',${i})"></div>`;
+                }).join('')}
+              </div>
+              <div class="flex justify-between text-xs mt-1" style="color:var(--muted)">
+                <span>Focused</span><span style="color:#10b981">Low entropy</span>
+                <span style="color:#ef4444">High entropy</span><span>Diffuse</span>
+              </div>
+            </div>
+          </div>
+        </div>
+        <!-- Pre-load heatmaps (hidden) -->
+        ${r.heatmaps.map((h, i) => `<img id="hm-${modelType}-${i}" src="data:image/png;base64,${h}" class="hidden"/>`).join('')}
+      </div>`;
+  }
+
+  // ── Confidence panel ─────────────────────────────────────────────────
+  const confPanelHTML = `
+    <div id="conf-${modelType}" class="tab-panel ${r.has_attention ? 'hidden' : ''}">
+      <canvas id="conf-chart-${modelType}" height="120"></canvas>
+    </div>`;
+
+  // ── Top-5 panel ──────────────────────────────────────────────────────
+  const top5HTML = `
+    <div id="top5-${modelType}" class="tab-panel hidden">
+      <p class="text-xs font-semibold uppercase tracking-wide mb-2" style="color:var(--muted)">
+        Top-5 alternatives at final token step
+      </p>
+      ${r.top5_last.map((t, i) => `
+        <div class="flex items-center gap-3 mb-2">
+          <span class="text-xs w-4 text-center font-bold" style="color:var(--muted)">${i+1}</span>
+          <span class="font-medium text-sm flex-1">${t.word}</span>
+          <div class="w-24 rounded-full h-2 flex-shrink-0" style="background:#1e293b">
+            <div class="${probClass(t.prob)} prob-bar" style="width:${Math.round(t.prob*100)}%"></div>
+          </div>
+          <span class="font-mono text-xs w-12 text-right">${(t.prob*100).toFixed(1)}%</span>
+        </div>`).join('')}
+    </div>`;
+
+  div.innerHTML = hdr + `<div style="border-top:1px solid var(--border);padding-top:12px">${answerHTML}</div>`
+    + `<div style="border-top:1px solid var(--border);padding-top:12px">${tabsHTML}${attnPanelHTML}${confPanelHTML}${top5HTML}</div>`;
+
+  // Render confidence chart after DOM insert
+  requestAnimationFrame(() => {
+    renderConfChart(modelType, r.tokens, r.token_probs, color);
+  });
+
+  return div;
+}
+
+// ── Tab switching ─────────────────────────────────────────────────────────
+function switchTab(btn, panelId) {
+  // Find all sibling tab buttons and panels
+  const tabBar   = btn.parentElement;
+  const cardBody = tabBar.parentElement;
+  tabBar.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  cardBody.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
+  document.getElementById(panelId).classList.remove('hidden');
+}
+
+// ── Attention slider / click ──────────────────────────────────────────────
+function showAttn(modelType, idx) {
+  const imgEl   = document.getElementById(`attn-img-${modelType}`);
+  const labelEl = document.getElementById(`attn-label-${modelType}`);
+  const slider  = document.getElementById(`attn-slider-${modelType}`);
+  const hm      = document.getElementById(`hm-${modelType}-${idx}`);
+  if (!hm) return;
+  imgEl.src     = hm.src;
+  labelEl.textContent = `Step ${idx+1}: "${lastResults.results[modelType].tokens[idx]}"`;
+  if (slider) slider.value = idx;
+  // Highlight token chip
+  document.querySelectorAll(`[data-idx]`).forEach(el => el.classList.remove('active'));
+  document.querySelector(`#attn-${modelType} [data-idx="${idx}"]`)?.classList.add('active');
+}
+function onSlider(modelType, val, heatmaps, avgHeatmap, tokens) {
+  const imgEl   = document.getElementById(`attn-img-${modelType}`);
+  const labelEl = document.getElementById(`attn-label-${modelType}`);
+  val = parseInt(val);
+  if (val === -1) {
+    imgEl.src = 'data:image/png;base64,' + avgHeatmap;
+    labelEl.textContent = 'Average attention';
+    document.querySelectorAll(`#attn-${modelType} .token-chip`).forEach(e=>e.classList.remove('active'));
+  } else {
+    showAttn(modelType, val);
+  }
+}
+
+// ── Confidence chart ──────────────────────────────────────────────────────
+function renderConfChart(modelType, tokens, probs, color) {
+  const canvas = document.getElementById(`conf-chart-${modelType}`);
+  if (!canvas || !tokens.length) return;
+  new Chart(canvas, {
+    type: 'bar',
+    data: {
+      labels: tokens,
+      datasets: [{
+        label: 'Token Confidence',
+        data: probs.map(p => +(p*100).toFixed(1)),
+        backgroundColor: probs.map(p =>
+          p > 0.7 ? 'rgba(16,185,129,.7)' :
+          p > 0.4 ? 'rgba(245,158,11,.7)' : 'rgba(239,68,68,.7)'),
+        borderColor: color,
+        borderWidth: 1,
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: { label: ctx => ` ${ctx.parsed.y.toFixed(1)}% confidence` }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#94a3b8', font: { size: 11 }, maxRotation: 40 },
+          grid: { color: 'rgba(255,255,255,.05)' }
+        },
+        y: {
+          min: 0, max: 100,
+          ticks: { color: '#94a3b8', font: { size: 11 }, callback: v => v+'%' },
+          grid: { color: 'rgba(255,255,255,.05)' }
+        }
+      }
+    }
+  });
+}
+
+// ── Toast ─────────────────────────────────────────────────────────────────
+function showToast(msg, type='info') {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.style.borderColor = type==='error'?'#ef4444':type==='warn'?'#f59e0b':'#6366f1';
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 3000);
+}
+</script>
+</body>
+</html>
