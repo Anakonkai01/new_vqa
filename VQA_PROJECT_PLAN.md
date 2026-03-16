@@ -113,10 +113,11 @@ Question → LSTM Q-Encoder → q_feat
 
 ### 4.7 Evaluation & Inference
 - [x] `inference.py` — greedy decode + beam search (single + batch)
-- [x] `evaluate.py` — VQA Accuracy, Exact Match, BLEU-1/2/3/4, METEOR
-- [x] `compare.py` — side-by-side table cho 4 models, fallback to best checkpoint
-- [x] VQA Accuracy — official metric: min(matching/3, 1.0) với 10 human annotations
-- [x] Beam Search — configurable width, length-normalized log prob
+- [x] `evaluate.py` — Exact Match, BLEU-1/2/3/4, METEOR, **ROUGE-L**, **BERTScore** (8 metrics total)
+- [x] `compare.py` — side-by-side table cho 4 models, fallback to best checkpoint, ROUGE-L added
+- [x] Beam Search — configurable width, n-gram blocking, length-normalized log prob
+- [x] `vqa_evaluate_local.ipynb` — full local evaluation notebook (RTX 5070 Ti optimized)
+- [x] `outputs/evaluation_results.json` — final results, n=88,488 samples, greedy + beam
 
 ### 4.8 Visualization & Analysis
 - [x] `plot_curves.py` — training/val loss curves cho 4 models
@@ -135,30 +136,41 @@ Question → LSTM Q-Encoder → q_feat
 - [x] `VQA_PROJECT_PLAN.md` — this file
 - [x] `devlog.md` — development log
 - [x] `README.md` — assignment requirements
+- [x] `REPORT.md` — full evaluation report (§15–17) with final results, ROUGE-L, efficiency analysis
+- [x] `PRESENTATION.md` — Marp slide deck (15 slides + 2 backup), speaker notes
 
 ---
 
 ## 5. Evaluation Metrics
 
-| Metric | Ý nghĩa | Dùng cho |
+| Metric | Ý nghĩa | Primary? |
 |--------|---------|---------|
-| **VQA Accuracy** | Official VQA challenge metric, partial credit | Primary metric |
-| **Exact Match** | Strict string equality | Secondary metric |
-| **BLEU-1/2/3/4** | N-gram precision (unigram→4-gram) | NLG quality |
-| **METEOR** | Synonym-aware, stemming | Semantic similarity |
+| **BLEU-4** | 4-gram precision (primary NLG quality) | ★ Primary |
+| **METEOR** | Synonym-aware, stemming (semantic similarity) | ★ Primary |
+| **ROUGE-L** | Longest Common Subsequence F1 | ★ Primary |
+| **BERTScore** | Contextual embedding similarity | Reference |
+| **Exact Match** | Strict string equality (<6%, reference only) | Reference |
+| BLEU-1/2/3 | N-gram precision lower orders | Reference |
 
-### Comparison Template
+### Final Results (Greedy, n=88,488, `outputs/evaluation_results.json`)
 
-```
-Model    VQA Acc   Exact   BLEU-1   BLEU-2   BLEU-3   BLEU-4   METEOR  Checkpoint
-------   -------   -----   ------   ------   ------   ------   ------  ----------
-A        XX.XX%    XX.XX%  0.XXXX   0.XXXX   0.XXXX   0.XXXX   0.XXXX  model_a_epoch20.pth
-B        XX.XX%    XX.XX%  0.XXXX   0.XXXX   0.XXXX   0.XXXX   0.XXXX  model_b_epoch20.pth
-C        XX.XX%    XX.XX%  0.XXXX   0.XXXX   0.XXXX   0.XXXX   0.XXXX  model_c_epoch20.pth
-D        XX.XX%    XX.XX%  0.XXXX   0.XXXX   0.XXXX   0.XXXX   0.XXXX  model_d_epoch20.pth
-```
+| Model | BLEU-4 | METEOR | ROUGE-L | BERTScore | EM | Checkpoint |
+|-------|--------|--------|---------|-----------|-----|-----------|
+| **A** | 0.0915 | 0.3117 | 0.3828 | 0.9008 | 2.83% | model_a_best.pth |
+| **B** | 0.1127 | 0.3561 | 0.4237 | 0.9081 | 4.07% | model_b_best.pth |
+| **C** | 0.0988 | 0.3271 | 0.3971 | 0.9034 | 4.18% | model_c_best.pth |
+| **D** | **0.1159** | **0.3595** | **0.4270** | **0.9085** | **5.88%** | model_d_best.pth |
 
-So sánh theo 3 mốc: Phase 1 (epoch 10), Phase 2 (epoch 15), Phase 3 (epoch 20).
+**vs. Li et al. (ECCV 2018) best:** BLEU-4 9.40% → ours 11.59% **(+23.3%)** · ROUGE-L 36.33% → ours 42.70% **(+17.5%)**
+
+### Beam Search Results (w=3, n-gram blocking=3)
+
+| Model | BLEU-4 | ROUGE-L | Exact Match |
+|-------|--------|---------|-------------|
+| A | 0.0926 | 0.3823 | 7.46% |
+| B | 0.1137 | 0.4230 | 9.94% |
+| C | 0.1005 | 0.3972 | 7.57% |
+| **D** | **0.1170** | **0.4269** | **11.07%** |
 
 ---
 

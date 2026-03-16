@@ -9,10 +9,21 @@ Usage:
 
 import torch
 import os, sys, argparse, tqdm
+import nltk
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from nltk.translate.meteor_score import meteor_score as nltk_meteor
 from torch.utils.data import DataLoader
 sys.path.append(os.path.dirname(__file__))
+
+nltk.download('wordnet', quiet=True)
+nltk.download('omw-1.4', quiet=True)
+
+try:
+    from rouge_score import rouge_scorer as _rouge_scorer
+    _rscorer = _rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+    HAS_ROUGE = True
+except ImportError:
+    HAS_ROUGE = False
 
 try:
     from bert_score import score as bert_score_fn
@@ -87,13 +98,15 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset, beam_wi
             for a_tensor in answers:
                 all_gt_strings.append(decode_tensor(a_tensor, vocab_a))
 
-    n            = len(all_predictions)
-    exact_match  = 0
-    bleu1_total  = 0.0
-    bleu2_total  = 0.0
-    bleu3_total  = 0.0
-    bleu4_total  = 0.0
-    meteor_total = 0.0
+    n             = len(all_predictions)
+    exact_match   = 0
+    bleu1_total   = 0.0
+    bleu2_total   = 0.0
+    bleu3_total   = 0.0
+    bleu4_total   = 0.0
+    meteor_total  = 0.0   # NLTK with WordNet (internal comparison)
+    meteor_std    = 0.0   # No WordNet — comparable to Li et al. 2018
+    rougeL_total  = 0.0
 
     for pred_str, gt_str in zip(all_predictions, all_gt_strings):
         pred_clean = pred_str.strip().lower()
@@ -104,19 +117,21 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset, beam_wi
 
         gt_words   = gt_str.split() or ['<unk>']
         pred_words = pred_str.split() or ['<unk>']
+
         bleu1_total  += sentence_bleu([gt_words], pred_words,
-                                      weights=(1, 0, 0, 0),
-                                      smoothing_function=smoothie)
+                                      weights=(1, 0, 0, 0), smoothing_function=smoothie)
         bleu2_total  += sentence_bleu([gt_words], pred_words,
-                                      weights=(0.5, 0.5, 0, 0),
-                                      smoothing_function=smoothie)
+                                      weights=(0.5, 0.5, 0, 0), smoothing_function=smoothie)
         bleu3_total  += sentence_bleu([gt_words], pred_words,
-                                      weights=(0.33, 0.33, 0.33, 0),
-                                      smoothing_function=smoothie)
+                                      weights=(0.33, 0.33, 0.33, 0), smoothing_function=smoothie)
         bleu4_total  += sentence_bleu([gt_words], pred_words,
-                                      weights=(0.25, 0.25, 0.25, 0.25),
-                                      smoothing_function=smoothie)
+                                      weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=smoothie)
+
         meteor_total += nltk_meteor([gt_words], pred_words)
+        meteor_std   += nltk_meteor([gt_words], pred_words, wordnet=None)
+
+        if HAS_ROUGE:
+            rougeL_total += _rscorer.score(gt_str, pred_str)['rougeL'].fmeasure
 
     # BERTScore (computed once per model on full prediction list)
     bertscore_f1 = 0.0
@@ -125,47 +140,53 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset, beam_wi
         bertscore_f1 = F1.mean().item()
 
     return {
-        'exact_match': exact_match / n * 100,
-        'bleu1':       bleu1_total / n,
-        'bleu2':       bleu2_total / n,
-        'bleu3':       bleu3_total / n,
-        'bleu4':       bleu4_total / n,
-        'meteor':      meteor_total / n,
-        'bertscore':   bertscore_f1,
-        'checkpoint':  checkpoint,
-        'n':           n,
+        'exact_match':  exact_match / n * 100,
+        'bleu1':        bleu1_total / n,
+        'bleu2':        bleu2_total / n,
+        'bleu3':        bleu3_total / n,
+        'bleu4':        bleu4_total / n,
+        'meteor_nltk':  meteor_total / n,
+        'meteor':       meteor_std / n,     # primary — no WordNet
+        'rougeL':       rougeL_total / n if HAS_ROUGE else None,
+        'bertscore':    bertscore_f1,
+        'checkpoint':   checkpoint,
+        'n':            n,
     }
 
 
 def print_table(results):
-    has_bert = HAS_BERTSCORE
-    header = f"{'Model':<8} {'BLEU-4':>8} {'METEOR':>8}"
-    if has_bert:
-        header += f" {'BERTScr':>8}"
-    header += f" {'BLEU-1':>8} {'BLEU-2':>8} {'BLEU-3':>8} {'Exact':>8}  Checkpoint"
     print()
-    print(header)
-    print("-" * len(header))
+    # Header
+    hdr = f"{'Model':<8} {'BLEU-4':>8} {'METEOR*':>9} {'ROUGE-L':>9}"
+    if HAS_BERTSCORE:
+        hdr += f" {'BERTScr':>8}"
+    hdr += f" {'BLEU-1':>8} {'BLEU-2':>8} {'BLEU-3':>8} {'M-NLTK':>8} {'Exact':>8}  Checkpoint"
+    print(hdr)
+    print("-" * len(hdr))
     for model_type, r in sorted(results.items()):
         if r is None:
-            cols = f"{'N/A':>8} " * (7 if has_bert else 6)
-            print(f"{model_type:<8} {cols} (checkpoint missing)")
+            print(f"{model_type:<8}  (checkpoint missing)")
         else:
             line = (
                 f"{model_type:<8}"
                 f" {r['bleu4']:>8.4f}"
-                f" {r['meteor']:>8.4f}"
+                f" {r['meteor']:>9.4f}"   # standard METEOR (no WordNet)
+                f" {r['rougeL']:>9.4f}" if r['rougeL'] is not None else f" {'N/A':>9}"
             )
-            if has_bert:
+            if HAS_BERTSCORE:
                 line += f" {r['bertscore']:>8.4f}"
             line += (
                 f" {r['bleu1']:>8.4f}"
                 f" {r['bleu2']:>8.4f}"
                 f" {r['bleu3']:>8.4f}"
+                f" {r['meteor_nltk']:>8.4f}"   # NLTK METEOR for reference
                 f" {r['exact_match']:>7.2f}%"
                 f"  {r['checkpoint']}"
             )
             print(line)
+    print()
+    print("* METEOR = standard (no WordNet synonyms) — comparable to Li et al. 2018")
+    print("  M-NLTK = NLTK METEOR with WordNet — use only for internal model comparison")
     print()
 
 

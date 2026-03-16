@@ -1,7 +1,7 @@
 # CONTEXT HANDOFF — VQA Project (tiếp tục từ đây)
 
 > Tài liệu này tóm tắt toàn bộ ngữ cảnh cần thiết để tiếp tục dự án.
-> Cập nhật lần cuối: 2026-03-03 (session 5 — bugs fixed, vocab rebuilt, local training notebook)
+> Cập nhật lần cuối: 2026-03-16 (session 9 — final evaluation complete, ROUGE-L added, REPORT + PRESENTATION finalized)
 
 ---
 
@@ -74,9 +74,39 @@ Xây dựng các loại kiến trúc khác nhau dựa trên:
 - [x] **AMP API updated** — `torch.cuda.amp` → `torch.amp` (fix FutureWarning trong PyTorch 2.10)
 - [x] **Local training notebook** — `vqa_local_training.ipynb` tạo mới cho RTX 3060 12GB
 
-### CÒN LẠI — VIỆC CẦN LÀM TIẾP
-1. **Train đủ 4 model** theo 3-phase plan dùng `vqa_local_training.ipynb`
-2. **Compare metrics** sau mỗi phase (epoch 10, 15, 20)
+#### Session 6-8: Training 4 Models (3-phase)
+- [x] All 4 models trained: Model A (ep16 best), B (ep15), C (ep15), D (ep15)
+- [x] Checkpoints: `model_{a,b,c,d}_best.pth` in `checkpoints/`
+- [x] Training history: `history_model_{a,b,c,d}.json`
+
+#### Session 9: Final Evaluation + ROUGE-L + Documentation (2026-03-16)
+- [x] **Vocab mismatch bug fixed** — old vocab had `<task_vqa>/<task_cap>` at idx 4/5. Rebuilt from VQA-E train set (threshold=3) → Q=4546, A=8648. BLEU-4 recovered from 0.0107 → 0.0915.
+- [x] **ROUGE-L added** to `src/evaluate.py` and `src/compare.py` via `rouge_score` library
+- [x] **BERTScore enabled** — `bert-score` installed, computed for all models
+- [x] **`vqa_evaluate_local.ipynb`** — full local evaluation notebook, RTX 5070 Ti optimized
+- [x] **Beam search optimized** — `fast_batch_beam_decode`, `max_len=30`, `BATCH_SIZE_BEAM=256`
+- [x] **Full evaluation run** — n=88,488 samples, greedy + beam, `outputs/evaluation_results.json`
+- [x] **REPORT.md finalized** — all metrics exact, §15.10 Efficiency Analysis, §16 factorial analysis complete
+- [x] **PRESENTATION.md finalized** — 15 content slides + 2 backup, all numbers exact, ROUGE-L in all tables
+
+### TRẠNG THÁI: ✅ DỰ ÁN HOÀN THÀNH
+
+**Final results (greedy, n=88,488):**
+
+| Model | BLEU-4 | METEOR | ROUGE-L | BERTScore | EM |
+|-------|--------|--------|---------|-----------|-----|
+| A | 0.0915 | 0.3117 | 0.3828 | 0.9008 | 2.83% |
+| B | 0.1127 | 0.3561 | 0.4237 | 0.9081 | 4.07% |
+| C | 0.0988 | 0.3271 | 0.3971 | 0.9034 | 4.18% |
+| **D** | **0.1159** | **0.3595** | **0.4270** | **0.9085** | **5.88%** |
+
+**vs. Li et al. (ECCV 2018) best:** BLEU-4 +23.3%, ROUGE-L +17.5% — without multi-task supervision.
+
+**Key findings:**
+- Pretrained features: ~3.6× more impactful than attention (+20.2% vs +5.4% BLEU-4)
+- Beam search (w=3): minimal BLEU-4 gain (<2%) but 2–3× Exact Match improvement
+- ROUGE-L beam-invariant: |Δ| ≤ 0.07% — confirms beam search is surface canonicalization only
+- Model B: best parameter efficiency (0.00277 BLEU-4/10M trainable params)
 
 ---
 

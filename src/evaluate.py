@@ -10,6 +10,15 @@ sys.path.append(os.path.dirname(__file__))
 nltk.download('wordnet', quiet=True)
 nltk.download('omw-1.4', quiet=True)
 
+# ROUGE-L
+try:
+    from rouge_score import rouge_scorer as _rouge_scorer
+    _rscorer = _rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+    HAS_ROUGE = True
+except ImportError:
+    HAS_ROUGE = False
+    print("[WARN] rouge-score not installed. Run: pip install rouge-score")
+
 # BERTScore (semantic similarity via BERT embeddings)
 try:
     from bert_score import score as bert_score_fn
@@ -97,13 +106,14 @@ def evaluate(model_type='A', checkpoint=None, num_samples=None, beam_width=1,
             for a_tensor in answers:
                 all_gt_strings.append(decode_tensor(a_tensor, vocab_a))
 
-    # Compute metrics — primary: BLEU-4 and METEOR (meaningful for generative output)
-    exact_match  = 0
-    bleu1_total  = 0.0
-    bleu2_total  = 0.0
-    bleu3_total  = 0.0
-    bleu4_total  = 0.0
-    meteor_total = 0.0
+    # Compute metrics
+    exact_match   = 0
+    bleu1_total   = 0.0
+    bleu2_total   = 0.0
+    bleu3_total   = 0.0
+    bleu4_total   = 0.0
+    meteor_total  = 0.0   # Sentence-level NLTK METEOR (valid for internal model comparison)
+    rougeL_total  = 0.0   # ROUGE-L F1
 
     for pred_str, gt_str in zip(all_predictions, all_gt_strings):
         pred_clean = pred_str.strip().lower()
@@ -114,20 +124,15 @@ def evaluate(model_type='A', checkpoint=None, num_samples=None, beam_width=1,
 
         gt_words   = gt_str.split() or ['<unk>']
         pred_words = pred_str.split() or ['<unk>']
+
         bleu1_total  += sentence_bleu([gt_words], pred_words, weights=(1, 0, 0, 0),             smoothing_function=smoothie)
         bleu2_total  += sentence_bleu([gt_words], pred_words, weights=(0.5, 0.5, 0, 0),         smoothing_function=smoothie)
         bleu3_total  += sentence_bleu([gt_words], pred_words, weights=(1/3, 1/3, 1/3, 0),       smoothing_function=smoothie)
         bleu4_total  += sentence_bleu([gt_words], pred_words, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=smoothie)
         meteor_total += meteor_score([gt_words], pred_words)
 
-    print(f"\n{'='*50}")
-    print(f"Model        : {model_type}")
-    print(f"Checkpoint   : {checkpoint}")
-    print(f"Samples      : {n}")
-    print(f"Decode Mode  : {'beam (width=' + str(beam_width) + ')' if beam_width > 1 else 'greedy'}")
-    print(f"{'-'*50}")
-    print(f"BLEU-4  [★]  : {bleu4_total/n:.4f}")
-    print(f"METEOR  [★]  : {meteor_total/n:.4f}")
+        if HAS_ROUGE:
+            rougeL_total += _rscorer.score(gt_str, pred_str)['rougeL'].fmeasure
 
     # BERTScore — semantic similarity via BERT embeddings
     bertscore_f1 = 0.0
@@ -135,15 +140,24 @@ def evaluate(model_type='A', checkpoint=None, num_samples=None, beam_width=1,
         print("Computing BERTScore (this may take a few minutes) ...")
         _, _, F1 = bert_score_fn(all_predictions, all_gt_strings, lang='en', verbose=False)
         bertscore_f1 = F1.mean().item()
-        print(f"BERTScore[★]  : {bertscore_f1:.4f}")
-    else:
-        print("BERTScore     : N/A (pip install bert-score to enable)")
 
+    print(f"\n{'='*56}")
+    print(f"Model        : {model_type}")
+    print(f"Checkpoint   : {checkpoint}")
+    print(f"Samples      : {n}")
+    print(f"Decode Mode  : {'beam (width=' + str(beam_width) + ')' if beam_width > 1 else 'greedy'}")
+    print(f"{'-'*56}")
+    print(f"BLEU-4  [★]  : {bleu4_total/n:.4f}")
+    print(f"METEOR  [★]  : {meteor_total/n:.4f}  (sentence-level; see report §16.9.3 for cross-paper caveat)")
+    if HAS_ROUGE:
+        print(f"ROUGE-L [★]  : {rougeL_total/n:.4f}")
+    if HAS_BERTSCORE:
+        print(f"BERTScore[★] : {bertscore_f1:.4f}")
     print(f"BLEU-1       : {bleu1_total/n:.4f}")
     print(f"BLEU-2       : {bleu2_total/n:.4f}")
     print(f"BLEU-3       : {bleu3_total/n:.4f}")
     print(f"Exact Match  : {exact_match/n*100:.2f}%")
-    print(f"{'='*50}\n")
+    print(f"{'='*56}\n")
 
     return {
         'model_type':  model_type,
@@ -152,6 +166,7 @@ def evaluate(model_type='A', checkpoint=None, num_samples=None, beam_width=1,
         'bleu3':       bleu3_total / n,
         'bleu4':       bleu4_total / n,
         'meteor':      meteor_total / n,
+        'rougeL':      rougeL_total / n if HAS_ROUGE else None,
         'bertscore':   bertscore_f1,
         'exact_match': exact_match / n * 100,
     }

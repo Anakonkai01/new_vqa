@@ -310,7 +310,52 @@
 - ✅ 3-phase training pipeline
 - ✅ Anti-overfitting (5 kỹ thuật)
 - ✅ GPU optimizations (auto-detect)
-- ✅ Evaluation (7 metrics) + Comparison
+- ✅ Evaluation (8 metrics: BLEU-1/2/3/4, METEOR, ROUGE-L, BERTScore, EM) + Comparison
 - ✅ Google Drive integration
-- ✅ Notebook pipeline (vqa_colab.ipynb)
+- ✅ Notebook pipeline (vqa_colab.ipynb + vqa_evaluate_local.ipynb)
 - ✅ Documentation đầy đủ
+
+---
+
+## Phase 9: Final Evaluation, ROUGE-L & Report Completion (2026-03-16)
+
+### Local Evaluation Notebook (`vqa_evaluate_local.ipynb`)
+
+- Rewritten từ Colab version, optimized cho RTX 5070 Ti (16GB VRAM, 28 CPUs, 32GB RAM)
+- Config: `BATCH_SIZE=256`, `BATCH_SIZE_BEAM=256`, `NUM_WORKERS=8`, `BEAM_WIDTH=3`, `NO_REPEAT_NGRAM=3`
+- Full val set evaluation: n=88,488 samples, greedy + beam search
+
+### Vocab Mismatch Bug Fix
+
+**Bug:** Old `vocab_answers.json` had spurious tokens `<task_vqa>=4, <task_cap>=5` shifting all word indices by +2.
+**Symptom:** Every prediction contained `"<task_cap>"` — BLEU-4 collapsed to 0.0107 (garbage output).
+**Fix:** Rebuilt vocab from `data/vqa_e/VQA-E_train_set.json` with `threshold=3` → exactly 4546 Q / 8648 A tokens, matching all 4 checkpoints. New vocab: A[4]=broccoli, A[5]=because (correct). BLEU-4 recovered to ~0.091.
+
+### ROUGE-L Added to Pipeline
+
+- Added `rouge_score` library (`RougeScorer(['rougeL'], use_stemmer=True)`) to `src/evaluate.py` and `src/compare.py`
+- All 4 models exceed Li et al.'s best ROUGE-L (36.33%): A=38.28%, B=42.37%, C=39.71%, D=42.70%
+
+### Beam Search Optimization
+
+- `fast_batch_beam_decode`: pre-encodes entire batch once (CNN is the bottleneck), then runs decoder-only beam search per sample
+- `max_len` reduced 50→30 (p99 answer length = 24 words), `BATCH_SIZE_BEAM=256`
+- Speedup: ~1.4× over naive per-sample beam search
+
+### Final Results (n=88,488, `outputs/evaluation_results.json`)
+
+| Model | BLEU-4 | METEOR | ROUGE-L | BERTScore | EM (Greedy) | EM (Beam) |
+|-------|--------|--------|---------|-----------|-------------|-----------|
+| A | 0.0915 | 0.3117 | 0.3828 | 0.9008 | 2.83% | 7.46% |
+| B | 0.1127 | 0.3561 | 0.4237 | 0.9081 | 4.07% | 9.94% |
+| C | 0.0988 | 0.3271 | 0.3971 | 0.9034 | 4.18% | 7.57% |
+| **D** | **0.1159** | **0.3595** | **0.4270** | **0.9085** | **5.88%** | **11.07%** |
+
+**vs. Li et al. ECCV 2018 best:** BLEU-4 +23.3%, ROUGE-L +17.5% — without multi-task supervision.
+
+### Report & Presentation
+
+- `REPORT.md` — all §15/16/17 tables updated with exact JSON values; §15.10 Efficiency Analysis added; §16.9.4 ROUGE-L comparison table complete
+- `PRESENTATION.md` — all 17 slides updated: ROUGE-L in every metric table, Slide 13 limitations updated, Contribution 5 (7-metric suite) added
+- `CONTEXT_HANDOFF.md` — updated with final session results
+- `VQA_PROJECT_PLAN.md` — results table filled with actual numbers
