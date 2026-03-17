@@ -17,7 +17,7 @@ import torch.nn.functional as F
 import sys, os 
 sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 
-from models.encoder_cnn import SimpleCNN, ResNetEncoder, SimpleCNNSpatial, ResNetSpatialEncoder
+from models.encoder_cnn import SimpleCNN, ResNetEncoder, SimpleCNNSpatial, ResNetSpatialEncoder, ConvNeXtSpatialEncoder
 from models.encoder_question import QuestionEncoder
 from models.decoder_lstm import LSTMDecoder
 from models.decoder_attention import LSTMDecoderWithAttention
@@ -291,3 +291,86 @@ class VQAModelD(nn.Module):
         # Decode with dual attention — pass img_features + q_hidden_states
         logits, coverage_loss = self.decoder((h_0, c_0), img_features, q_hidden_states, target_seq)
         return logits, coverage_loss
+
+
+# ── Tier 4: MUTAN Tucker Fusion ───────────────────────────────────────────────
+
+class MUTANFusion(nn.Module):
+    """
+    Tier-4: Multimodal Tucker Fusion (MUTAN).
+    Replaces GatedFusion for Model E/F.
+    Captures multiplicative cross-modal interactions via Tucker decomposition.
+
+    y = T_c x1 (q W_q) x2 (v W_v)  then BN → output
+    T_c ∈ R^{t_q × t_v × d_out} is a learnable core tensor (rank-constrained).
+    """
+    def __init__(self, d_q, d_v, d_out, t_q=360, t_v=360):
+        super().__init__()
+        self.W_q  = nn.Linear(d_q, t_q, bias=False)
+        self.W_v  = nn.Linear(d_v, t_v, bias=False)
+        self.T_c  = nn.Parameter(0.01 * torch.randn(t_q, t_v, d_out))
+        self.bn   = nn.BatchNorm1d(d_out)
+        self.drop = nn.Dropout(0.5)
+
+    def forward(self, q, v):
+        """q: (B, d_q), v: (B, d_v) → (B, d_out)"""
+        q_proj = self.drop(torch.tanh(self.W_q(q)))            # (B, t_q)
+        v_proj = self.drop(torch.tanh(self.W_v(v)))            # (B, t_v)
+        inter  = torch.einsum('bi,ijk->bjk', q_proj, self.T_c) # (B, t_v, d_out)
+        out    = torch.einsum('bj,bjk->bk', v_proj, inter)     # (B, d_out)
+        return self.bn(out)
+
+
+# ── Model E: ConvNeXt + DCAN + MUTAN + LSTMDecoderWithAttention ──────────────
+
+class VQAModelE(nn.Module):
+    """
+    Model E: ConvNeXt-Base + DCAN + MUTAN + LSTM+Attn decoder.
+    Flags used for training: --model E --dcan --layer_norm --use_mutan --coverage
+    Tiers implemented: 3A (ConvNeXt), 4 (MUTAN), 2 (DCAN), 1 (LayerNorm)
+    """
+    def __init__(self, vocab_size, answer_vocab_size,
+                 embed_size=512, hidden_size=1024, num_layers=2,
+                 attn_dim=512, freeze_cnn=True, dropout=0.5,
+                 use_coverage=False, use_layer_norm=False, use_dropconnect=False,
+                 use_dcan=True, use_mutan=True,
+                 pretrained_q_emb=None, pretrained_a_emb=None):
+        super().__init__()
+        self.num_layers = num_layers
+        self.model_type = 'E'
+
+        self.i_encoder = ConvNeXtSpatialEncoder(output_size=hidden_size, freeze=freeze_cnn)
+        self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
+                                         hidden_size=hidden_size, num_layers=num_layers,
+                                         dropout=dropout, pretrained_embeddings=pretrained_q_emb)
+
+        self.fusion = MUTANFusion(hidden_size, hidden_size, hidden_size) if use_mutan \
+                      else GatedFusion(hidden_size)
+
+        self.decoder = LSTMDecoderWithAttention(
+            vocab_size=answer_vocab_size, embed_size=embed_size,
+            hidden_size=hidden_size, num_layers=num_layers,
+            attn_dim=attn_dim, dropout=dropout,
+            pretrained_embeddings=pretrained_a_emb,
+            use_coverage=use_coverage,
+            use_layer_norm=use_layer_norm,
+            use_dropconnect=use_dropconnect,
+            use_dcan=use_dcan,
+        )
+
+    def forward(self, images, questions, target_seq):
+        img_features           = self.i_encoder(images)           # (B, 49, H)
+        img_features           = F.normalize(img_features, p=2, dim=-1)
+        q_feature, q_hidden    = self.q_encoder(questions)        # (B,H), (B,L,H)
+        img_mean               = img_features.mean(dim=1)         # (B, H)
+        fused                  = self.fusion(q_feature, img_mean) # (B, H)  note: q first for MUTAN
+        h_0 = fused.unsqueeze(0).repeat(self.num_layers, 1, 1)
+        c_0 = torch.zeros_like(h_0)
+        logits, cov_loss = self.decoder((h_0, c_0), img_features, q_hidden, target_seq)
+        return logits, cov_loss
+
+    def unfreeze_cnn(self):
+        self.i_encoder.unfreeze_top_layers()
+
+    def cnn_backbone_params(self):
+        return self.i_encoder.backbone_params()

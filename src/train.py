@@ -15,7 +15,7 @@ sys.path.append(os.path.dirname(__file__))
 
 # Import modules
 from dataset import VQAEDataset, vqa_collate_fn
-from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD
+from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, VQAModelE
 from glove_utils import build_glove_matrix
 from vocab import Vocabulary
 
@@ -71,7 +71,7 @@ def get_model(model_type, vocab_q_size, vocab_a_size,
               pretrained_q_emb=None, pretrained_a_emb=None,
               use_coverage=False, dropout=0.5,
               use_layer_norm=False, use_dropconnect=False,
-              use_dcan=False):
+              use_dcan=False, use_mutan=False):
     """Factory function: return the model corresponding to model_type."""
     kw = dict(pretrained_q_emb=pretrained_q_emb, pretrained_a_emb=pretrained_a_emb,
               dropout=dropout)
@@ -91,8 +91,15 @@ def get_model(model_type, vocab_q_size, vocab_a_size,
                          use_layer_norm=use_layer_norm,
                          use_dropconnect=use_dropconnect,
                          use_dcan=use_dcan, **kw)
+    elif model_type == 'E':
+        return VQAModelE(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+                         use_coverage=use_coverage,
+                         use_layer_norm=use_layer_norm,
+                         use_dropconnect=use_dropconnect,
+                         use_dcan=use_dcan,
+                         use_mutan=use_mutan, **kw)
     else:
-        raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D.")
+        raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D, E.")
 
 
 def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
@@ -126,10 +133,15 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
     max_len = decoder_input.size(1)
 
     # ── Encode image + question ──────────────────────────────────────
-    if model_type in ('C', 'D'):
+    if model_type in ('C', 'D', 'E'):
         img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B, 49, H)
         q_feat, q_hidden = model.q_encoder(questions)                    # (B, H), (B, qlen, H)
-        fusion       = model.fusion(img_features.mean(dim=1), q_feat)    # (B, H)
+        img_mean = img_features.mean(dim=1)
+        # Model E: MUTAN expects (q, v) order; C/D GatedFusion: (img_mean, q_feat)
+        if model_type == 'E':
+            fusion = model.fusion(q_feat, img_mean)
+        else:
+            fusion = model.fusion(img_mean, q_feat)
     else:
         img_feat = F.normalize(model.i_encoder(imgs), p=2, dim=1)       # (B, H)
         q_feat, _ = model.q_encoder(questions)                           # (B, H)
@@ -139,9 +151,9 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
     c = torch.zeros_like(h)
     hidden = (h, c)
 
-    # Coverage vector for models C/D
+    # Coverage vector for models C/D/E
     coverage = None
-    if model_type in ('C', 'D') and model.decoder.use_coverage:
+    if model_type in ('C', 'D', 'E') and model.decoder.use_coverage:
         coverage = imgs.new_zeros(B, img_features.size(1))  # (B, 49)
 
     # ── Step-by-step decoding ────────────────────────────────────────
@@ -151,7 +163,7 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
     for t in range(max_len):
         tok = current_token.unsqueeze(1)  # (B, 1)
 
-        if model_type in ('C', 'D'):
+        if model_type in ('C', 'D', 'E'):
             logit, hidden, _, coverage = model.decoder.decode_step(tok, hidden, img_features, q_hidden, coverage)
             # logit: (B, vocab), hidden: updated (h, c)
         else:
@@ -174,12 +186,12 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
 
 
 # ── Training set (train2014) ─────────────────────────────────────
-TRAIN_IMAGE_DIR  = "data/raw/images/train2014"
-TRAIN_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_train_set.json"
+TRAIN_IMAGE_DIR  = "data/raw/train2014"
+TRAIN_VQA_E_JSON = "data/vqa_e/VQA-E_train_set.json"
 
 # ── Validation set (val2014) ──────────────────────────────────────
-VAL_IMAGE_DIR  = "data/raw/images/val2014"
-VAL_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_val_set.json"
+VAL_IMAGE_DIR  = "data/raw/val2014"
+VAL_VQA_E_JSON = "data/vqa_e/VQA-E_val_set.json"
 
 VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
 VOCAB_A_PATH  = "data/processed/vocab_answers.json"
@@ -199,7 +211,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           accum_steps=1, warmup_epochs=3,
           max_train_samples=None, max_val_samples=None,
           dropout=0.5, no_compile=False,
-          grad_clip=5.0, label_smoothing=0.1):
+          grad_clip=5.0, label_smoothing=0.1,
+          use_mutan=False):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -269,7 +282,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                            dropout=dropout,
                            use_layer_norm=getattr(args, 'layer_norm', False),
                            use_dropconnect=getattr(args, 'dropconnect', False),
-                           use_dcan=getattr(args, 'dcan', False)).to(DEVICE)
+                           use_dcan=getattr(args, 'dcan', False),
+                           use_mutan=getattr(args, 'use_mutan', False)).to(DEVICE)
     criterion = nn.CrossEntropyLoss(ignore_index=0, label_smoothing=label_smoothing)
 
     # ── Optimizer — differential LR when fine-tuning the CNN backbone ──────────
@@ -277,7 +291,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     # Models B/D use frozen ResNet → finetune_cnn selectively unfreezes
     # layer3 + layer4 with a smaller LR (cnn_lr_factor × base_lr) to avoid
     # catastrophic forgetting of pretrained ImageNet knowledge.
-    if finetune_cnn and model_type in ('B', 'D'):
+    if finetune_cnn and model_type in ('B', 'D', 'E'):
         model.i_encoder.unfreeze_top_layers()
         backbone_param_ids = {id(p) for p in model.i_encoder.backbone_params()}
         backbone_params = [p for p in model.parameters()
@@ -389,7 +403,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         print(f"  Resumed at epoch {start_epoch} | best_val_loss: {best_val_loss:.4f}")
 
     print(f"Model: {model_type} | Device: {DEVICE} | Dropout: {dropout}")
-    if use_coverage and model_type in ('C', 'D'):
+    if use_coverage and model_type in ('C', 'D', 'E'):
         print(f"Coverage Mechanism: ON | λ = {coverage_lambda}")
     if accum_steps > 1:
         print(f"Gradient Accum   : {accum_steps} steps (effective batch = {batch_size * accum_steps})")
@@ -577,7 +591,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a VQA model.")
-    parser.add_argument('--model',      type=str,   default='A', choices=['A', 'B', 'C', 'D'],
+    parser.add_argument('--model',      type=str,   default='A', choices=['A', 'B', 'C', 'D', 'E'],
                         help='Model architecture (default: A)')
     parser.add_argument('--epochs',     type=int,   default=10,
                         help='Number of training epochs (default: 10)')
@@ -618,7 +632,10 @@ if __name__ == "__main__":
                         help='Tier 1B: DropConnect on hidden-to-hidden weights (AWD-LSTM)')
     # Tier 2: Dense Co-Attention
     parser.add_argument('--dcan', action='store_true',
-                        help='Tier 2: Dense Co-Attention replacing BahdanauAttention (C/D only)')
+                        help='Tier 2: Dense Co-Attention replacing BahdanauAttention (C/D/E only)')
+    # Tier 4: MUTAN Tucker Fusion
+    parser.add_argument('--use_mutan', action='store_true',
+                        help='Tier 4: MUTAN Tucker Fusion instead of GatedFusion (Model E only)')
     parser.add_argument('--accum_steps', type=int, default=1,
                         help='Gradient accumulation steps (effective batch = batch_size × accum_steps)')
     parser.add_argument('--warmup_epochs', type=int, default=3,
@@ -647,7 +664,8 @@ if __name__ == "__main__":
           accum_steps=args.accum_steps, warmup_epochs=args.warmup_epochs,
           max_train_samples=args.max_train_samples, max_val_samples=args.max_val_samples,
           dropout=args.dropout, no_compile=args.no_compile,
-          grad_clip=args.grad_clip, label_smoothing=args.label_smoothing)
+          grad_clip=args.grad_clip, label_smoothing=args.label_smoothing,
+          use_mutan=args.use_mutan)
         
         
         

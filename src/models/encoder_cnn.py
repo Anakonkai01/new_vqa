@@ -197,7 +197,53 @@ class ResNetSpatialEncoder(nn.Module):
         return out                  # (batch, 49, output_size)
 
 
-# test 
+class ConvNeXtSpatialEncoder(nn.Module):
+    """
+    Tier-3A: ConvNeXt-Base spatial encoder.
+    Pure CNN (no transformers). Rivals ViT accuracy.
+    Output: (B, 49, output_size) — same shape as ResNetSpatialEncoder.
+
+    ConvNeXt-Base channel progression: 128→256→512→1024
+    features[7] (stage 3) → (B, 1024, 7, 7) → reshape → (B, 49, 1024)
+    No projection needed when output_size=1024 (ConvNeXt-Base already outputs 1024).
+    """
+    def __init__(self, output_size=1024, freeze=True):
+        super().__init__()
+        from torchvision.models import convnext_base, ConvNeXt_Base_Weights
+        backbone    = convnext_base(weights=ConvNeXt_Base_Weights.IMAGENET1K_V1)
+        self.features    = backbone.features   # 8 blocks: stem + 4 stages + downsamples
+        self.output_size = output_size
+        # ConvNeXt-Base final channel dim is 1024; project only if different
+        self.proj = nn.Identity() if output_size == 1024 else \
+                    nn.Conv2d(1024, output_size, kernel_size=1)
+
+        if freeze:
+            for p in self.features.parameters():
+                p.requires_grad = False
+
+    def forward(self, x):
+        # x: (B, 3, 224, 224)
+        feat = self.features(x)                            # (B, 1024, 7, 7)
+        feat = self.proj(feat)                             # (B, output_size, 7, 7)
+        B, C, H, W = feat.shape
+        feat = feat.permute(0, 2, 3, 1).contiguous()      # (B, 7, 7, C)
+        feat = feat.view(B, H * W, C)                     # (B, 49, output_size)
+        return feat
+
+    def unfreeze_top_layers(self):
+        """Unfreeze last 2 stages: features[5] (27 blocks) + features[6-7] (downsample + stage3)."""
+        for block in [self.features[5], self.features[6], self.features[7]]:
+            for p in block.parameters():
+                p.requires_grad = True
+        if self.output_size != 1024:
+            for p in self.proj.parameters():
+                p.requires_grad = True
+
+    def backbone_params(self):
+        return [p for p in self.features.parameters() if p.requires_grad]
+
+
+# test
 if __name__ == "__main__":
     import torch
     model = SimpleCNN(output_size=1024)
