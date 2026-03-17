@@ -1059,7 +1059,7 @@ All four models (A, B, C, D) were trained using the three-phase progressive trai
 
 ### 14.1 Training Curves
 
-![Training and Validation Loss Curves](outputs/eval_training_curves.png)
+![Training and Validation Loss Curves](outputs/training_curves.png)
 
 *Figure 15.1: Training and validation loss curves for all four models. The three training phases are visible: Phase 1 (teacher forcing, epochs 1–10), Phase 2 (fine-tuning + lower LR, epochs 11–15), and Phase 3 (scheduled sampling, epochs 16+). Note the characteristic temporary loss increase when scheduled sampling begins at epoch 16 — this is expected as the model transitions from GT-fed to self-fed inputs.*
 
