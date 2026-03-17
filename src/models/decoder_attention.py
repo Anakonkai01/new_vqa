@@ -115,12 +115,16 @@ class MultiHeadCrossAttention(nn.Module):
             self.cov_scale = nn.Parameter(torch.zeros(1))
 
     def forward(self, query: torch.Tensor, memory: torch.Tensor,
-                coverage: torch.Tensor = None):
+                coverage: torch.Tensor = None, mask: torch.Tensor = None):
         """
         Args:
             query    : (B, H)    — LSTM h_t
-            memory   : (B, S, H) — image regions (49) or question tokens
+            memory   : (B, S, H) — image regions (49/k) or question tokens
             coverage : (B, S) or None — cumulative attention (image side only)
+            mask     : (B, S) bool or None — True = valid position, False = padding.
+                       Used for Model F variable-length BUTD regions.
+                       Padding positions are set to -inf before softmax so they
+                       receive zero attention weight (no attention leakage).
 
         Returns:
             context  : (B, H)    — attended summary of memory
@@ -145,6 +149,15 @@ class MultiHeadCrossAttention(nn.Module):
         if self.use_coverage and coverage is not None:
             # coverage: (B, S) → (B, 1, 1, S) to broadcast over heads and query dim
             scores = scores + self.cov_scale * coverage.unsqueeze(1).unsqueeze(2)
+
+        # Mask padding regions before softmax.
+        # Without this, softmax treats zero-padded positions as valid and assigns
+        # them non-zero probability, leaking attention into garbage vectors.
+        if mask is not None:
+            # mask: (B, S) bool → (B, 1, 1, S) to broadcast over heads and query dim
+            # ~mask marks padding positions (False → True after invert) → set to -inf
+            mask_expanded = mask.unsqueeze(1).unsqueeze(2)                # (B, 1, 1, S)
+            scores = scores.masked_fill(~mask_expanded, float('-inf'))
 
         alpha = F.softmax(scores, dim=-1)                                 # (B, nh, 1, S)
 
@@ -273,16 +286,19 @@ class LSTMDecoderWithAttention(nn.Module):
     # ── Teacher-forcing forward (training) ─────────────────────────────────────
 
     def forward(self, encoder_hidden, img_features, q_hidden_states, target_seq,
-                q_token_ids=None):
+                q_token_ids=None, img_mask=None):
         """
         Training mode — Teacher Forcing with dual MHCA.
 
         Args:
             encoder_hidden   : (num_layers, B, H) — initial (h, c) from fusion
-            img_features     : (B, 49, H)         — spatial CNN output
+            img_features     : (B, S, H)          — spatial CNN output (S=49 fixed,
+                                                    or S=max_k padded for Model F)
             q_hidden_states  : (B, q_len, H)       — question encoder states
             target_seq       : (B, max_len)        — [<start>, w1, w2, ...]
             q_token_ids      : (B, q_len) or None  — required for PGN
+            img_mask         : (B, S) bool or None — valid region mask for Model F.
+                               Passed to img_mhca to zero out padding attention.
 
         Returns:
             logits        : (B, max_len, vocab_size)
@@ -309,8 +325,9 @@ class LSTMDecoderWithAttention(nn.Module):
             embed_t = embeds[:, t, :]                         # (B, E)
             h_top   = hidden[0][-1]                           # (B, H) — last layer
 
-            # Image cross-attention (with optional coverage bias)
-            img_context, img_alpha = self.img_mhca(h_top, img_features, coverage)
+            # Image cross-attention (with optional coverage bias + padding mask)
+            img_context, img_alpha = self.img_mhca(
+                h_top, img_features, coverage, mask=img_mask)
 
             # Question cross-attention (q_alpha → PGN copy distribution)
             q_context, q_alpha = self.q_mhca(h_top, q_hidden_states)
@@ -345,23 +362,24 @@ class LSTMDecoderWithAttention(nn.Module):
     # ── Autoregressive decode step (inference) ─────────────────────────────────
 
     def decode_step(self, token, hidden, img_features, q_hidden_states,
-                    coverage=None, q_token_ids=None):
+                    coverage=None, q_token_ids=None, img_mask=None):
         """
         Inference mode — one autoregressive step.
 
         Args:
             token           : (B, 1)           — current token id
             hidden          : (h, c) each (num_layers, B, H)
-            img_features    : (B, 49, H)
+            img_features    : (B, S, H)        — S=49 fixed or S=max_k padded (Model F)
             q_hidden_states : (B, q_len, H)
-            coverage        : (B, 49) or None  — cumulative image attention
+            coverage        : (B, S) or None   — cumulative image attention
             q_token_ids     : (B, q_len) or None — required for PGN
+            img_mask        : (B, S) bool or None — valid region mask for Model F
 
         Returns:
             logit    : (B, V)
             hidden   : updated (h, c)
-            img_alpha: (B, 49)  — for visualization
-            coverage : (B, 49) or None — updated cumulative attention
+            img_alpha: (B, S)  — for visualization
+            coverage : (B, S) or None — updated cumulative attention
         """
         embed = self.dropout(self.embedding(token))   # (B, 1, E)
         if self.embed_proj is not None:
@@ -369,7 +387,8 @@ class LSTMDecoderWithAttention(nn.Module):
         embed_1d = embed.squeeze(1)                   # (B, E)
         h_top    = hidden[0][-1]                      # (B, H)
 
-        img_context, img_alpha = self.img_mhca(h_top, img_features, coverage)
+        img_context, img_alpha = self.img_mhca(
+            h_top, img_features, coverage, mask=img_mask)
         q_context,   q_alpha   = self.q_mhca(h_top, q_hidden_states)
 
         # Update coverage

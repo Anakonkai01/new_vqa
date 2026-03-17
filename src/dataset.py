@@ -301,11 +301,24 @@ class BUTDDataset(VQAEDataset):
 def butd_collate_fn(batch):
     """
     Collate for BUTDDataset. Pads the region (k) dimension across the batch.
-    feat shape per sample: (k_i, feat_dim) — k_i may vary.
+    feat shape per sample: (k_i, feat_dim) — k_i may vary across images.
     pad_sequence pads k dimension: output (B, max_k, feat_dim).
+
+    Returns a 4-tuple: (feats_padded, q_padded, a_padded, img_mask)
+      img_mask : (B, max_k) bool — True = valid region, False = zero-padding.
+
+    The mask is required downstream to prevent two bugs:
+      1. Attention leakage: softmax assigns probability mass to padding zeros
+         in MultiHeadCrossAttention unless those positions are masked to -inf.
+      2. Global feature dilution: mean(dim=1) averages over padding zeros,
+         deflating the magnitude by a factor of max_k / actual_k.
+    Both are fixed by threading img_mask through the decoder.
     """
     feats, questions, answers = zip(*batch)
     feats_padded = pad_sequence(feats,     batch_first=True)  # (B, max_k, feat_dim)
     q_padded     = pad_sequence(questions, batch_first=True)
     a_padded     = pad_sequence(answers,   batch_first=True)
-    return feats_padded, q_padded, a_padded
+    # True where the feature vector is non-zero (i.e., a real region, not padding).
+    # abs().sum(-1) > 0 is robust to the L2-normalised features in VQAModelF.forward.
+    img_mask = feats_padded.abs().sum(dim=-1) > 0             # (B, max_k) bool
+    return feats_padded, q_padded, a_padded, img_mask

@@ -1,37 +1,26 @@
 #!/usr/bin/env bash
 # =============================================================================
-# Model E — Full 4-Phase Training Script
+# Model F — Full 4-Phase Training Script
 # RTX 5070 Ti (16 GB VRAM, Blackwell SM 12.0, BF16 native)
 #
-# Architecture: ConvNeXt-Base + MHCA + MUTAN + LayerNorm-BiLSTM + GloVe 840B
+# Architecture: BUTD (pre-extracted Faster R-CNN 2048-d) + MHCA+img_mask
+#               + MUTAN + LayerNorm-BiLSTM + GloVe 840B
 #
-# Flag logic per phase (critical — do NOT move to COMMON blindly):
+# Same flag logic as train_model_e.sh — see comments there for rationale:
+#   --mix_vqa    → Phase 1 ONLY
+#   --curriculum → Phases 2-4 ONLY
+#   --focal      → Phases 1-3 ONLY (disabled in Phase 4 SCST)
 #
-#   --mix_vqa    PHASE 1 ONLY.  Mixes 70% VQA v2.0 to widen vocab coverage.
-#                               Mutually exclusive with --curriculum (train.py L440-450).
-#                               If both present, curriculum is SKIPPED with a warning.
-#                               Phases 2-4 must be pure VQA-E for explanation quality.
-#
-#   --curriculum PHASES 2-4.   Question-type progressive curriculum.
-#                               Cannot activate in Phase 1 (blocked by --mix_vqa).
-#                               Activates after vocab is established in Phase 1.
-#
-#   --focal      PHASES 1-3.   SequenceFocalLoss for rare-token emphasis.
-#                               NOT used in Phase 4: SCST uses plain CE as the
-#                               supervised anchor — focal loss destabilizes RL.
-#                               (Also: train.py L517-520 silently disables focal
-#                               if --pgn is also active; keep logic explicit here.)
+# Prerequisites:
+#   python src/scripts/extract_butd_features.py \
+#       --image_dir data/raw --output_dir data/butd_features \
+#       --splits train2014 val2014
+#   python src/scripts/1_build_vocab.py
 #
 # Usage:
-#   bash train_model_e.sh               # all 4 phases
-#   bash train_model_e.sh 1             # Phase 1 only
-#   bash train_model_e.sh 2             # Phase 2 (requires phase 1 checkpoint)
-#   bash train_model_e.sh 3             # Phase 3
-#   bash train_model_e.sh 4             # Phase 4 SCST
-#
-# Overrides:
-#   BATCH_SIZE=192 bash train_model_e.sh
-#   WANDB=1 bash train_model_e.sh
+#   bash train_model_f.sh               # all 4 phases
+#   bash train_model_f.sh 1             # Phase 1 only
+#   BATCH_SIZE=192 WANDB=1 bash train_model_f.sh
 # =============================================================================
 
 set -euo pipefail
@@ -39,8 +28,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# ── Defaults ──────────────────────────────────────────────────────────────────
-BATCH_SIZE="${BATCH_SIZE:-128}"
+BATCH_SIZE="${BATCH_SIZE:-192}"      # no CNN in forward pass → higher batch safe
 ACCUM_STEPS="${ACCUM_STEPS:-1}"
 NUM_WORKERS="${NUM_WORKERS:-16}"
 DROPOUT="${DROPOUT:-0.3}"
@@ -51,10 +39,8 @@ if [ "${WANDB:-0}" = "1" ]; then
     WANDB_FLAG="--wandb --wandb_project ${WANDB_PROJECT}"
 fi
 
-# ── COMMON: flags that are identical across ALL 4 phases ─────────────────────
-# DO NOT add --mix_vqa, --curriculum, or --focal here — they are phase-specific.
 COMMON="
-  --model E
+  --model F
   --use_mutan
   --layer_norm
   --dropconnect
@@ -75,90 +61,64 @@ COMMON="
 RUN_PHASE="${1:-all}"
 
 # =============================================================================
-# Phase 1 — Baseline (15 epochs, LR=1e-3, ConvNeXt FROZEN)
-#
-# Flags:
-#   --mix_vqa       ON  → widens vocab by mixing 70% VQA v2.0
-#   --curriculum    OFF → blocked by --mix_vqa (train.py L449-450)
-#   --focal         ON  → SequenceFocalLoss for rare-token emphasis
-#
-# Target: new modules (MHCA, MUTAN, decoder) fully converge.
-# 15 epochs (up from 10) because with LR warmup=3, effective training
-# starts at epoch 4. Early stopping patience=5 will abort if stuck.
+# Phase 1 — Baseline (15 epochs, LR=1e-3)
+# mix_vqa: ON | curriculum: OFF (blocked) | focal: ON
 # =============================================================================
 run_phase1() {
     echo ""
     echo "════════════════════════════════════════════════════════════"
-    echo "  PHASE 1 — Baseline (15 ep, lr=1e-3, ConvNeXt frozen)"
+    echo "  PHASE 1 — Baseline (15 ep, lr=1e-3)"
     echo "  mix_vqa: ON | curriculum: OFF (blocked) | focal: ON"
     echo "  Batch: ${BATCH_SIZE}×${ACCUM_STEPS} = $((BATCH_SIZE * ACCUM_STEPS)) effective"
     echo "════════════════════════════════════════════════════════════"
     # shellcheck disable=SC2086
     python src/train.py ${COMMON} \
-        --epochs 20 \
+        --epochs 15 \
         --lr 1e-3 \
         --warmup_epochs 3 \
         --mix_vqa --mix_vqa_fraction 0.7 \
         --focal \
         --early_stopping 5 \
         --phase 1 \
-        --wandb_run_name "model_e_phase1_b${BATCH_SIZE}" \
-        --wandb_tags "modelE,phase1,frozen-cnn,mix-vqa"
-    echo "✓ Phase 1 done → checkpoints/model_e_best.pth"
+        --wandb_run_name "model_f_phase1_b${BATCH_SIZE}" \
+        --wandb_tags "modelF,phase1,butd,mix-vqa"
+    echo "✓ Phase 1 done → checkpoints/model_f_best.pth"
 }
 
 # =============================================================================
-# Phase 2 — Fine-tune ConvNeXt (12 epochs, LR=5e-4)
-#
-# Flags:
-#   --mix_vqa       OFF → pure VQA-E only; model focuses on explanation quality
-#   --curriculum    ON  → question-type curriculum now active
-#   --focal         ON  → still use focal for rare token emphasis
-#
-# 12 epochs (up from 5): ConvNeXt-Base is deep. At LR×0.1=5e-5 for the CNN,
-# gradient updates per epoch are small. More epochs needed for CNN to adapt
-# its ImageNet representations toward "Why/How" visual concepts.
-#
-# If val_loss is decreasing slowly after epoch 6-8, try --cnn_lr_factor 0.2.
+# Phase 2 — Extended Training (10 epochs, LR=5e-4)
+# No CNN fine-tune for Model F (features are pre-extracted).
+# mix_vqa: OFF | curriculum: ON | focal: ON
 # =============================================================================
 run_phase2() {
     echo ""
     echo "════════════════════════════════════════════════════════════"
-    echo "  PHASE 2 — CNN Fine-tune (12 ep, lr=5e-4, ConvNeXt unfrozen)"
+    echo "  PHASE 2 — Extended Training (10 ep, lr=5e-4)"
     echo "  mix_vqa: OFF | curriculum: ON | focal: ON"
     echo "════════════════════════════════════════════════════════════"
-    RESUME="checkpoints/model_e_resume.pth"
+    RESUME="checkpoints/model_f_resume.pth"
     if [ ! -f "${RESUME}" ]; then
         echo "ERROR: ${RESUME} not found. Run Phase 1 first."
         exit 1
     fi
     # shellcheck disable=SC2086
     python src/train.py ${COMMON} \
-        --epochs 20 \
+        --epochs 10 \
         --lr 5e-4 \
         --warmup_epochs 0 \
         --curriculum \
         --focal \
-        --finetune_cnn \
-        --cnn_lr_factor 0.1 \
-        --early_stopping 5 \
+        --early_stopping 3 \
         --resume "${RESUME}" \
         --phase 2 \
-        --wandb_run_name "model_e_phase2_b${BATCH_SIZE}" \
-        --wandb_tags "modelE,phase2,finetune-cnn,curriculum"
-    echo "✓ Phase 2 done → checkpoints/model_e_best.pth"
+        --wandb_run_name "model_f_phase2_b${BATCH_SIZE}" \
+        --wandb_tags "modelF,phase2,butd,curriculum"
+    echo "✓ Phase 2 done → checkpoints/model_f_best.pth"
 }
 
 # =============================================================================
 # Phase 3 — Scheduled Sampling (7 epochs, LR=2e-4)
-#
-# Flags:
-#   --mix_vqa       OFF → pure VQA-E
-#   --curriculum    ON
-#   --focal         ON
-#
-# 7 epochs (up from 5): LSTM needs time to adjust to its own output distribution.
-# If repetition artifacts are visible in outputs, add more epochs here.
+# mix_vqa: OFF | curriculum: ON | focal: ON
 # =============================================================================
 run_phase3() {
     echo ""
@@ -166,7 +126,7 @@ run_phase3() {
     echo "  PHASE 3 — Scheduled Sampling (7 ep, lr=2e-4)"
     echo "  mix_vqa: OFF | curriculum: ON | focal: ON"
     echo "════════════════════════════════════════════════════════════"
-    RESUME="checkpoints/model_e_resume.pth"
+    RESUME="checkpoints/model_f_resume.pth"
     if [ ! -f "${RESUME}" ]; then
         echo "ERROR: ${RESUME} not found. Run Phase 2 first."
         exit 1
@@ -178,40 +138,27 @@ run_phase3() {
         --warmup_epochs 0 \
         --curriculum \
         --focal \
-        --finetune_cnn \
-        --cnn_lr_factor 0.1 \
         --scheduled_sampling \
         --ss_k 5 \
         --early_stopping 3 \
         --resume "${RESUME}" \
         --phase 3 \
-        --wandb_run_name "model_e_phase3_b${BATCH_SIZE}" \
-        --wandb_tags "modelE,phase3,scheduled-sampling,curriculum"
-    echo "✓ Phase 3 done → checkpoints/model_e_best.pth"
+        --wandb_run_name "model_f_phase3_b${BATCH_SIZE}" \
+        --wandb_tags "modelF,phase3,scheduled-sampling,curriculum"
+    echo "✓ Phase 3 done → checkpoints/model_f_best.pth"
 }
 
 # =============================================================================
 # Phase 4 — SCST RL (3 epochs, LR=5e-5)
-#
-# Flags:
-#   --mix_vqa       OFF → pure VQA-E
-#   --curriculum    ON  → keep difficulty pacing during RL
-#   --focal         OFF → SCST uses plain CE as supervised anchor.
-#                         Focal loss re-weighting destabilizes REINFORCE gradients.
-#                         (Plain CE at 50% weight keeps generation stable.)
-#
-# CRITICAL: Do NOT extend beyond 5 epochs.
-# RL directly optimizes BLEU score — too many epochs causes "Language Drift":
-# the model learns BLEU-gaming patterns (degenerate repetition that scores high
-# but reads unnaturally). 3 epochs is the safe zone.
+# mix_vqa: OFF | curriculum: ON | focal: OFF (plain CE for RL stability)
 # =============================================================================
 run_phase4() {
     echo ""
     echo "════════════════════════════════════════════════════════════"
-    echo "  PHASE 4 — SCST RL (3 ep, lr=5e-5, REINFORCE+CE)"
+    echo "  PHASE 4 — SCST RL (3 ep, lr=5e-5)"
     echo "  mix_vqa: OFF | curriculum: ON | focal: OFF (plain CE)"
     echo "════════════════════════════════════════════════════════════"
-    RESUME="checkpoints/model_e_resume.pth"
+    RESUME="checkpoints/model_f_resume.pth"
     if [ ! -f "${RESUME}" ]; then
         echo "ERROR: ${RESUME} not found. Run Phase 3 first."
         exit 1
@@ -222,8 +169,6 @@ run_phase4() {
         --lr 5e-5 \
         --warmup_epochs 0 \
         --curriculum \
-        --finetune_cnn \
-        --cnn_lr_factor 0.1 \
         --scst \
         --scst_lambda 0.5 \
         --scst_bleu_weight 0.5 \
@@ -231,18 +176,16 @@ run_phase4() {
         --scst_length_bonus 0.0 \
         --resume "${RESUME}" \
         --phase 4 \
-        --wandb_run_name "model_e_phase4_b${BATCH_SIZE}" \
-        --wandb_tags "modelE,phase4,scst-rl,curriculum"
-    echo "✓ Phase 4 done → checkpoints/model_e_best.pth"
+        --wandb_run_name "model_f_phase4_b${BATCH_SIZE}" \
+        --wandb_tags "modelF,phase4,scst-rl,curriculum"
+    echo "✓ Phase 4 done → checkpoints/model_f_best.pth"
 }
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 echo ""
-echo "VQA-E Model E — RTX 5070 Ti (Blackwell, BF16)"
+echo "VQA-E Model F (BUTD) — RTX 5070 Ti (Blackwell, BF16)"
 echo "Batch: ${BATCH_SIZE} | Workers: ${NUM_WORKERS} | Dropout: ${DROPOUT}"
-echo "W&B: ${WANDB:-0}"
-echo ""
-echo "Phase schedule: 15 + 12 + 7 + 3 = 37 total epochs"
+echo "Phase schedule: 15 + 10 + 7 + 3 = 35 total epochs"
 
 case "${RUN_PHASE}" in
     1)    run_phase1 ;;
@@ -256,12 +199,12 @@ case "${RUN_PHASE}" in
         run_phase4
         echo ""
         echo "══════════════════════════════════════════════"
-        echo "  All 4 phases complete (37 epochs total)"
-        echo "  Best checkpoint: checkpoints/model_e_best.pth"
+        echo "  All 4 phases complete (35 epochs total)"
+        echo "  Best checkpoint: checkpoints/model_f_best.pth"
         echo "══════════════════════════════════════════════"
         ;;
     *)
-        echo "Usage: bash train_model_e.sh [1|2|3|4|all]"
+        echo "Usage: bash train_model_f.sh [1|2|3|4|all]"
         exit 1
         ;;
 esac

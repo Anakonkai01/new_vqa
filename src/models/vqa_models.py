@@ -422,20 +422,33 @@ class VQAModelF(nn.Module):
             use_pgn=use_pgn,
         )
 
-    def forward(self, img_feats, questions, target_seq):
+    def forward(self, img_feats, questions, target_seq, img_mask=None):
         """
-        img_feats : (B, k, feat_dim)  — pre-extracted BUTD features
+        img_feats : (B, max_k, feat_dim) — pre-extracted BUTD features (padded)
         questions : (B, q_len)
         target_seq: (B, max_len)
+        img_mask  : (B, max_k) bool or None — True = valid region, False = padding.
+                    From butd_collate_fn. Required for correct masked mean and
+                    masked attention in the decoder.
         """
         img_features        = F.normalize(self.i_encoder(img_feats), p=2, dim=-1)  # (B, k, H)
         q_feature, q_hidden = self.q_encoder(questions)
-        img_mean            = img_features.mean(dim=1)
-        fused               = self.fusion(q_feature, img_mean)  # MUTAN: q first
+
+        # Masked mean: exclude padding zeros from the global representation.
+        # Plain mean(dim=1) deflates magnitude by max_k/actual_k (e.g. if an image
+        # has 20 real regions but max_k=36, mean is diluted by 36/20 = 1.8×).
+        if img_mask is not None:
+            valid_counts = img_mask.sum(dim=1, keepdim=True).float().clamp(min=1.0)
+            img_mean = (img_features * img_mask.unsqueeze(-1).float()).sum(dim=1) \
+                       / valid_counts                                    # (B, H)
+        else:
+            img_mean = img_features.mean(dim=1)
+
+        fused = self.fusion(q_feature, img_mean)                        # MUTAN: q first
         h_0 = fused.unsqueeze(0).repeat(self.num_layers, 1, 1)
         c_0 = torch.zeros_like(h_0)
         logits, cov_loss = self.decoder(
             (h_0, c_0), img_features, q_hidden, target_seq,
-            q_token_ids=questions,
+            q_token_ids=questions, img_mask=img_mask,
         )
         return logits, cov_loss

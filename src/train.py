@@ -122,7 +122,8 @@ def get_model(model_type, vocab_q_size, vocab_a_size,
         raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D, E, F.")
 
 
-def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
+def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon,
+               img_mask=None):
     """
     Scheduled Sampling forward pass (token-level, Bengio et al. 2015).
 
@@ -154,9 +155,15 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
 
     # ── Encode image + question ──────────────────────────────────────
     if model_type in ('C', 'D', 'E', 'F'):
-        img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B, 49/k, H)
+        img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B, S, H)
         q_feat, q_hidden = model.q_encoder(questions)                    # (B, H), (B, qlen, H)
-        img_mean = img_features.mean(dim=1)
+        # Model F: masked mean to exclude padding zeros (imgs is feat tensor here)
+        if model_type == 'F' and img_mask is not None:
+            valid_counts = img_mask.sum(dim=1, keepdim=True).float().clamp(min=1.0)
+            img_mean = (img_features * img_mask.unsqueeze(-1).float()).sum(dim=1) \
+                       / valid_counts
+        else:
+            img_mean = img_features.mean(dim=1)
         # Models E/F: MUTAN expects (q, v) order; C/D GatedFusion: (img_mean, q_feat)
         if model_type in ('E', 'F'):
             fusion = model.fusion(q_feat, img_mean)
@@ -185,7 +192,8 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
 
         if model_type in ('C', 'D', 'E', 'F'):
             logit, hidden, _, coverage = model.decoder.decode_step(
-                tok, hidden, img_features, q_hidden, coverage, q_token_ids=questions
+                tok, hidden, img_features, q_hidden, coverage,
+                q_token_ids=questions, img_mask=img_mask,
             )
             # logit: (B, vocab), hidden: updated (h, c)
         else:
@@ -207,17 +215,28 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
     return torch.stack(logits_list, dim=1)  # (B, max_len, vocab_size)
 
 
-def css_forward(model, model_type, imgs, questions, augmentor):
+def css_forward(model, model_type, imgs, questions, augmentor, img_mask=None):
     """
     Tier-6: Compute CSS contrastive loss without running the full decoder.
     Encodes both real and counterfactual samples, compares fused representations.
 
+    img_mask : (B, max_k) bool or None — valid region mask for Model F.
+               Used to compute masked mean instead of plain mean, preventing
+               padding zeros from diluting the global image representation.
+
     Returns: scalar contrastive loss tensor
     """
+    def _masked_mean(feats, mask):
+        """Mean over valid regions only; falls back to plain mean if mask is None."""
+        if mask is None:
+            return feats.mean(dim=1)
+        valid = mask.sum(dim=1, keepdim=True).float().clamp(min=1.0)
+        return (feats * mask.unsqueeze(-1).float()).sum(dim=1) / valid
+
     # Encode real batch (reuse encoder already warmed up)
     with torch.no_grad():
-        img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B, N, H)
-        img_mean     = img_features.mean(dim=1)                          # (B, H)
+        img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B, S, H)
+        img_mean     = _masked_mean(img_features, img_mask)              # (B, H)
         q_feature, _ = model.q_encoder(questions)                        # (B, H)
 
     # Generate counterfactuals (no gradient — pure augmentation)
@@ -225,7 +244,7 @@ def css_forward(model, model_type, imgs, questions, augmentor):
 
     # Compute fused real representation (WITH gradient for the fusion/encoders)
     img_features_grad = F.normalize(model.i_encoder(imgs), p=2, dim=-1)
-    img_mean_grad     = img_features_grad.mean(dim=1)
+    img_mean_grad     = _masked_mean(img_features_grad, img_mask)
     q_feature_grad, _ = model.q_encoder(questions)
     if model_type in ('E', 'F'):
         f_real = model.fusion(q_feature_grad, img_mean_grad)    # MUTAN: q first
@@ -233,7 +252,8 @@ def css_forward(model, model_type, imgs, questions, augmentor):
         f_real = model.fusion(img_mean_grad, q_feature_grad)    # GatedFusion: img first
 
     # Visual CF: zeroed image regions + original questions (no gradient through cf_img)
-    cf_img_mean = cf_img_feats.mean(dim=1)  # (B, H)  — already detached
+    # Note: CSS zeros real regions, not padding — img_mask still valid for cf_img_feats
+    cf_img_mean = _masked_mean(cf_img_feats, img_mask)          # (B, H)  — already detached
     if model_type in ('E', 'F'):
         f_cf_visual = model.fusion(q_feature_grad, cf_img_mean)
     else:
@@ -285,6 +305,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           use_css=False, css_lambda=0.5, css_margin=1.0,
           use_q_highway=False, use_char_cnn=False,
           use_scst=False, scst_lambda=0.5,
+          scst_bleu_weight=0.5, scst_meteor_weight=0.5, scst_length_bonus=0.0,
           use_wandb=False, wandb_project='vqa-e', wandb_run_name=None,
           wandb_tags=None, phase=None,
           use_curriculum=False,
@@ -317,6 +338,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
             scheduled_sampling=scheduled_sampling, ss_k=ss_k,
             use_css=use_css, css_lambda=css_lambda,
             use_scst=use_scst, scst_lambda=scst_lambda,
+            scst_bleu_weight=scst_bleu_weight, scst_meteor_weight=scst_meteor_weight,
+            scst_length_bonus=scst_length_bonus,
             use_q_highway=use_q_highway, use_char_cnn=use_char_cnn,
             augment=augment,
             use_curriculum=use_curriculum,
@@ -626,7 +649,14 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         print(f"Coverage Mechanism: ON | λ = {coverage_lambda}")
 
     if use_scst:
+        from training.scst import _METEOR_AVAILABLE
         print(f"SCST (Tier 8)     : ON | λ_scst={scst_lambda} (mixed CE + REINFORCE)")
+        print(f"  Reward          : {scst_bleu_weight:.2f}×BLEU-4 + {scst_meteor_weight:.2f}×METEOR"
+              f" + {scst_length_bonus:.2f}×LengthBonus")
+        if scst_meteor_weight > 0 and not _METEOR_AVAILABLE:
+            print("  WARNING: METEOR requested but nltk.translate.meteor_score not found.")
+            print("           Falling back to unigram F1 for METEOR component.")
+            print("           Install: pip install nltk && python -m nltk.downloader wordnet")
 
     # Tier 6: CSS augmentor (only for C/D/E)
     css_augmentor = None
@@ -673,7 +703,16 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         total_loss = 0
         optimizer.zero_grad()  # zero once before accumulation loop
 
-        for step_idx, (imgs, questions, answer) in enumerate(train_loader):
+        for step_idx, batch in enumerate(train_loader):
+            # Model F returns a 4-tuple (feats, questions, answers, img_mask);
+            # all other models return a 3-tuple.
+            if model_type == 'F':
+                imgs, questions, answer, img_mask = batch
+                img_mask = img_mask.to(DEVICE)
+            else:
+                imgs, questions, answer = batch
+                img_mask = None
+
             imgs      = imgs.to(DEVICE)
             questions = questions.to(DEVICE)
             answer    = answer.to(DEVICE)
@@ -688,11 +727,13 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                     # epoch 0 -> epsilon~1 (mostly GT), last epoch -> epsilon lowers
                     epsilon = ss_k / (ss_k + math.exp(epoch / ss_k))
                     logits  = ss_forward(model, model_type, imgs, questions,
-                                         decoder_input, epsilon)
+                                         decoder_input, epsilon, img_mask=img_mask)
                     coverage_loss = torch.tensor(0.0, device=DEVICE)
                 else:
-                    result = model(imgs, questions, decoder_input)
-                    # Models C/D return (logits, coverage_loss), A/B return logits
+                    result = model(imgs, questions, decoder_input, img_mask=img_mask) \
+                             if model_type == 'F' \
+                             else model(imgs, questions, decoder_input)
+                    # Models C/D/E/F return (logits, coverage_loss), A/B return logits
                     if isinstance(result, tuple):
                         logits, coverage_loss = result
                     else:
@@ -707,7 +748,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                 # Total loss = CE + λ_cov * coverage + λ_css * contrastive + λ_scst * REINFORCE
                 loss = ce_loss + coverage_lambda * coverage_loss
                 if css_augmentor is not None:
-                    css_loss = css_forward(model, model_type, imgs, questions, css_augmentor)
+                    css_loss = css_forward(model, model_type, imgs, questions,
+                                           css_augmentor, img_mask=img_mask)
                     loss = loss + css_lambda * css_loss
 
             # SCST runs outside AMP context (BLEU computation is not differentiable)
@@ -725,7 +767,10 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                     target_texts.append(' '.join(words))
                 with autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                     rl_loss = scst_step(model, model_type, imgs, questions,
-                                        target_texts, vocab_a, device=DEVICE)
+                                        target_texts, vocab_a, device=DEVICE,
+                                        bleu_weight=scst_bleu_weight,
+                                        meteor_weight=scst_meteor_weight,
+                                        length_bonus_weight=scst_length_bonus)
                     loss = loss + scst_lambda * rl_loss
 
             # Scale loss for gradient accumulation
@@ -748,7 +793,14 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         model.eval()
         val_loss = 0
         with torch.no_grad():
-            for imgs, questions, answer in val_loader:
+            for val_batch in val_loader:
+                if model_type == 'F':
+                    imgs, questions, answer, img_mask = val_batch
+                    img_mask = img_mask.to(DEVICE)
+                else:
+                    imgs, questions, answer = val_batch
+                    img_mask = None
+
                 imgs      = imgs.to(DEVICE)
                 questions = questions.to(DEVICE)
                 answer    = answer.to(DEVICE)
@@ -757,7 +809,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                 decoder_target = answer[:, 1:]
 
                 with autocast('cuda', enabled=use_amp, dtype=amp_dtype):
-                    result     = model(imgs, questions, decoder_input)
+                    result = model(imgs, questions, decoder_input, img_mask=img_mask) \
+                             if model_type == 'F' \
+                             else model(imgs, questions, decoder_input)
                     if isinstance(result, tuple):
                         logits, _ = result
                     else:
@@ -917,6 +971,12 @@ if __name__ == "__main__":
                         help='Tier 8: SCST RL — mixed CE + REINFORCE (use after Phase 3)')
     parser.add_argument('--scst_lambda', type=float, default=0.5,
                         help='Weight for SCST RL loss term (default: 0.5)')
+    parser.add_argument('--scst_bleu_weight', type=float, default=0.5,
+                        help='BLEU-4 coefficient in composite SCST reward (default: 0.5)')
+    parser.add_argument('--scst_meteor_weight', type=float, default=0.5,
+                        help='METEOR coefficient in composite SCST reward (default: 0.5)')
+    parser.add_argument('--scst_length_bonus', type=float, default=0.0,
+                        help='Length bonus coefficient (0=off; use ≤0.05 to avoid verbose drift)')
     # Tier 7: Deep BiLSTM + Char-CNN question encoder
     parser.add_argument('--q_highway', action='store_true',
                         help='Tier 7B: Highway connections between BiLSTM layers in question encoder')
@@ -989,6 +1049,9 @@ if __name__ == "__main__":
           use_css=args.css, css_lambda=args.css_lambda, css_margin=args.css_margin,
           use_q_highway=args.q_highway, use_char_cnn=args.char_cnn,
           use_scst=args.scst, scst_lambda=args.scst_lambda,
+          scst_bleu_weight=args.scst_bleu_weight,
+          scst_meteor_weight=args.scst_meteor_weight,
+          scst_length_bonus=args.scst_length_bonus,
           use_wandb=args.wandb, wandb_project=args.wandb_project,
           wandb_run_name=args.wandb_run_name, wandb_tags=_tags,
           phase=args.phase,

@@ -73,8 +73,8 @@ class CharCNNEmbedding(nn.Module):
         """
         B, S = word_ids.shape
         # Look up char IDs: (B, S, MAX_WORD_LEN)
-        char_ids = self.char_table[word_ids.view(-1)].view(B, S, self.MAX_WORD_LEN)
-        char_ids = char_ids.to(word_ids.device)
+        # char_table is built on CPU after model.to(device) — move to match word_ids
+        char_ids = self.char_table.to(word_ids.device)[word_ids.view(-1)].view(B, S, self.MAX_WORD_LEN)
 
         # Embed chars and apply CNN per word
         char_ids_flat = char_ids.view(B * S, self.MAX_WORD_LEN)          # (B*S, L)

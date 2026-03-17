@@ -581,173 +581,143 @@ for t in range(seq_len):
 
 ---
 
-## Tier 2 — Dense Co-Attention (DCAN)
-**Status: [ ] TODO**
-**Effort: 2–3 days**
-**Dependencies: Tier 1 preferred first, but can be done independently**
+## Tier 2 — Multi-Head Cross-Attention (MHCA)
+**Status: [x] COMPLETE** — supersedes DenseCoAttention (removed, violated constraint #3)
 **Files: `src/models/decoder_attention.py`**
 
-### New class: DenseCoAttention
-Add to `src/models/decoder_attention.py` (alongside BahdanauAttention):
+> **CORRECTION A (2026-03-18):** The original plan specified `DenseCoAttention` which
+> ran intra-modal self-attention O(T·(L_v² + L_q²)) inside `decode_step` — forbidden by
+> constraint #3.  Replaced entirely with `MultiHeadCrossAttention`: Q = h_t (LSTM hidden),
+> K/V = memory (image regions or question tokens). Pure cross-attention, O(T·S).
 
-```python
-class DenseCoAttention(nn.Module):
-    """
-    Dense Co-Attention Network (DCAN).
-    Replaces the two BahdanauAttention modules in LSTMDecoderWithAttention.
+### class MultiHeadCrossAttention
 
-    Steps:
-      1. Intra-modal self-attention on image regions (region↔region)
-      2. Intra-modal self-attention on question words (word↔word)
-      3. Inter-modal guided attention: image features guide question attention
-      4. Inter-modal guided attention: question features guide image attention
-    """
-    def __init__(self, hidden_size, num_heads=4):
-        super().__init__()
-        assert hidden_size % num_heads == 0
-        self.hidden_size = hidden_size
-        self.num_heads   = num_heads
-        self.d_head      = hidden_size // num_heads
-
-        # Intra-modal image self-attention projections
-        self.img_q = nn.Linear(hidden_size, hidden_size)
-        self.img_k = nn.Linear(hidden_size, hidden_size)
-        self.img_v = nn.Linear(hidden_size, hidden_size)
-
-        # Intra-modal question self-attention projections
-        self.q_q  = nn.Linear(hidden_size, hidden_size)
-        self.q_k  = nn.Linear(hidden_size, hidden_size)
-        self.q_v  = nn.Linear(hidden_size, hidden_size)
-
-        # Inter-modal: text → image (question guides image attention)
-        self.cross_qi_q = nn.Linear(hidden_size, hidden_size)  # query from question
-        self.cross_qi_k = nn.Linear(hidden_size, hidden_size)  # key from image
-        self.cross_qi_v = nn.Linear(hidden_size, hidden_size)  # value from image
-
-        # Inter-modal: image → text (image guides question attention)
-        self.cross_iq_q = nn.Linear(hidden_size, hidden_size)  # query from image
-        self.cross_iq_k = nn.Linear(hidden_size, hidden_size)  # key from question
-        self.cross_iq_v = nn.Linear(hidden_size, hidden_size)  # value from question
-
-        # Output projections
-        self.img_out = nn.Linear(hidden_size, hidden_size)
-        self.q_out   = nn.Linear(hidden_size, hidden_size)
-
-        # Layer norms
-        self.ln_img = nn.LayerNorm(hidden_size)
-        self.ln_q   = nn.LayerNorm(hidden_size)
-
-        self.scale = self.d_head ** -0.5
-
-    def _attention(self, Q, K, V, mask=None):
-        """Scaled dot-product attention. All inputs: (B, num_heads, seq, d_head)"""
-        scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale   # (B, H, Sq, Sk)
-        if mask is not None:
-            scores = scores.masked_fill(mask == 0, float('-inf'))
-        alpha  = F.softmax(scores, dim=-1)
-        out    = torch.matmul(alpha, V)                               # (B, H, Sq, d_head)
-        return out, alpha
-
-    def _reshape_heads(self, x):
-        """(B, seq, H) → (B, num_heads, seq, d_head)"""
-        B, S, _ = x.shape
-        return x.view(B, S, self.num_heads, self.d_head).transpose(1, 2)
-
-    def _merge_heads(self, x):
-        """(B, num_heads, seq, d_head) → (B, seq, H)"""
-        B, _, S, _ = x.shape
-        return x.transpose(1, 2).contiguous().view(B, S, self.hidden_size)
-
-    def forward(self, img_feats, q_hidden, lstm_h, q_mask=None):
-        """
-        img_feats: (B, num_regions, hidden_size)  e.g. (B, 49, 1024)
-        q_hidden:  (B, q_len, hidden_size)
-        lstm_h:    (B, hidden_size)   — current LSTM state (for conditioning, optional)
-        q_mask:    (B, q_len) bool mask for padded positions
-
-        returns:
-          img_context: (B, hidden_size)  — attended image representation
-          q_context:   (B, hidden_size)  — attended question representation
-          img_alpha:   (B, num_regions)  — image attention weights (for visualization)
-          q_alpha:     (B, q_len)        — question attention weights (for visualization)
-        """
-        # --- Step 1: Intra-modal image self-attention ---
-        iQ = self._reshape_heads(self.img_q(img_feats))
-        iK = self._reshape_heads(self.img_k(img_feats))
-        iV = self._reshape_heads(self.img_v(img_feats))
-        img_self_out, _ = self._attention(iQ, iK, iV)
-        img_self = self.ln_img(img_feats + self.img_out(self._merge_heads(img_self_out)))
-
-        # --- Step 2: Intra-modal question self-attention ---
-        qQ = self._reshape_heads(self.q_q(q_hidden))
-        qK = self._reshape_heads(self.q_k(q_hidden))
-        qV = self._reshape_heads(self.q_v(q_hidden))
-        # Build mask for padding if provided
-        if q_mask is not None:
-            q_attn_mask = q_mask.unsqueeze(1).unsqueeze(2)  # (B,1,1,q_len)
-        else:
-            q_attn_mask = None
-        q_self_out, _ = self._attention(qQ, qK, qV, mask=q_attn_mask)
-        q_self = self.ln_q(q_hidden + self.q_out(self._merge_heads(q_self_out)))
-
-        # --- Step 3: Inter-modal image→question (image guides question) ---
-        # Query: mean-pooled image, Key/Value: question words
-        img_mean = img_self.mean(dim=1, keepdim=True)  # (B, 1, H)
-        cQ = self._reshape_heads(self.cross_iq_q(img_mean))   # (B, nh, 1, d_head)
-        cK = self._reshape_heads(self.cross_iq_k(q_self))
-        cV = self._reshape_heads(self.cross_iq_v(q_self))
-        q_cross_out, q_alpha_h = self._attention(cQ, cK, cV, mask=q_attn_mask)
-        q_context = self._merge_heads(q_cross_out).squeeze(1)  # (B, H)
-        # q_alpha: average over heads, squeeze query dim
-        q_alpha = q_alpha_h.mean(dim=1).squeeze(1)   # (B, q_len)
-
-        # --- Step 4: Inter-modal question→image (question guides image) ---
-        # Query: q_context, Key/Value: image regions
-        q_ctx_expand = q_context.unsqueeze(1)   # (B, 1, H)
-        dQ = self._reshape_heads(self.cross_qi_q(q_ctx_expand))
-        dK = self._reshape_heads(self.cross_qi_k(img_self))
-        dV = self._reshape_heads(self.cross_qi_v(img_self))
-        img_cross_out, img_alpha_h = self._attention(dQ, dK, dV)
-        img_context = self._merge_heads(img_cross_out).squeeze(1)  # (B, H)
-        img_alpha = img_alpha_h.mean(dim=1).squeeze(1)  # (B, num_regions)
-
-        return img_context, q_context, img_alpha, q_alpha
-```
-
-### Modify LSTMDecoderWithAttention to use DCAN
 **File: `src/models/decoder_attention.py`**
 
-In `LSTMDecoderWithAttention.__init__`, add parameter `use_dcan=False`:
-
 ```python
-def __init__(self, vocab_size, embed_size, hidden_size, num_layers,
-             attn_dim=512, dropout=0.5, pretrained_embeddings=None,
-             use_coverage=False, use_dcan=False, num_heads=4):
-    ...
-    self.use_dcan = use_dcan
-    if use_dcan:
-        self.attention = DenseCoAttention(hidden_size, num_heads=num_heads)
-        # img_attention and q_attention are no longer needed
-    else:
-        self.img_attention = BahdanauAttention(hidden_size, attn_dim, use_coverage)
-        self.q_attention   = BahdanauAttention(hidden_size, attn_dim, use_coverage=False)
+class MultiHeadCrossAttention(nn.Module):
+    """
+    Pure Multi-Head Cross-Attention — constraint-compliant.
+
+    Query  : h_t    (B, H)    — single LSTM hidden state (NOT a sequence)
+    Key/Val: memory (B, S, H) — image regions (49) or question token states
+
+    No intra-modal self-attention.  Q and K/V always from different modalities.
+    Complexity: O(T · S) — linear in memory length, called T times per forward.
+
+    Optional coverage bias (image side only):
+        scores += cov_scale * coverage   (cov_scale is a learned scalar, init=0)
+    """
+    def __init__(self, hidden_size: int, num_heads: int = 4,
+                 use_coverage: bool = False):
+        super().__init__()
+        assert hidden_size % num_heads == 0
+        self.hidden_size  = hidden_size
+        self.num_heads    = num_heads
+        self.d_head       = hidden_size // num_heads
+        self.scale        = self.d_head ** -0.5
+        self.use_coverage = use_coverage
+
+        # Q from LSTM hidden state; K/V from memory (different modality)
+        self.Q_proj   = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.K_proj   = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.V_proj   = nn.Linear(hidden_size, hidden_size, bias=False)
+        self.out_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+
+        if use_coverage:
+            self.cov_scale = nn.Parameter(torch.zeros(1))   # init=0: no bias at start
+
+    def forward(self, query: torch.Tensor, memory: torch.Tensor,
+                coverage: torch.Tensor = None):
+        """
+        Args:
+            query    : (B, H)    — h_t from LSTM (single timestep, NOT a sequence)
+            memory   : (B, S, H) — image regions or question token states
+            coverage : (B, S) or None — cumulative attention over decode steps
+
+        Returns:
+            context  : (B, H)  — attended summary
+            alpha    : (B, S)  — attention weights (mean over heads)
+        """
+        B, S, H = memory.shape
+
+        q = self.Q_proj(query).unsqueeze(1)              # (B, 1, H)
+        k = self.K_proj(memory)                           # (B, S, H)
+        v = self.V_proj(memory)                           # (B, S, H)
+
+        # Reshape to (B, num_heads, seq, d_head)
+        q = q.view(B, 1, self.num_heads, self.d_head).transpose(1, 2)  # (B, nh, 1, d)
+        k = k.view(B, S, self.num_heads, self.d_head).transpose(1, 2)  # (B, nh, S, d)
+        v = v.view(B, S, self.num_heads, self.d_head).transpose(1, 2)  # (B, nh, S, d)
+
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale      # (B, nh, 1, S)
+
+        if self.use_coverage and coverage is not None:
+            # (B, S) → (B, 1, 1, S): broadcast over heads + query dim
+            scores = scores + self.cov_scale * coverage.unsqueeze(1).unsqueeze(2)
+
+        alpha   = F.softmax(scores, dim=-1)                              # (B, nh, 1, S)
+        context = torch.matmul(alpha, v)                                 # (B, nh, 1, d)
+        context = context.squeeze(2).transpose(1, 2).contiguous().view(B, H)
+        context = self.out_proj(context)                                 # (B, H)
+
+        alpha_mean = alpha.mean(dim=1).squeeze(1)                       # (B, S)
+        return context, alpha_mean
 ```
 
-In `decode_step`, add branch:
+### How decode_step calls MHCA
+
+`LSTMDecoderWithAttention` holds **two** MHCA instances:
+- `self.img_mhca`: attends to image regions — `use_coverage=True` optionally
+- `self.q_mhca`:  attends to question tokens — `use_coverage=False` always
+
 ```python
-def decode_step(self, token, hidden, img_features, q_hidden_states, coverage=None, q_mask=None):
-    ...
-    if self.use_dcan:
-        h_top = hidden[0][-1]   # top layer hidden: (B, H)
-        img_context, q_context, img_alpha, q_alpha = \
-            self.attention(img_features, q_hidden_states, h_top, q_mask)
-        coverage_loss = torch.tensor(0.0)
+def decode_step(self, token, hidden, img_features, q_hidden_states,
+                coverage=None, q_token_ids=None):
+    """
+    token           : (B, 1)         — current token id
+    hidden          : (h, c) each (num_layers, B, H)
+    img_features    : (B, 49, H)     — spatial CNN regions
+    q_hidden_states : (B, q_len, H)  — question encoder states
+    coverage        : (B, 49) or None
+    """
+    embed    = self.embedding(token).squeeze(1)   # (B, E)
+    h_top    = hidden[0][-1]                       # (B, H) — top LSTM layer
+
+    # Q = h_top  (LSTM hidden, single vector — NOT a sequence)
+    # K/V = img_features  (image regions, external to LSTM)
+    img_context, img_alpha = self.img_mhca(h_top, img_features, coverage)
+
+    # Q = h_top  (same LSTM hidden)
+    # K/V = q_hidden_states  (question encoder, external to LSTM)
+    q_context, q_alpha = self.q_mhca(h_top, q_hidden_states)
+
+    # Update coverage: cumulative sum of image attention
+    if self.use_coverage:
+        coverage = (coverage if coverage is not None
+                    else torch.zeros_like(img_alpha)) + img_alpha
+
+    # LSTM input: concatenate embed, both contexts
+    lstm_input = torch.cat([embed, img_context, q_context], dim=1).unsqueeze(1)
+    output, hidden = self.lstm(lstm_input, hidden)
+
+    vocab_logit = self.fc(self.out_proj(output.squeeze(1)))   # (B, V)
+
+    # Optional PGN: q_alpha IS P_copy (where decoder attends in question at step t)
+    if self.use_pgn and q_token_ids is not None:
+        p_gen = self.pgn(embed, h_top, img_context)
+        logit = PointerGeneratorHead.blend(
+            p_gen, vocab_logit, q_alpha, q_token_ids, self.vocab_size)
     else:
-        # existing BahdanauAttention code
-        ...
-    # LSTM input stays same shape: [embed; img_context; q_context] → embed_size + H*2
+        logit = vocab_logit
+
+    return logit, hidden, img_alpha, coverage
 ```
 
+Key constraint proof:
+- `img_mhca`: Q = h_t ∈ ℝᴴ (scalar LSTM state), K/V = img_features ∈ ℝˢˣᴴ (CNN output) → pure cross-attention
+- `q_mhca`:   Q = h_t ∈ ℝᴴ (same scalar LSTM state), K/V = q_hidden ∈ ℝᴸˣᴴ (QuestionEncoder output) → pure cross-attention
+- Neither module attends within the decode sequence itself → no self-attention
 ---
 
 ## Tier 3A — ConvNeXt-Base Spatial Encoder
@@ -1480,131 +1450,216 @@ High-level steps:
 
 ---
 
-## Data Tier D3 — Answer Distribution Balancing
-**Status: [ ] TODO**
-**Effort: 1 day**
-**Files: `src/train.py`**
+## Data Tier D3 — Autoregressive Masked Focal Loss
+**Status: [x] COMPLETE** — supersedes D3A/D3B/D3C (all removed, classification concepts)
+**Files: `src/training/losses.py` (new), `src/train.py`**
 
-### D3A — Inverse Frequency Weighting
+> **CORRECTION B (2026-03-18):** The original D3A (inverse frequency weighting),
+> D3B (soft labels), and D3C (answer-type sampling) all belong to classification
+> pipelines.  In autoregressive seq2seq, `CrossEntropyLoss(weight=w)` applies the
+> same scalar `w[c]` to EVERY position that emits class `c`.  For VQA-E, the word
+> "because" (w≈0.01, very common) is the structural hinge of every explanation.
+> Down-weighting it uniformly causes the decoder to systematically drop it, producing
+> answers without explanation clauses.  Replaced entirely by SequenceFocalLoss.
+
+### The flaw (dead code — do not re-introduce)
+
 ```python
-# After loading vocab, compute answer frequencies from training set:
-from collections import Counter
-answer_counts = Counter()
-for ann in train_annotations:
-    answer_counts[ann['multiple_choice_answer']] += 1
-# Build weight tensor:
-weights = torch.ones(len(vocab_a))
+# ✗ WRONG — static class weights kill grammar tokens in seq2seq
+weights = torch.zeros(vocab_size)
 for word, idx in vocab_a.word2idx.items():
-    if word in answer_counts:
-        weights[idx] = 1.0 / (answer_counts[word] ** 0.5)
-criterion = nn.CrossEntropyLoss(weight=weights.to(device), ignore_index=0,
-                                label_smoothing=args.label_smoothing)
+    weights[idx] = 1.0 / (answer_counts.get(word, 1) ** 0.5)
+criterion = nn.CrossEntropyLoss(weight=weights.to(device), ...)
+# Problem: w["because"] ≈ 0.01 at EVERY sequence position →
+#          decoder never learns to emit the explanation hinge
 ```
 
-### D3B — Soft Label Training
+### SequenceFocalLoss — the correct implementation
+
+**File: `src/training/losses.py`**
+
 ```python
-# In VQADataset, change target from one-hot to soft distribution:
-answers = self.qid2answers.get(q_id, [""])
-# Build soft target: count occurrences among 10 annotations
-from collections import Counter
-cnt = Counter(answers)
-soft = torch.zeros(len(self.vocab_a))
-for ans, count in cnt.items():
-    idx = self.vocab_a.word2idx.get(ans, 3)  # <unk>
-    soft[idx] = count / len(answers)
-# Use KLDivLoss instead of CrossEntropyLoss for soft targets
+class SequenceFocalLoss(nn.Module):
+    """
+    Focal Loss for autoregressive seq2seq — replaces CrossEntropyLoss(weight=w).
+
+    Dynamically suppresses easy/common tokens (high p_t) and focuses gradient
+    on hard/rare tokens (low p_t).  No static weight tensor required.
+
+        ce_t         = F.cross_entropy(logit_t, target_t, reduction='none')
+        p_t          = exp(-ce_t)                 # model confidence in correct token
+        focal_weight = (1 - p_t) ** gamma         # 0 for easy, 1 for hard
+        focal_loss_t = focal_weight * ce_t
+
+        loss = sum(focal_loss_t * mask) / mask.sum().clamp(min=1)
+               where mask = (targets != pad_idx)
+    """
+    def __init__(self, gamma: float = 2.0, pad_idx: int = 0,
+                 label_smoothing: float = 0.0):
+        super().__init__()
+        self.gamma           = gamma
+        self.pad_idx         = pad_idx
+        self.label_smoothing = label_smoothing
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            logits  : (N, V)  — flattened from (B, T, V) → (B*T, V)
+            targets : (N,)    — flattened from (B, T) → (B*T,)
+        """
+        # Step 1: per-token CE without reduction (ignore_index zeros out pad positions)
+        ce_loss = F.cross_entropy(
+            logits, targets,
+            ignore_index=self.pad_idx,
+            label_smoothing=self.label_smoothing,
+            reduction='none',
+        )                                              # (N,)
+
+        # Step 2: compute confidence p_t and focal weight
+        p_t          = torch.exp(-ce_loss)             # (N,) ∈ [0, 1]
+        focal_weight = (1.0 - p_t) ** self.gamma       # (N,) — 0 if easy, ~1 if hard
+        focal_loss   = focal_weight * ce_loss           # (N,)
+
+        # Step 3: mask padding for normalization
+        mask = (targets != self.pad_idx).float()        # (N,)
+
+        # Average only over valid (non-pad) positions
+        return (focal_loss * mask).sum() / mask.sum().clamp(min=1.0)
 ```
 
-### D3C — Answer-Type Balanced Sampling
-VQA annotations include `answer_type` field: `yes/no`, `number`, `other`.
+### Activation in train.py
+
 ```python
-# In VQADataset, record answer_type per sample
-# In train.py, use WeightedRandomSampler:
-type_counts = Counter(answer_types)
-sample_weights = [1.0 / type_counts[t] for t in answer_types]
-sampler = WeightedRandomSampler(sample_weights, num_samples=len(sample_weights))
-train_loader = DataLoader(dataset, batch_size=args.batch_size, sampler=sampler)
+# --focal flag:
+if args.use_focal_loss:
+    criterion = SequenceFocalLoss(gamma=args.focal_gamma, pad_idx=0)
+elif model_uses_pgn:
+    criterion = nn.NLLLoss(ignore_index=0)   # PGN outputs log-probs
+else:
+    criterion = nn.CrossEntropyLoss(ignore_index=0,
+                                    label_smoothing=args.label_smoothing)
 ```
 
+Note: PGN outputs `log(P_final)` via `torch.log(final.clamp(min=1e-10))` →
+must use NLLLoss (log already applied).  Focal Loss applies to the standard
+(non-PGN) logit path only.
 ---
 
-## Data Tier D4 — Task Progressive Curriculum Learning (TPCL)
-**Status: [ ] TODO**
-**Effort: 1–2 days**
-**Files: `src/training/curriculum.py` (new), `src/train.py`**
+## Data Tier D4 — Question-Type Progressive Curriculum (TPCL v2)
+**Status: [x] COMPLETE** — replaces length-based curriculum (removed, answer-side heuristic)
+**Files: `src/training/curriculum.py`, `src/train.py`**
 
-### New file: `src/training/curriculum.py`
+> **CORRECTION (2026-03-18):** Original curriculum sorted by answer word count
+> + clause count (answer-side heuristic).  Revised to question-type classification
+> (question-side).  The question type directly encodes the reasoning demand:
+> binary questions require the simplest explanations; why/how require the longest
+> causal chains.  This aligns with standard VQA curriculum literature.
+
+### Dead code — do not re-introduce
 
 ```python
-"""
-Task Progressive Curriculum Learning (TPCL).
-Sorts training samples by answer sequence complexity.
-LSTMs converge better when easy samples come first.
-"""
-import torch
-from torch.utils.data import Sampler
-
-
+# ✗ WRONG — sorts by answer length, not reasoning demand
 def compute_complexity_scores(annotations):
-    """
-    Returns list of complexity scores for each sample.
-    Score = sequence length + syntactic depth (approximated by clause count).
-    """
     scores = []
     for ann in annotations:
         answer = ann.get('multiple_choice_answer', '')
-        explanation = ann.get('explanation', [''])[0] if ann.get('explanation') else ''
-        full_text = f"{answer} because {explanation}" if explanation else answer
-        # Complexity: word count + clause indicators
-        words = full_text.split()
+        explanation = ann.get('explanation', [''])[0]
+        full_text = f"{answer} because {explanation}"
+        words  = full_text.split()
         clauses = sum(1 for w in words if w.lower() in
-                      {'because', 'since', 'although', 'however', 'therefore',
-                       'which', 'that', 'who', 'while', 'when', 'where'})
-        scores.append(len(words) + clauses * 3)
+                      {'because', 'since', 'although', ...})
+        scores.append(len(words) + clauses * 3)   # ← answer-side, not question-side
     return scores
-
-
-class CurriculumSampler(Sampler):
-    """
-    Returns indices in curriculum order.
-    Stage 1: short answers (len ≤ 3)
-    Stage 2: medium (4 ≤ len ≤ 8)
-    Stage 3: long + complex (len > 8)
-
-    Uses pacing function: 20% stage1 → 30% stage2 → 50% stage3
-    """
-    def __init__(self, complexity_scores, current_epoch, total_epochs):
-        self.scores     = complexity_scores
-        self.epoch      = current_epoch
-        self.total      = total_epochs
-        self._build_ordered_indices()
-
-    def _build_ordered_indices(self):
-        scored = sorted(enumerate(self.scores), key=lambda x: x[1])
-        self.ordered_indices = [i for i, _ in scored]
-        n = len(self.ordered_indices)
-        # Stage boundaries
-        self.s1 = int(0.20 * n)
-        self.s2 = int(0.50 * n)
-        # self.s3 = n
-
-    def __iter__(self):
-        progress = self.epoch / max(self.total, 1)
-        if progress < 0.2:
-            pool = self.ordered_indices[:self.s1]
-        elif progress < 0.5:
-            pool = self.ordered_indices[:self.s2]
-        else:
-            pool = self.ordered_indices   # all samples
-        import random
-        indices = pool.copy()
-        random.shuffle(indices)
-        return iter(indices)
-
-    def __len__(self):
-        return len(self.ordered_indices)
 ```
 
+### Question-type classifier — correct implementation
+
+**File: `src/training/curriculum.py`**
+
+```python
+_BINARY_PREFIXES = (
+    'is ', 'are ', 'does ', 'do ', 'did ', 'was ', 'were ',
+    'has ', 'have ', 'had ', 'can ', 'could ', 'will ', 'would ',
+    'should ', 'shall ', 'may ', 'might ',
+)
+
+def classify_question_type(question: str) -> int:
+    """
+    Assign complexity tier from question text (question-side, NOT answer-side).
+
+    0 — Binary   : yes/no (is/are/does/do/did/was/were ...)
+    1 — Color    : perceptual attribute ('color'/'colour' in question)
+    2 — Count    : numeric ('how many', 'how much')
+    3 — What     : object/attribute identification
+    4 — Where    : spatial reasoning ('where', 'which')
+    5 — Why/How  : causal + procedural — hardest, longest explanations
+
+    Unknown forms → tier 3 (What-level default).
+    """
+    q = question.lower().strip()
+    if q.startswith(_BINARY_PREFIXES):          return 0   # easiest
+    if 'color' in q or 'colour' in q:           return 1
+    if q.startswith(('how many ', 'how much ')): return 2
+    if q.startswith('what '):                    return 3
+    if q.startswith(('where ', 'which ')):       return 4
+    if q.startswith(('why ', 'how ')):           return 5   # hardest
+    return 3   # default: What-level
+```
+
+### CurriculumSampler — 4 stages keyed to training progress
+
+```python
+class CurriculumSampler(Sampler):
+    """
+    Stage boundaries (by fraction of training progress):
+      stage 1  0%  → 25%  : Binary only            (type  0)
+      stage 2  25% → 50%  : Binary + Color/Count   (types 0–2)
+      stage 3  50% → 75%  : All but Why/How        (types 0–4)
+      stage 4  75% → 100% : Full dataset            (types 0–5)
+    """
+    def __init__(self, complexity_scores, epoch=0, total_epochs=10):
+        self.scores       = complexity_scores
+        self.epoch        = epoch
+        self.total_epochs = total_epochs
+        self._build_sorted_buckets()
+
+    def _build_sorted_buckets(self):
+        paired = sorted(enumerate(self.scores), key=lambda x: x[1])
+        self.sorted_indices  = [i for i, _ in paired]
+        scores_sorted        = [self.scores[i] for i in self.sorted_indices]
+        self._stage_ends     = []
+        for threshold in (0, 2, 4):          # type ≤ 0 / ≤ 2 / ≤ 4
+            end = sum(1 for s in scores_sorted if s <= threshold)
+            self._stage_ends.append(max(1, end))
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+
+    def _active_pool(self):
+        progress = self.epoch / max(self.total_epochs - 1, 1)
+        if   progress < 0.25: return self.sorted_indices[:self._stage_ends[0]]
+        elif progress < 0.50: return self.sorted_indices[:self._stage_ends[1]]
+        elif progress < 0.75: return self.sorted_indices[:self._stage_ends[2]]
+        else:                 return self.sorted_indices   # full dataset
+
+    def __iter__(self):
+        pool = list(self._active_pool())
+        random.shuffle(pool)
+        return iter(pool)
+
+    def __len__(self):
+        return len(self._active_pool())
+```
+
+### Activation in train.py
+
+```python
+if args.use_curriculum:
+    scores   = compute_question_type_scores(train_dataset.annotations)
+    sampler  = CurriculumSampler(scores, epoch=0, total_epochs=args.epochs)
+    # At the start of each epoch:
+    # sampler.set_epoch(epoch)
+```
 ---
 
 ## Data Tier D5 — LLM Synthetic Data + Hallucination Noise Filter
