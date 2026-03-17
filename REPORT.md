@@ -13,35 +13,30 @@
 6. [Model Architectures](#6-model-architectures)
 7. [Shared Components](#7-shared-components)
 8. [Training Pipeline](#8-training-pipeline)
-9. [Key Architectural Improvements](#9-key-architectural-improvements)
-10. [Optimization Techniques](#10-optimization-techniques)
-11. [Inference & Decoding](#11-inference--decoding)
-12. [Evaluation Metrics](#12-evaluation-metrics)
-13. [Hyperparameters Summary](#13-hyperparameters-summary)
-14. [Parameter Count & Complexity](#14-parameter-count--complexity)
-15. [Experimental Results](#15-experimental-results)
-    - 15.1 Training Curves
-    - 15.2 Model Architecture Summary
-    - 15.3 Training Loss Summary
-    - 15.4 Greedy Decoding Results ★
-    - 15.5 Beam Search Results
-    - 15.6 BLEU-4 Score Distribution
-    - 15.7 Performance by Question Type
-    - 15.8 Answer Length Analysis
-    - 15.9 Confidence Intervals
-    - **15.10 Qualitative Examples** *(new)*
-16. [Comparison & Analysis](#16-comparison--analysis)
-    - 16.1 Effect of Pretrained Features
-    - 16.2 Effect of Attention Mechanism
-    - 16.3 2×2 Factorial Interaction Analysis
-    - 16.4 Progressive Training Analysis
-    - 16.5 Greedy vs Beam Search
-    - 16.6 Error Analysis
-    - 16.7 Limitations
-    - **16.8 Ablation Analysis** *(new)*
-    - **16.9 Comparison with Li et al. (2018)** *(new)*
-17. [Conclusion](#17-conclusion)
-18. [References](#18-references)
+9. [Optimization Techniques](#9-optimization-techniques)
+10. [Inference & Decoding](#10-inference--decoding)
+11. [Evaluation Metrics](#11-evaluation-metrics)
+12. [Hyperparameters Summary](#12-hyperparameters-summary)
+13. [Parameter Count & Complexity](#13-parameter-count--complexity)
+14. [Experimental Results](#14-experimental-results)
+    - 14.1 Training Curves
+    - 14.2 Training Loss Summary
+    - 14.3 Greedy Decoding Results ★
+    - 14.4 Beam Search Results
+    - 14.5 Model Efficiency Analysis
+    - 14.6 Qualitative Examples
+15. [Comparison & Analysis](#15-comparison--analysis)
+    - 15.1 Effect of Pretrained Features
+    - 15.2 Effect of Attention Mechanism
+    - 15.3 2×2 Factorial Interaction Analysis
+    - 15.4 Progressive Training Analysis
+    - 15.5 Greedy vs Beam Search
+    - 15.6 Error Analysis
+    - 15.7 Limitations
+    - 15.8 Ablation Analysis
+    - 15.9 Comparison with Li et al. (2018)
+16. [Conclusion](#16-conclusion)
+17. [References](#17-references)
 
 ---
 
@@ -170,7 +165,7 @@ $$A = (a_1, a_2, \dots, a_n), \quad a_i \in V_A$$
 
 that not only answers the question but also provides a brief explanation grounded in the image content.
 
-### 3.2 Why Generative (Not Classification)?
+**Why Generative (Not Classification)?**
 
 The original VQA 2.0 benchmark frames VQA as a **classification task** over 3,129 most frequent answers. While this is computationally simpler, it has critical limitations:
 
@@ -184,7 +179,7 @@ The original VQA 2.0 benchmark frames VQA as a **classification task** over 3,12
 
 **Why this matters for our project:** With 1–3 word answers, the LSTM decoder is essentially a single-step classifier — there is no meaningful sequence generation, no attention dynamics over time, and no difference between greedy and beam search decoding. By using VQA-E's explanatory answers, the decoder must generate coherent multi-word sentences, making architectural differences (attention vs. no attention) observable and meaningful.
 
-### 3.3 Why VQA-E?
+**Why VQA-E?**
 
 We chose **VQA-E** (Li et al., 2018) over other generative VQA datasets for several reasons:
 
@@ -893,157 +888,11 @@ $$\text{lr}(e) = \eta_{\min} + \frac{1}{2}(\text{lr}_{\text{base}} - \eta_{\min}
 | C (SimpleCNN + Attn) | 32 | 2 | 64 | Attention loop stores 49 attention maps per step |
 | D (ResNet101 + Attn) | 16 | 4 | 64 | Largest model; combined ResNet + attention memory cost |
 
-### 8.7 Training Process Flow
-
-```mermaid
-flowchart TD
-    START["Start Training"] --> INIT["Initialize Model Components<br/>Load GloVe, Build Vocab"]
-    INIT --> P1["Phase 1: Baseline (10 epochs)"]
-
-    subgraph P1Loop["Phase 1 Training Loop"]
-        P1 --> WU{"Epoch ≤ 3?"}
-        WU -->|Yes| WARM["Apply LR Warmup"]
-        WU -->|No| COS["Cosine Annealing"]
-        WARM --> TRAIN["Train Epoch (Teacher Forcing)"]
-        COS --> TRAIN
-        TRAIN --> VAL["Validate + Compute Metrics"]
-        VAL --> SAVE["Save Checkpoint"]
-        SAVE --> ES{"Early Stopping<br/>patience=5?"}
-        ES -->|No| NEXT["Next Epoch"]
-        NEXT --> WU
-    end
-
-    ES -->|"Phase 1 Done"| P2["Phase 2: Fine-tune (5 epochs)"]
-
-    subgraph P2Setup["Phase 2 Setup"]
-        P2 --> UNFREEZE["Unfreeze ResNet L3+L4<br/>(Models B/D only)"]
-        UNFREEZE --> DIFFR["Set Differential LR<br/>Backbone: LR × 0.1"]
-        DIFFR --> NEWOPT["Reinitialize Optimizer<br/>(new param groups)"]
-    end
-
-    NEWOPT --> P2TRAIN["Train 5 Epochs<br/>(same Teacher Forcing)"]
-    P2TRAIN --> P3["Phase 3: Scheduled Sampling (5 epochs)"]
-
-    subgraph P3Loop["Phase 3 Training"]
-        P3 --> SS["Compute ε(epoch)<br/>Inverse-sigmoid decay"]
-        SS --> SSTRAIN["Train with SS<br/>Mix GT + predictions"]
-        SSTRAIN --> P3VAL["Validate"]
-        P3VAL --> P3SAVE["Save Best Checkpoint"]
-    end
-
-    P3SAVE --> DONE["Training Complete<br/>Best model saved"]
-```
-
 ---
 
-## 9. Key Architectural Improvements
+## 9. Optimization Techniques
 
-This section details the **11 architectural and training improvements** implemented beyond a basic seq2seq VQA model, with rationale for each.
-
-### 9.1 Label Smoothing
-
-| Property | Value |
-|---|---|
-| **What** | Softens one-hot targets: $y_{\text{smooth}} = (1-\alpha) \cdot y_{\text{onehot}} + \alpha / K$ |
-| **Configuration** | $\alpha = 0.1$, applied in `CrossEntropyLoss(label_smoothing=0.1)` |
-| **Why** | Prevents the model from becoming overconfident (outputting probabilities close to 1.0 for the correct token). Overconfident models generalize poorly because they overfit to the exact training distribution. Label smoothing encourages the model to maintain a "softer" probability distribution, improving calibration. |
-| **Impact** | Better generalization, slightly lower training accuracy but higher validation metrics |
-
-### 9.2 Bidirectional LSTM (BiLSTM)
-
-| Property | Value |
-|---|---|
-| **What** | Question encoder reads the question in both directions simultaneously |
-| **Configuration** | 2-layer BiLSTM, 512 hidden per direction (1024 total) |
-| **Why** | Questions are free-form natural language where meaning depends on context from both sides. "What color is the **big** dog?" — the adjective "big" is only meaningful once you know the noun "dog" appears later. A unidirectional LSTM encodes "big" without this context. BiLSTM captures both forward ("what color...") and backward ("...big dog") context. |
-| **Impact** | Richer question representations, especially for long or complex questions |
-
-### 9.3 Gated Fusion
-
-| Property | Value |
-|---|---|
-| **What** | Learnable gate combines image and question features adaptively |
-| **Configuration** | $g = \sigma(W_g \cdot [f_{\text{img}} ; f_q])$ with $g \in [0,1]^{1024}$ |
-| **Why** | Different questions require different amounts of visual vs. linguistic information. "What is this?" → heavily weight image. "Is this a cat or a dog?" → balance both. Simple fusion methods (concatenation, Hadamard product) treat both modalities equally. The gated approach learns per-dimension weighting from data. |
-| **Impact** | Adaptive modality balancing; each dimension independently decides the image-question mix |
-
-### 9.4 Dual Attention (Image + Question)
-
-| Property | Value |
-|---|---|
-| **What** | Decoder attends to both spatial image features (49 regions) and question hidden states at each generation step |
-| **Configuration** | Two parallel Bahdanau attention modules; output concatenated with embedding |
-| **Why** | Generating explanatory answers requires grounding different parts of the answer in different image regions and question words. When generating "the cat is sitting on the couch because it looks comfortable," the decoder should attend to: (1) "cat" region, (2) "couch" region, (3) question words "why" and "sitting". Single attention (image-only) misses question context; no attention uses a static global vector. |
-| **Impact** | Significantly richer decoder context; enables spatial grounding of answers |
-
-### 9.5 Learning Rate Warmup
-
-| Property | Value |
-|---|---|
-| **What** | Linear warmup from $\text{lr}/10$ to $\text{lr}$ over the first 3 epochs |
-| **Configuration** | Phase 1 only: epochs 1→3 linear ramp |
-| **Why** | Adam optimizer's second-moment estimates ($v_t$) need several hundred gradient updates to stabilize. In the first few batches, these estimates are based on very few observations, making the adaptive learning rate unreliable. Starting with a low LR and ramping up gives the optimizer time to calibrate before applying full-strength updates. This is especially important for models with multiple components (CNN + LSTM + Fusion) where gradient magnitudes vary widely. |
-| **Impact** | Prevents early training instability; smoother convergence curves |
-
-### 9.6 GloVe Pretrained Embeddings
-
-| Property | Value |
-|---|---|
-| **What** | Initialize word embeddings with GloVe 6B 300d vectors |
-| **Configuration** | Fine-tuned during training; OOV words initialized from $\mathcal{N}(0, 0.1)$; `<pad>` fixed at zero |
-| **Why** | The VQA-E dataset has ~181K training samples — not enough to learn high-quality word embeddings from scratch for a vocabulary of 8,648+ words. GloVe embeddings, trained on 6 billion tokens from Wikipedia and Gigaword, provide pre-existing semantic knowledge: "dog" and "puppy" start close in embedding space, "red" and "blue" are equidistant from "color", etc. This gives the model a strong initialization that accelerates convergence. |
-| **Impact** | ~99.6% vocabulary coverage; faster convergence; better word-level semantics |
-
-### 9.7 Weight Tying
-
-| Property | Value |
-|---|---|
-| **What** | Decoder's output projection matrix shares weights with the embedding matrix |
-| **Configuration** | `output_layer.weight = embed.weight`; disabled when using GloVe (300d too narrow) |
-| **Why** | The embedding matrix maps words → vectors, and the output matrix maps vectors → word probabilities. Conceptually, both operate in the same semantic space. Sharing weights (Press & Wolf, 2017) enforces this consistency: a word that has a specific embedding should also have a predictable output probability pattern. This acts as a strong regularizer and reduces the total parameter count. |
-| **Impact** | Fewer parameters, improved generalization, more consistent word representations |
-
-### 9.8 BERTScore Evaluation
-
-| Property | Value |
-|---|---|
-| **What** | Evaluate generation quality using contextual BERT embeddings |
-| **Configuration** | Using `bert_score` library with default BERT model |
-| **Why** | Traditional n-gram metrics (BLEU, METEOR) fail to capture semantic similarity. "The dog is playing in the park" and "A puppy plays in the garden" have low n-gram overlap but very high semantic overlap. BERTScore computes cosine similarity between contextual embeddings (not just surface forms), providing a more meaningful quality signal. This is especially important for explanatory answers where paraphrasing is common. |
-| **Impact** | More robust evaluation that captures semantic quality beyond surface overlap |
-
-### 9.9 Coverage Mechanism
-
-| Property | Value |
-|---|---|
-| **What** | Tracks cumulative attention over image regions across decode steps; penalizes re-attending |
-| **Configuration** | Coverage vector $= \sum_{\tau < t} \alpha_\tau$; coverage loss weight $\lambda = 1.0$ |
-| **Why** | Without coverage, the attention mechanism tends to "get stuck" — repeatedly attending to the most salient image region (usually the largest or most prominent object). For explanatory answers that reference multiple visual elements ("the dog is sitting on the grass near a tree"), the decoder needs to shift attention across different regions. Coverage provides this signal by making it increasingly expensive to re-attend to already-visited regions. Originally proposed for summarization (See et al., 2017), this is equally applicable to image-grounded generation. |
-| **Impact** | More diverse attention patterns; answers reference multiple visual elements |
-
-### 9.10 N-gram Blocking (Beam Search)
-
-| Property | Value |
-|---|---|
-| **What** | Prevents repeated trigrams during beam search decoding |
-| **Configuration** | Default $n = 3$; sets log probability to $-\infty$ for tokens that would create a repeated trigram |
-| **Why** | Beam search, while finding higher-probability sequences than greedy decoding, has a well-known tendency to produce repetitive text (e.g., "the cat is sitting on the cat is sitting on the..."). N-gram blocking eliminates this by making it impossible to repeat any 3-gram within a single generated sequence. This is a hard constraint (not a soft penalty), ensuring zero repetition. |
-| **Impact** | Eliminates repetitive generation in beam search; cleaner output |
-
-### 9.11 Gradient Accumulation
-
-| Property | Value |
-|---|---|
-| **What** | Accumulate gradients over multiple mini-batches before updating parameters |
-| **Configuration** | Model-dependent: 2–4 accumulation steps (see batch size table) |
-| **Why** | GPU memory constraints limit physical batch sizes, especially for large models like D. Very small effective batches lead to noisy gradient estimates and unstable training. Gradient accumulation simulates larger batches by summing gradients across multiple forward passes before calling `optimizer.step()`. Loss is divided by `accum_steps` to maintain correct gradient magnitude. |
-| **Impact** | Effective batch sizes of 64–128 regardless of per-GPU memory capacity; more stable training |
-
----
-
-## 10. Optimization Techniques
-
-### 10.1 Regularization
+### 9.1 Regularization
 
 | Technique | Configuration | Why |
 |---|---|---|
@@ -1056,7 +905,7 @@ This section details the **11 architectural and training improvements** implemen
 
 **Why such aggressive dropout (0.5)?** VQA-E has 181K training samples — a moderate dataset size for a model with 46–96M parameters. Higher dropout compensates for the relative data scarcity and prevents overfitting. The 0.5 rate is the value recommended in the original LSTM dropout paper (Zaremba et al., 2014).
 
-### 10.2 Mixed Precision Training (AMP)
+### 9.2 Mixed Precision Training (AMP)
 
 | GPU Type | Precision | GradScaler | Why |
 |---|---|---|---|
@@ -1067,13 +916,7 @@ This section details the **11 architectural and training improvements** implemen
 
 **Detection:** Automatic via `torch.cuda.get_device_capability()` — Ampere+ GPUs (compute ≥ 8.0) use BF16; older GPUs fall back to FP16 with GradScaler.
 
-### 10.3 Gradient Accumulation (Detail)
-
-$$\text{effective batch} = \text{batch size} \times \text{accum steps}$$
-
-Loss is divided by `accum_steps` before `backward()`, and `optimizer.step()` is called every `accum_steps` mini-batches. This ensures the gradient statistics match what would be obtained with a single large batch.
-
-### 10.4 GPU Optimizations
+### 9.3 GPU Optimizations
 
 | Optimization | Description | Why |
 |---|---|---|
@@ -1086,42 +929,9 @@ Loss is divided by `accum_steps` before `backward()`, and `optimizer.step()` is 
 
 ---
 
-## 11. Inference & Decoding
+## 10. Inference & Decoding
 
-### 11.1 Inference Pipeline
-
-```mermaid
-flowchart TD
-    INPUT["Image + Question"] --> ENCODE["Encode Image + Question"]
-    ENCODE --> FUSION["Gated Fusion → h₀"]
-    FUSION --> MODE{"Decode Mode?"}
-
-    MODE -->|Greedy| GREEDY["Greedy Decoding"]
-    MODE -->|Beam Search| BEAM["Beam Search (width=5)"]
-
-    subgraph Greedy Decoding
-        GREEDY --> G1["t=0: input = start token"]
-        G1 --> G2["Get logits from decoder"]
-        G2 --> G3["Select argmax token"]
-        G3 --> G4{"Token == end<br/>or t > max_len?"}
-        G4 -->|No| G1
-        G4 -->|Yes| GOUT["Output sequence"]
-    end
-
-    subgraph Beam Search
-        BEAM --> B1["Initialize K beams"]
-        B1 --> B2["Expand each beam<br/>by all vocab tokens"]
-        B2 --> B3["Score: cumulative<br/>log probability"]
-        B3 --> B4["N-gram blocking<br/>(trigram)"]
-        B4 --> B5["Keep top-K beams"]
-        B5 --> B6{"All beams ended<br/>or max_len?"}
-        B6 -->|No| B2
-        B6 -->|Yes| B7["Length-normalize<br/>scores"]
-        B7 --> BOUT["Best sequence"]
-    end
-```
-
-### 11.2 Greedy Decoding
+### 10.1 Greedy Decoding
 
 At each step, select the token with the highest probability:
 
@@ -1130,7 +940,7 @@ $$a_t = \arg\max_{w \in V_A} P(w \mid a_{<t}, I, Q)$$
 - **Advantage:** Fast single-pass decoding (one forward pass per token)
 - **Disadvantage:** May miss globally optimal sequences — a locally suboptimal token choice can lead to a better overall sequence
 
-### 11.3 Beam Search
+### 10.2 Beam Search
 
 Maintains the top-$k$ candidate sequences at each step:
 
@@ -1144,7 +954,7 @@ $$\text{score}(A) = \frac{1}{|A|} \sum_{t=1}^{|A|} \log P(a_t \mid a_{<t}, I, Q)
 
 **Why length normalization?** Without it, beam search strongly favors shorter sequences (fewer log-probability terms to sum). Length normalization ensures fair comparison between sequences of different lengths.
 
-### 11.4 N-gram Blocking
+### 10.3 N-gram Blocking
 
 To prevent repetitive output during beam search, trigram blocking sets $\log P(w) = -\infty$ for any token $w$ that would create a repeated n-gram (default: $n = 3$).
 
@@ -1152,9 +962,9 @@ To prevent repetitive output during beam search, trigram blocking sets $\log P(w
 
 ---
 
-## 12. Evaluation Metrics
+## 11. Evaluation Metrics
 
-### 12.1 Metric Selection Rationale
+### 11.1 Metric Selection Rationale
 
 **Why multiple metrics?** No single metric captures all aspects of generation quality. BLEU measures surface-level n-gram overlap, METEOR adds synonym awareness, and BERTScore captures deep semantic similarity. Using all three provides a comprehensive picture.
 
@@ -1170,15 +980,15 @@ To prevent repetitive output during beam search, trigram blocking sets $\log P(w
 
 ★ = Primary metrics for evaluation and comparison.
 
-### 12.2 Why Not VQA Accuracy?
+### 11.2 Why Not VQA Accuracy?
 
 Traditional VQA Accuracy (classification-based) counts exact matches against ground-truth answer pools. This is designed for short classification answers and is **not suitable** for evaluating generative outputs of varying length and structure. A generated explanation "yes, the dog is running on the grass" would score 0% VQA Accuracy even though it correctly answers the question.
 
 ---
 
-## 13. Hyperparameters Summary
+## 12. Hyperparameters Summary
 
-### 13.1 Model Hyperparameters
+### 12.1 Model Hyperparameters
 
 | Hyperparameter | Value | Applies To | Rationale |
 |---|---|---|---|
@@ -1191,7 +1001,7 @@ Traditional VQA Accuracy (classification-based) counts exact matches against gro
 | `max_q_len` | Dynamic | DataLoader | Padded to longest in batch (no truncation) |
 | `max_a_len` | Dynamic | DataLoader | Padded to longest in batch |
 
-### 13.2 Training Hyperparameters
+### 12.2 Training Hyperparameters
 
 | Hyperparameter | Phase 1 | Phase 2 | Phase 3 | Rationale |
 |---|---|---|---|---|
@@ -1210,9 +1020,9 @@ Traditional VQA Accuracy (classification-based) counts exact matches against gro
 
 ---
 
-## 14. Parameter Count & Complexity
+## 13. Parameter Count & Complexity
 
-### 14.1 Component-Level Parameter Counts (Approximate)
+### 13.1 Component-Level Parameter Counts (Approximate)
 
 | Component | Parameters (approx.) | Notes |
 |---|---|---|
@@ -1225,7 +1035,7 @@ Traditional VQA Accuracy (classification-based) counts exact matches against gro
 | **LSTMDecoder (no attention)** | ~22M | Embedding + 2-layer LSTM + output |
 | **LSTMDecoderWithAttention** | ~35M | Above + 2× Bahdanau attention + larger LSTM input |
 
-### 14.2 Total Model Parameters
+### 13.2 Total Model Parameters
 
 | Model | Total Params | Trainable Params | Frozen Params | Checkpoint Size |
 |---|---|---|---|---|
@@ -1241,27 +1051,13 @@ Traditional VQA Accuracy (classification-based) counts exact matches against gro
 - Despite having fewer trainable parameters than C, Model D achieves higher performance — confirming that frozen pretrained features provide more information than additional learnable scratch weights.
 - Model D's checkpoint (375.5 MB) is ~2× Model A (183.8 MB), reflecting the cost of storing the full ResNet101 backbone (even frozen).
 
-### 14.3 Computational Complexity (Approximate)
-
-| Model | CNN FLOPs | Attention FLOPs/step | LSTM FLOPs/step | Relative Speed | Min Batch Size |
-|---|---|---|---|---|---|
-| **A** | ~2 GFLOPs | — | ~30 MFLOPs | Fastest (1×) | 64 |
-| **B** | ~8 GFLOPs | — | ~30 MFLOPs | ~2× slower | 32 |
-| **C** | ~2 GFLOPs | ~50 MFLOPs | ~60 MFLOPs | ~2× slower | 32 |
-| **D** | ~8 GFLOPs | ~50 MFLOPs | ~60 MFLOPs | ~4× slower | 16 |
-
-**Key observations:**
-- The CNN forward pass dominates FLOPs (ResNet101 ≈ 8 GFLOPs vs SimpleCNN ≈ 2 GFLOPs)
-- Attention adds moderate per-step cost but requires sequential execution (cannot be parallelized across steps)
-- Model D is ~4× slower than Model A per sample, making training time a practical concern
-
 ---
 
-## 15. Experimental Results
+## 14. Experimental Results
 
 All four models (A, B, C, D) were trained using the three-phase progressive training strategy described in Section 8. The planned schedule was 10+5+5 = 20 epochs. The actual training history (from `history_model_{a,b,c,d}.json`) recorded the following total epochs: **Model A: 30 epochs, Model B: 30 epochs, Model C: 32 epochs, Model D: 35 epochs**. The extra epochs beyond the planned 20 reflect Phase 3 continuation under early stopping patience=5; however, epochs 26–30 (A/B/C) and 31–35 (D) show a characteristic abrupt training-loss spike (from ~3.2–3.4 to ~4.1–4.3), consistent with a fresh training restart being appended to the history file — these post-spike epochs do not affect the saved best checkpoints. Evaluation was performed on the **full VQA-E validation set** (88,488 samples) using best checkpoints selected by lowest validation loss. All metrics are computed against ground-truth explanatory answers.
 
-### 15.1 Training Curves
+### 14.1 Training Curves
 
 ![Training and Validation Loss Curves](outputs/eval_training_curves.png)
 
@@ -1287,18 +1083,7 @@ All four models (A, B, C, D) were trained using the three-phase progressive trai
 
 5. **Train-val loss gap:** All models show widening train-val gap during Phase 3. Model B's gap is largest (train=2.65, val=3.29 at ep25 = gap of 0.64) — reflecting aggressive ResNet fine-tuning. Model A's gap remains smallest (train=3.24, val=3.38 = gap of 0.14), consistent with a simpler scratch CNN overfitting less.
 
-### 15.2 Model Architecture Summary
-
-| Model | Architecture | Total Params | Trainable Params | Checkpoint Size |
-|---|---|---|---|---|
-| **A** | SimpleCNN + LSTM (No Attention) | 45.9M | 45.9M | 183.8 MB |
-| **B** | ResNet101 + LSTM (No Attention) | 83.2M | 40.7M | 333.5 MB |
-| **C** | SimpleCNN Spatial + Dual Attention + Coverage | 56.4M | 56.4M | 225.8 MB |
-| **D** | ResNet101 Spatial + Dual Attention + Coverage | 93.7M | 51.2M | 375.5 MB |
-
-*Note: Models B and D have more total parameters due to the frozen ResNet101 backbone (~42.5M frozen params). Their trainable parameter counts are comparable to or lower than the scratch models, demonstrating the efficiency of transfer learning — better features with similar learnable capacity.*
-
-### 15.3 Training Loss Summary (Per Phase)
+### 14.2 Training Loss Summary (Per Phase)
 
 **Phase milestone summary** (train loss / val loss):
 
@@ -1324,7 +1109,7 @@ All four models (A, B, C, D) were trained using the three-phase progressive trai
 
 *Note the reversed B/D ranking: B achieves marginally lower val_loss than D (0.0038 difference), but D outperforms B on all downstream evaluation metrics. Val_loss is a proxy for generation quality; BLEU/METEOR/BERTScore on the held-out set better reflect real answer quality. Model D's attention mechanism and pretrained spatial features contribute quality that the cross-entropy training loss does not fully capture.*
 
-### 15.4 Greedy Decoding Results (Best Checkpoint, Full Val Set)
+### 14.3 Greedy Decoding Results (Best Checkpoint, Full Val Set)
 
 ![Greedy Decoding Comparison](outputs/eval_comparison_greedy.png)
 
@@ -1345,10 +1130,10 @@ All four models (A, B, C, D) were trained using the three-phase progressive trai
 - **METEOR range: 0.3117 → 0.3595** — a 15.3% relative improvement, indicating meaningful gains in synonym/stemming-aware evaluation.
 - **ROUGE-L range: 0.3828 → 0.4270** — a 11.5% relative improvement, and all four models exceed Li et al.'s best (0.3633) by a substantial margin. ROUGE-L correlates strongly with BLEU-4 ordering (D > B > C > A), providing independent metric confirmation of the main result.
 - **BERTScore is high across all models** (>0.90), but the range is remarkably narrow (0.9008 → 0.9085, a span of only 0.0077). This near-ceiling effect indicates that BERTScore is **not discriminating effectively** among these four models. The reason: VQA-E answers always follow the structural template *"[answer] because [explanation]"*. All models produce text in this same semantic neighborhood, so BERT contextual embeddings produce uniformly high cosine similarities. BERTScore is most useful when comparing semantically diverse outputs (e.g., correct vs. completely wrong answers). For models that all produce correct-template outputs, BLEU-4 and METEOR are more discriminating metrics for this task.
-- **Exact Match is universally low** (2.8%–5.9%), expected for generative outputs; semantic equivalents rarely share identical surface forms. Note that EM rises significantly under beam search (§15.5).
+- **Exact Match is universally low** (2.8%–5.9%), expected for generative outputs; semantic equivalents rarely share identical surface forms. Note that EM rises significantly under beam search (§14.4).
 - **Parameter efficiency:** Model B delivers BLEU-4 = 0.1127 with only 40.7M trainable parameters — the best BLEU-4 per trainable parameter ratio (0.00277/10M params). Model D achieves 0.1159 with 51.2M trainable params (0.00226/10M params). The ~23% more trainable parameters in D yield only ~2.8% additional BLEU-4, suggesting diminishing returns from dual attention when strong pretrained features are already present.
 
-### 15.5 Beam Search Results (beam_width=3, n-gram blocking=3)
+### 14.4 Beam Search Results (beam_width=3, n-gram blocking=3)
 
 ![Greedy vs Beam Search](outputs/eval_greedy_vs_beam.png)
 
@@ -1378,55 +1163,7 @@ All four models (A, B, C, D) were trained using the three-phase progressive trai
 - **ROUGE-L is virtually unchanged by beam search** (Δ ≤ 0.07% across all models). Unlike Exact Match, ROUGE-L measures Longest Common Subsequence overlap — it is insensitive to whether the model picks the single most probable token (greedy) or explores alternatives (beam). This confirms that beam search's benefit is purely in surface-form canonicalization, not in generating longer or more fluent explanations.
 - **Model D benefits most** from beam search in absolute EM terms (5.88% → 11.07%), suggesting that attention + pretrained features create a richer, more semantically diverse search space that beam width=3 exploits more effectively than simpler architectures.
 
-### 15.6 BLEU-4 Score Distribution
-
-![BLEU-4 Distribution](outputs/eval_bleu4_distribution.png)
-
-*Figure 15.4: Distribution of per-sample BLEU-4 scores across the validation set for each model. The distributions reveal the spread and consistency of model performance beyond aggregate averages.*
-
-The BLEU-4 distribution plots reveal important characteristics hidden by aggregate averages:
-
-- **Heavy left skew:** All four models exhibit a substantial mass at BLEU-4 = 0, corresponding to samples where the model's answer shares no 4-gram overlap with the ground truth. This is inherent to generative VQA — many valid answers use different phrasing.
-- **Model D shows the widest right tail**, indicating it produces more samples with high BLEU-4 scores (>0.3), consistent with its superior mean performance.
-- **The mode (peak) shifts rightward** from A → D, confirming systematic quality improvement across the architecture progression.
-
-### 15.7 Performance by Question Type
-
-![Performance by Question Type](outputs/eval_question_type.png)
-
-*Figure 15.5: BLEU-4 performance breakdown by question type (what, is/are, how, where, etc.). Different architectures show varying strengths across question categories.*
-
-**Analysis by question type:**
-
-- **"What" questions** (largest category): All models perform similarly, with D holding a slight edge. These questions test general visual recognition and are the broadest category.
-- **"Is/Are" questions** (yes/no + explanation): Pretrained models (B, D) show clearer advantages here, likely because yes/no judgments benefit from robust object recognition capabilities that pretrained features provide.
-- **"How many" questions** (counting): The most challenging category for all models — attention models (C, D) show marginal improvement, suggesting that spatial attention helps localize and count objects but remains limited.
-- **Spatial questions** ("where"): Attention models show their largest relative improvement on spatial questions, confirming that the ability to attend to specific image regions is particularly valuable for spatial reasoning.
-
-### 15.8 Answer Length Analysis
-
-![Answer Length Analysis](outputs/eval_length_analysis.png)
-
-*Figure 15.6: Analysis of generated answer lengths vs ground-truth answer lengths. Shows how each model's output length distribution compares to the reference.*
-
-The length analysis reveals interesting generation behavior:
-
-- All models tend to generate answers that are **slightly shorter** than the ground-truth explanations, consistent with the "safe generation" tendency of neural language models.
-- **Attention models (C, D)** produce answers closer to the ground-truth length distribution, suggesting that attention over both image and question context helps the decoder determine appropriate explanation length.
-- **Models A and B** show a stronger tendency toward shorter answers, likely because without attention the decoder loses context over longer generation sequences and terminates early.
-
-### 15.9 Confidence Intervals
-
-![Confidence Intervals](outputs/eval_confidence_intervals.png)
-
-*Figure 15.7: 95% bootstrap confidence intervals for primary metrics (BLEU-4, METEOR, BERTScore) across all four models. Non-overlapping intervals indicate statistically significant differences.*
-
-The confidence interval analysis confirms:
-- The performance differences between Model A and Models B/D are **statistically significant** (non-overlapping 95% CIs for BLEU-4 and METEOR).
-- Models B and D show **overlapping confidence intervals** for some metrics, indicating that the attention mechanism provides modest but not always statistically significant gains when combined with already-strong pretrained features.
-- All models have **non-overlapping BERTScore CIs**, confirming that even small differences in this metric are significant given the large evaluation set (88,488 samples).
-
-### 15.10 Model Efficiency Analysis
+### 14.5 Model Efficiency Analysis
 
 **BLEU-4 per 10M trainable parameters** (efficiency metric):
 
@@ -1456,13 +1193,13 @@ The confidence interval analysis confirms:
 
 4. **Checkpoint size implications:** Model D at 375.5 MB is 2.04× larger than Model A (183.8 MB). For edge deployment where memory is constrained, Model B (333.5 MB) is preferable; for minimal footprint, Model A.
 
-### 15.11 Qualitative Examples
+### 14.6 Qualitative Examples
 
 The following examples are taken directly from notebook output cells in `vqa_evaluation_colab_complete.ipynb`. They are not cherry-picked — the cross-model comparison samples were drawn randomly from the validation set.
 
 ---
 
-#### 15.11.1 Cross-Model Comparison (8 Random Samples)
+#### 14.6.1 Cross-Model Comparison (8 Random Samples)
 
 All four models evaluated on identical inputs. ★ indicates attention-based models (C, D).
 
@@ -1594,7 +1331,7 @@ All four models evaluated on identical inputs. ★ indicates attention-based mod
 
 ---
 
-#### 15.11.2 Beam Search vs. Greedy Decoding (Model D)
+#### 14.6.2 Beam Search vs. Greedy Decoding (Model D)
 
 Beam search (width=5) with trigram blocking vs. greedy decoding on the same 6 samples:
 
@@ -1614,7 +1351,7 @@ Beam search (width=5) with trigram blocking vs. greedy decoding on the same 6 sa
 
 ---
 
-#### 15.11.3 Top-10 Best Predictions — Model D
+#### 14.6.3 Top-10 Best Predictions — Model D
 
 Model D's 10 highest BLEU-4 predictions on the validation set:
 
@@ -1635,7 +1372,7 @@ Model D's 10 highest BLEU-4 predictions on the validation set:
 
 ---
 
-#### 15.11.4 Top-10 Worst Predictions — Model D
+#### 14.6.4 Top-10 Worst Predictions — Model D
 
 Model D's 10 lowest BLEU-4 predictions (hardest cases):
 
@@ -1664,9 +1401,9 @@ Model D's 10 lowest BLEU-4 predictions (hardest cases):
 
 ---
 
-## 16. Comparison & Analysis
+## 15. Comparison & Analysis
 
-### 16.1 Effect of Pretrained Features (A vs B, C vs D)
+### 15.1 Effect of Pretrained Features (A vs B, C vs D)
 
 The most impactful architectural decision in our experiments is the choice of visual encoder: **pretrained ResNet101 features consistently and substantially outperform a from-scratch SimpleCNN**.
 
@@ -1700,7 +1437,7 @@ The most impactful architectural decision in our experiments is the choice of vi
 
 4. **Training stability:** Models B and D converge faster (lower loss at every phase checkpoint) and show less overfitting in Phase 3, suggesting that pretrained features also serve as implicit regularization.
 
-### 16.2 Effect of Attention Mechanism (A vs C, B vs D)
+### 15.2 Effect of Attention Mechanism (A vs C, B vs D)
 
 The dual attention mechanism (image attention + question attention) with coverage provides consistent but more modest improvements compared to pretrained features.
 
@@ -1737,7 +1474,7 @@ The dual attention mechanism (image attention + question attention) with coverag
    - Actual D: 0.1159
    - The shortfall (0.0041) confirms that pretrained features and attention are **partially redundant** — both address the same underlying weakness (insufficient visual understanding), so their benefits overlap.
 
-### 16.3 The 2×2 Factorial Design: Interaction Analysis
+### 15.3 The 2×2 Factorial Design: Interaction Analysis
 
 Our experimental design forms a clean 2×2 factorial matrix, allowing us to decompose performance into main effects and interaction:
 
@@ -1760,7 +1497,7 @@ Pretrained CNN    B (0.1127)            D (0.1159)          +0.0032
 
 **Practical implication:** If computational budget forces a choice between pretrained features and attention, **pretrained features should be prioritized** — they provide ~3.6× larger BLEU-4 improvement on average and the efficiency gain (fewer trainable params with better features) is unmatched by any decoder modification.
 
-### 16.4 Progressive Training Analysis
+### 15.4 Progressive Training Analysis
 
 The three-phase training strategy was designed to incrementally improve model quality. The loss trajectory at phase boundaries reveals how each phase contributes:
 
@@ -1782,7 +1519,7 @@ The three-phase training strategy was designed to incrementally improve model qu
 - All best checkpoints (by val_loss) are still from Phase 1/2 (ep 15–16), confirming that scheduled sampling is primarily a **robustness improvement** for inference, not a validation-loss optimizer.
 - Beam search results show that scheduled sampling likely contributed to the **strong Exact Match improvements** under beam search, by training the model to handle imperfect inputs more gracefully.
 
-### 16.5 Greedy vs Beam Search Analysis
+### 15.5 Greedy vs Beam Search Analysis
 
 | Model | Greedy BLEU-4 | Beam BLEU-4 | Δ BLEU-4 | Greedy RL | Beam RL | Δ RL | Greedy EM | Beam EM | Δ EM |
 |---|---|---|---|---|---|---|---|---|---|
@@ -1803,7 +1540,7 @@ The three-phase training strategy was designed to incrementally improve model qu
 
 4. **BERTScore slightly decreases** with beam search (−0.04 to −0.1%). This is a known trade-off: beam search favors high-probability (safe, conventional) phrasings at the cost of semantic diversity. The more "creative" greedy outputs occasionally capture meaning better despite lower lexical overlap.
 
-### 16.6 Error Analysis
+### 15.6 Error Analysis
 
 Based on qualitative examination of model predictions across the validation set, we identify several systematic error patterns:
 
@@ -1817,7 +1554,7 @@ Based on qualitative examination of model predictions across the validation set,
 
 **5. Color and attribute accuracy:** Pretrained models (B, D) show notably better color and attribute recognition, likely because ResNet101's ImageNet training includes fine-grained visual classification that teaches robust color/texture/shape features.
 
-### 16.7 Limitations
+### 15.7 Limitations
 
 1. **Single evaluation set:** All results are on VQA-E validation. Without test-set evaluation or cross-validation, there is a risk of overfitting to validation-set characteristics during checkpoint selection.
 
@@ -1827,13 +1564,13 @@ Based on qualitative examination of model predictions across the validation set,
 
 4. **Training budget:** 30 epochs limits hyperparameter exploration. Longer training, larger batch sizes, or more aggressive search could improve all models.
 
-5. **BERTScore discriminability:** As discussed in §15.4, BERTScore shows a near-ceiling effect (range 0.0076) across all four models for VQA-E output. This metric is less informative than BLEU-4 and METEOR for this specific task.
+5. **BERTScore discriminability:** As discussed in §14.3, BERTScore shows a near-ceiling effect (range 0.0076) across all four models for VQA-E output. This metric is less informative than BLEU-4 and METEOR for this specific task.
 
-### 16.8 Ablation Analysis of Architectural Improvements
+### 15.8 Ablation Analysis of Architectural Improvements
 
 This section analyzes the contribution of each architectural improvement. Because full ablation experiments (training separate models with each component individually removed) require significant compute, we perform two types of analysis: (1) **empirical ablations** derivable from the 2×2 factorial design, and (2) **architectural reasoning** for improvements not isolated by the factorial design.
 
-#### 16.8.1 Empirically Measured Contributions (from 2×2 Factorial)
+#### 15.8.1 Empirically Measured Contributions (from 2×2 Factorial)
 
 The 2×2 factorial design provides two direct ablations:
 
@@ -1844,7 +1581,7 @@ The 2×2 factorial design provides two direct ablations:
 
 **Finding:** Pretrained visual features contribute ~3.6× more BLEU-4 improvement than dual attention on average (0.0192 vs 0.0053). The single most impactful design decision is the visual encoder choice, not the decoder architecture — a result confirmed consistently across BLEU-4, METEOR, and ROUGE-L.
 
-#### 16.8.2 Contribution Analysis of Remaining 9 Improvements
+#### 15.8.2 Contribution Analysis of Remaining 9 Improvements
 
 For the 9 improvements not isolated by the factorial design, we reason from first principles and published literature:
 
@@ -1860,33 +1597,17 @@ For the 9 improvements not isolated by the factorial design, we reason from firs
 | **N-gram Blocking** | Eliminates beam search repetition artifacts | Hard constraint; ~1–2pp Exact Match improvement |
 | **Gradient Accumulation** | Training stability at effective batch=64–128 | Enables larger effective batches under GPU memory constraints |
 
-#### 16.8.3 Proposed Full Ablation Study
+#### 15.8.4 Key Ablation Insight
 
-A rigorous ablation would train the following configurations starting from Model D (best):
-
-| Ablation Config | Removed Component | Expected BLEU-4 Change |
-|---|---|---|
-| D − GloVe | Random embeddings instead of GloVe 300d | −0.005 to −0.010 |
-| D − BiLSTM | Unidirectional LSTM Q-Encoder | −0.003 to −0.007 |
-| D − GatedFusion | Hadamard fusion: `img ⊙ q` | −0.002 to −0.005 |
-| D − Coverage | Image attention only (no coverage loss) | Repetition increase; −0.001 BLEU |
-| D − Q-Attention | Image attention only in decoder | −0.003 to −0.006 |
-| D − LabelSmooth | Standard CE loss (`α=0`) | −0.002 to −0.004 (calibration effect) |
-| D − WeightTying | Independent output projection | ~0 BLEU change; parameter efficiency loss |
-
-*These are projected estimates based on published literature. Running these ablations would provide empirical validation and is recommended as future work.*
-
-#### 16.8.4 Key Ablation Insight
-
-The factorial analysis in §16.3 already provides the two most important ablations (features and attention). The remaining 9 improvements are primarily **training stabilizers** (warmup, gradient accumulation, label smoothing), **regularizers** (weight tying, dropout, weight decay), or **inference quality** improvements (n-gram blocking, beam search). Their individual contributions are smaller than the two major architectural decisions but collectively provide the conditions needed for stable, generalizable training.
+The factorial analysis in §15.3 already provides the two most important ablations (features and attention). The remaining 9 improvements are primarily **training stabilizers** (warmup, gradient accumulation, label smoothing), **regularizers** (weight tying, dropout, weight decay), or **inference quality** improvements (n-gram blocking, beam search). Their individual contributions are smaller than the two major architectural decisions but collectively provide the conditions needed for stable, generalizable training.
 
 ---
 
-### 16.9 Comparison with Li et al. (2018) — Original VQA-E Paper
+### 15.9 Comparison with Li et al. (2018) — Original VQA-E Paper
 
 This section provides a detailed comparison between our results and the original VQA-E paper (Li, Tao, Joty, Cai, Luo, ECCV 2018), the defining work that introduced this task, dataset, and initial baselines.
 
-#### 16.9.1 Architecture Comparison
+#### 15.9.1 Architecture Comparison
 
 | Dimension | Li et al. (2018) | **Ours (Model D)** |
 |---|---|---|
@@ -1911,7 +1632,7 @@ This section provides a detailed comparison between our results and the original
 
 ---
 
-#### 16.9.2 Quantitative Comparison — BLEU and ROUGE-L (All scores in %)
+#### 15.9.2 Quantitative Comparison — BLEU and ROUGE-L (All scores in %)
 
 | Model | BLEU-1 | BLEU-2 | BLEU-3 | BLEU-4 | ROUGE-L | vs. Li best (B4) |
 |---|---|---|---|---|---|---|
@@ -1940,7 +1661,7 @@ This section provides a detailed comparison between our results and the original
 
 ---
 
-#### 16.9.3 METEOR — Implementation Discrepancy Analysis
+#### 15.9.3 METEOR — Implementation Discrepancy Analysis
 
 | Source | METEOR (%) | Implementation |
 |---|---|---|
@@ -1961,7 +1682,7 @@ METEOR has several computation modes depending on whether synonym matching and p
 
 ---
 
-#### 16.9.4 CIDEr-D and ROUGE-L
+#### 15.9.4 CIDEr-D and ROUGE-L
 
 Li et al. also report **CIDEr-D** and **ROUGE-L**:
 
@@ -1996,7 +1717,7 @@ Evaluation results confirm our ROUGE-L scores significantly exceed Li et al.'s b
 
 ---
 
-#### 16.9.5 Why We Outperform Li et al. — Attribution Analysis
+#### 15.9.5 Why We Outperform Li et al. — Attribution Analysis
 
 Given that Li et al. use multi-task learning (a structural advantage we lack), our outperformance on BLEU-4 can be attributed to the following factors:
 
@@ -2014,7 +1735,7 @@ Given that Li et al. use multi-task learning (a structural advantage we lack), o
 
 ---
 
-#### 16.9.6 Honest Limitations vs. Li et al.
+#### 15.9.6 Honest Limitations vs. Li et al.
 
 We are stronger on BLEU metrics but weaker or incomparable in several ways:
 
@@ -2030,9 +1751,9 @@ We are stronger on BLEU metrics but weaker or incomparable in several ways:
 
 ---
 
-## 17. Conclusion
+## 16. Conclusion
 
-### 17.1 Summary of Findings
+### 16.1 Summary of Findings
 
 This project designed, implemented, and evaluated four VQA architectures in a systematic 2×2 factorial design, varying two architectural dimensions: **visual encoder** (scratch SimpleCNN vs. pretrained ResNet101) and **decoder strategy** (standard LSTM vs. dual attention LSTM with coverage). All models were trained under identical conditions on the VQA-E dataset (181K training samples) and evaluated on the full validation set (88,488 samples).
 
@@ -2044,7 +1765,7 @@ This project designed, implemented, and evaluated four VQA architectures in a sy
 
 **Q3: Do they compose?** — **Yes, sub-additively.** Model D (pretrained + attention) achieves the best performance across all 8 metrics, but the combined improvement (BLEU-4: +0.0244 over A) is less than the sum of individual contributions (+0.0212 + +0.0073 = +0.0285). Pretrained features and attention partially address the same underlying challenge (visual understanding), leading to diminishing returns when combined. The shortfall (0.0041 BLEU-4) confirms a negative interaction between the two factors.
 
-### 17.2 Final Model Rankings
+### 16.2 Final Model Rankings
 
 | Rank | Model | BLEU-4 (Greedy) | METEOR | ROUGE-L | BERTScore | Exact Match | Key Advantage |
 |---|---|---|---|---|---|---|---|
@@ -2053,7 +1774,7 @@ This project designed, implemented, and evaluated four VQA architectures in a sy
 | 3 | **C** | 0.0988 | 0.3271 | 0.3971 | 0.9034 | 4.18% | Attention compensates for weak CNN |
 | 4 | **A** | 0.0915 | 0.3117 | 0.3828 | 0.9008 | 2.83% | Minimal baseline — validates design |
 
-### 17.3 Architectural Contributions
+### 16.3 Architectural Contributions
 
 This project contributes the following architectural and methodological elements:
 
@@ -2062,12 +1783,12 @@ This project contributes the following architectural and methodological elements
 - **Coverage Mechanism** to reduce repetitive generation — encouraging diverse attention patterns across decode steps, following See et al. (2017).
 - **BiLSTM Question Encoder** with optional GloVe 300d pretrained embeddings — capturing bidirectional context with strong word-level initialization.
 
-> **Note on GloVe usage in experiments:** The GloVe embedding pipeline is fully implemented and supported via the `--glove` flag. The primary experiments in §15 were conducted without GloVe (`--glove` not specified), using randomly initialized embeddings fine-tuned from scratch. This decision was made to ensure all four models are on equal footing in the training budget comparison. A GloVe-enabled run is expected to improve BLEU-4 by ~0.005–0.010 (see ablation projection in §16.8.3) and is recommended for deployment.
+> **Note on GloVe usage in experiments:** The GloVe embedding pipeline is fully implemented and supported via the `--glove` flag. The primary experiments in §14 were conducted without GloVe (`--glove` not specified), using randomly initialized embeddings fine-tuned from scratch. This decision was made to ensure all four models are on equal footing in the training budget comparison. A GloVe-enabled run is expected to improve BLEU-4 by ~0.005–0.010 (see §16.5 Future Work) and is recommended for deployment.
 
 - **Three-phase progressive training** — systematic progression from teacher forcing → fine-tuning → scheduled sampling, with controlled phase transitions and relative-epoch scheduling to ensure stable exposure bias reduction.
 - **Systematic 2×2 factorial design** — enabling clean empirical decomposition of the contribution of pretrained features and attention mechanisms via controlled ablation.
 
-### 17.4 Practical Recommendations
+### 16.4 Practical Recommendations
 
 Based on our experimental findings, we offer the following recommendations for practitioners building CNN-LSTM VQA systems:
 
@@ -2079,7 +1800,7 @@ Based on our experimental findings, we offer the following recommendations for p
 
 4. **Prefer greedy decoding for speed, beam search for precision** — beam search provides negligible BLEU improvement but substantial Exact Match gains. For real-time applications, greedy is sufficient; for offline evaluation or when exact phrasing matters, beam search is worthwhile.
 
-### 17.5 Future Work
+### 16.5 Future Work
 
 Several directions could extend this work:
 
@@ -2095,7 +1816,7 @@ Several directions could extend this work:
 
 ---
 
-## 18. References
+## 17. References
 
 1. **Antol, S., et al.** (2015). "VQA: Visual Question Answering." *ICCV 2015.*
 2. **Li, Q., et al.** (2018). "VQA-E: Explaining, Elaborating, and Enhancing Your Answers for Visual Questions." *ECCV 2018.*
