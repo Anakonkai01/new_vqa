@@ -984,6 +984,131 @@ To prevent repetitive output during beam search, trigram blocking sets $\log P(w
 
 Traditional VQA Accuracy (classification-based) counts exact matches against ground-truth answer pools. This is designed for short classification answers and is **not suitable** for evaluating generative outputs of varying length and structure. A generated explanation "yes, the dog is running on the grass" would score 0% VQA Accuracy even though it correctly answers the question.
 
+### 11.3 Metric Computation
+
+Let $\hat{y} = (\hat{w}_1, \dots, \hat{w}_{m})$ be the predicted sequence and $y = (w_1, \dots, w_n)$ be the reference sequence.
+
+---
+
+#### 11.3.1 BLEU (Bilingual Evaluation Understudy)
+
+BLEU-$N$ measures **modified $n$-gram precision** between hypothesis and reference, with a **brevity penalty** to penalize very short outputs.
+
+**Step 1 — Clipped $n$-gram count.** For each $n$-gram $g$ of order $k$, clip its count in the hypothesis to the maximum count found in the reference:
+
+$$\text{Count}_{\text{clip}}(g) = \min\!\bigl(\text{Count}_{\hat{y}}(g),\; \text{Count}_{y}(g)\bigr)$$
+
+**Step 2 — Modified $n$-gram precision** for order $k$:
+
+$$p_k = \frac{\displaystyle\sum_{g \in \hat{y},\,|g|=k} \text{Count}_{\text{clip}}(g)}{\displaystyle\sum_{g \in \hat{y},\,|g|=k} \text{Count}_{\hat{y}}(g)}$$
+
+**Step 3 — Brevity penalty:**
+
+$$\text{BP} = \begin{cases} 1 & \text{if } m \geq n \\ \exp\!\left(1 - \dfrac{n}{m}\right) & \text{if } m \lt n \end{cases}$$
+
+**Step 4 — BLEU-$N$ score** (geometric mean of $p_1, \dots, p_N$):
+
+$$\text{BLEU-}N = \text{BP} \cdot \exp\!\left(\frac{1}{N}\sum_{k=1}^{N} \log p_k\right)$$
+
+For our primary metric **BLEU-4**, $N=4$. If any $p_k = 0$ the score is 0 (log-zero handled by returning 0).
+
+**Example** (BLEU-1):
+> Hypothesis: *"a dog is running"* (4 tokens)
+> Reference: *"a dog runs on grass"* (5 tokens)
+> Matching unigrams (clipped): "a"(1), "dog"(1), "is"(0, not in ref), "running"(0) → Count$_\text{clip}$ = 2
+> $p_1 = 2/4 = 0.50$, BP $= \exp(1 - 5/4) = 0.78$
+> BLEU-1 $= 0.78 \times 0.50 = 0.39$
+
+---
+
+#### 11.3.2 METEOR (Metric for Evaluation of Translation with Explicit ORdering)
+
+METEOR aligns the hypothesis and reference at the unigram level, allowing **exact, stem, synonym, and paraphrase** matches (we use exact + stem + synonym via WordNet).
+
+**Step 1 — Alignment.** Find the maximum alignment $A$ between unigrams of $\hat{y}$ and $y$ (each unigram matched at most once), using WordNet synonymy and Porter stemming to extend exact matches.
+
+**Step 2 — Unigram Precision and Recall:**
+
+$$P = \frac{|A|}{m}, \qquad R = \frac{|A|}{n}$$
+
+**Step 3 — Harmonic mean** (weighted toward recall):
+
+$$F_{\text{mean}} = \frac{10 \cdot P \cdot R}{9P + R}$$
+
+**Step 4 — Chunk penalty.** Let $c$ = number of contiguous matched chunks in $\hat{y}$ (fewer chunks = better word order):
+
+$$\text{pen} = 0.5 \times \left(\frac{c}{|A|}\right)^3$$
+
+**Step 5 — METEOR score:**
+
+$$\text{METEOR} = F_{\text{mean}} \times (1 - \text{pen})$$
+
+**Key property:** METEOR rewards exact-match sequences ("the dog is running" matching "the dog is running") with $c = 1$ chunk and zero fragmentation penalty, while penalizing reordered matches.
+
+---
+
+#### 11.3.3 ROUGE-L (Recall-Oriented Understudy for Gisting Evaluation — Longest Common Subsequence)
+
+ROUGE-L measures the **Longest Common Subsequence (LCS)** between hypothesis and reference. Unlike BLEU, it rewards correct word order even without contiguous $n$-gram matches.
+
+**Step 1 — LCS length.** Let $\text{LCS}(\hat{y}, y)$ = length of the longest common subsequence (not necessarily contiguous):
+
+$$\text{LCS}(\hat{y},\, y) = \text{LCS}\bigl((\hat{w}_1,\dots,\hat{w}_m),\; (w_1,\dots,w_n)\bigr)$$
+
+Computed via dynamic programming in $O(mn)$ time.
+
+**Step 2 — LCS Precision and Recall:**
+
+$$P_{\text{lcs}} = \frac{\text{LCS}(\hat{y},\, y)}{m}, \qquad R_{\text{lcs}} = \frac{\text{LCS}(\hat{y},\, y)}{n}$$
+
+**Step 3 — F1 score** ($\beta = 1$, balanced precision/recall):
+
+$$\text{ROUGE-L} = \frac{(1+\beta^2)\, P_{\text{lcs}}\, R_{\text{lcs}}}{\beta^2\, P_{\text{lcs}} + R_{\text{lcs}}} = \frac{2\, P_{\text{lcs}}\, R_{\text{lcs}}}{P_{\text{lcs}} + R_{\text{lcs}}}$$
+
+**Example:**
+> Hypothesis: *"a dog runs fast"*, Reference: *"the dog is running fast"*
+> LCS = ("dog", "fast") → length = 2
+> $P_{\text{lcs}} = 2/4 = 0.50$, $R_{\text{lcs}} = 2/5 = 0.40$
+> ROUGE-L $= 2 \times 0.50 \times 0.40 \,/\, (0.50 + 0.40) = 0.444$
+
+**Why LCS beats $n$-gram overlap:** *"dog fast runs"* and *"dog runs fast"* have different bigrams but the same LCS — ROUGE-L correctly captures that the same words are used regardless of minor reordering.
+
+---
+
+#### 11.3.4 BERTScore
+
+BERTScore computes **token-level semantic similarity** using contextual embeddings from a pretrained BERT model (we use `bert-base-uncased`).
+
+**Step 1 — Embed tokens.** Run BERT on both hypothesis and reference to obtain contextual embedding vectors:
+
+$$\hat{\mathbf{h}}_i = \text{BERT}(\hat{y})_i \in \mathbb{R}^{768}, \qquad \mathbf{h}_j = \text{BERT}(y)_j \in \mathbb{R}^{768}$$
+
+**Step 2 — Pairwise cosine similarity:**
+
+$$s_{ij} = \frac{\hat{\mathbf{h}}_i^\top \mathbf{h}_j}{\|\hat{\mathbf{h}}_i\|\, \|\mathbf{h}_j\|}$$
+
+**Step 3 — Greedy token matching.** Each hypothesis token is matched to its most similar reference token, and vice versa:
+
+$$P_{\text{BERT}} = \frac{1}{m} \sum_{i=1}^{m} \max_{j} s_{ij}, \qquad R_{\text{BERT}} = \frac{1}{n} \sum_{j=1}^{n} \max_{i} s_{ij}$$
+
+**Step 4 — F1 BERTScore:**
+
+$$\text{BERTScore} = \frac{2\, P_{\text{BERT}}\, R_{\text{BERT}}}{P_{\text{BERT}} + R_{\text{BERT}}}$$
+
+**Why BERTScore captures semantics:** The words "running" and "jogging" will have high cosine similarity in BERT embedding space (both appear in similar contextual patterns), so a hypothesis using "jogging" will still score highly against a reference using "running" — something BLEU completely misses.
+
+**Near-ceiling effect in our results:** Since all four models produce structurally identical outputs (template: *"[answer] because [explanation]"*), their BERT embeddings are all in a similar semantic neighborhood, producing BERTScores above 0.90 with a narrow range of only 0.0077 (§14.3).
+
+---
+
+#### 11.3.5 Exact Match
+
+The strictest metric: 1 if the predicted string equals the reference exactly (after lowercasing and stripping whitespace), 0 otherwise:
+
+$$\text{EM}(\hat{y}, y) = \mathbf{1}\bigl[\hat{y} = y\bigr]$$
+
+Reported as a percentage over the full validation set. Expected to be low (<10%) for open-ended generation — useful mainly to track whether beam search converges on canonical phrasings.
+
 ---
 
 ## 12. Hyperparameters Summary
