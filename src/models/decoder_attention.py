@@ -48,6 +48,7 @@ import torch.nn.functional as F
 import os, sys
 sys.path.insert(0, os.path.dirname(__file__))
 from decoder_lstm import LayerNormLSTMStack, WeightDrop
+from pointer_generator import PointerGeneratorHead
 
 
 class DenseCoAttention(nn.Module):
@@ -247,12 +248,13 @@ class LSTMDecoderWithAttention(nn.Module):
     def __init__(self, vocab_size, embed_size, hidden_size, num_layers,
                  attn_dim=512, dropout=0.5, pretrained_embeddings=None,
                  use_coverage=False, use_layer_norm=False, use_dropconnect=False,
-                 use_dcan=False, num_heads=4):
+                 use_dcan=False, num_heads=4, use_pgn=False):
         """
         use_layer_norm  : Tier 1A+1C — LayerNormLSTMStack with highway connections
         use_dropconnect : Tier 1B    — DropConnect on hidden-to-hidden weights
         use_dcan        : Tier 2     — DenseCoAttention replacing both BahdanauAttention modules
         num_heads       : DCAN heads (default 4, hidden_size must be divisible by num_heads)
+        use_pgn         : Tier 5     — Pointer-Generator Network (copy from question)
         """
         super().__init__()
 
@@ -261,6 +263,8 @@ class LSTMDecoderWithAttention(nn.Module):
         self.use_coverage   = use_coverage
         self.use_layer_norm = use_layer_norm
         self.use_dcan       = use_dcan
+        self.use_pgn        = use_pgn
+        self.vocab_size     = vocab_size
 
         # Embedding: supports GloVe pretrained vectors
         if pretrained_embeddings is not None:
@@ -316,7 +320,18 @@ class LSTMDecoderWithAttention(nn.Module):
 
         self.dropout = nn.Dropout(dropout)
 
-    def forward(self, encoder_hidden, img_features, q_hidden_states, target_seq):
+        # Tier 5: Pointer-Generator Head
+        if use_pgn:
+            actual_embed_dim = self.embedding.embedding_dim if pretrained_embeddings is None \
+                               else embed_size
+            self.pgn = PointerGeneratorHead(
+                embed_size=actual_embed_dim,
+                hidden_size=hidden_size,
+                context_size=hidden_size,   # img_context dim
+            )
+
+    def forward(self, encoder_hidden, img_features, q_hidden_states, target_seq,
+                q_token_ids=None):
         """
         Training mode — Teacher Forcing with dual attention (image + question).
 
@@ -324,6 +339,7 @@ class LSTMDecoderWithAttention(nn.Module):
         img_features   : (batch, 49, hidden_size) -- spatial CNN output
         q_hidden_states: (batch, q_len, hidden_size) -- question encoder all timesteps
         target_seq     : (batch, max_len) -- [<start>, w1, w2, ...]
+        q_token_ids    : (batch, q_len) or None -- question vocab IDs (required for PGN)
 
         returns:
           logits        : (batch, max_len, vocab_size)
@@ -355,12 +371,12 @@ class LSTMDecoderWithAttention(nn.Module):
 
             # Dual attention: Bahdanau (default) or DCAN (Tier 2)
             if self.use_dcan:
-                img_context, q_context, img_alpha, _ = \
+                img_context, q_context, img_alpha, q_alpha = \
                     self.attention(img_features, q_hidden_states, h_top)
                 # Coverage not used with DCAN (DCAN has its own intra-modal self-attention)
             else:
                 img_context, img_alpha = self.img_attention(h_top, img_features, coverage)
-                q_context, _           = self.q_attention(h_top, q_hidden_states)
+                q_context, q_alpha     = self.q_attention(h_top, q_hidden_states)
 
             # Coverage loss: penalize re-attending to already-attended regions
             # Original See et al.: sum(min(alpha, coverage)) — but this is ~constant
@@ -378,7 +394,18 @@ class LSTMDecoderWithAttention(nn.Module):
             # Single LSTM step
             output, hidden = self.lstm(lstm_input, hidden)     # output: (batch, 1, hidden_size)
 
-            logit = self.fc(self.out_proj(output.squeeze(1)))    # (batch, vocab_size)
+            vocab_logit = self.fc(self.out_proj(output.squeeze(1)))  # (batch, vocab_size)
+
+            if self.use_pgn and q_token_ids is not None:
+                # Blend vocabulary and copy distributions via p_gen
+                # q_alpha: (batch, q_len) — attention over question tokens (from both DCAN and Bahdanau)
+                p_gen = self.pgn(embed_t, h_top, img_context)   # (batch,)
+                logit = PointerGeneratorHead.blend(
+                    p_gen, vocab_logit, q_alpha, q_token_ids, self.vocab_size
+                )
+            else:
+                logit = vocab_logit
+
             logits_list.append(logit)
 
         # Stack all steps
@@ -389,7 +416,8 @@ class LSTMDecoderWithAttention(nn.Module):
 
         return logits, coverage_loss
 
-    def decode_step(self, token, hidden, img_features, q_hidden_states, coverage=None):
+    def decode_step(self, token, hidden, img_features, q_hidden_states, coverage=None,
+                    q_token_ids=None):
         """
         Inference mode — one autoregressive step (used in inference.py)
 
@@ -398,6 +426,7 @@ class LSTMDecoderWithAttention(nn.Module):
         img_features    : (batch, 49, hidden_size)
         q_hidden_states : (batch, q_len, hidden_size)
         coverage        : (batch, 49) or None -- cumulative attention (for coverage)
+        q_token_ids     : (batch, q_len) or None -- question vocab IDs (required for PGN)
 
         returns:
           logit    : (batch, vocab_size)
@@ -408,14 +437,15 @@ class LSTMDecoderWithAttention(nn.Module):
         embed  = self.dropout(self.embedding(token))  # (batch, 1, glove_dim or embed_size)
         if self.embed_proj is not None:
             embed = self.embed_proj(embed)              # (batch, 1, embed_size)
+        embed_1d = embed.squeeze(1)                    # (batch, embed_size)
         h_top  = hidden[0][-1]                         # (batch, hidden_size)
 
         if self.use_dcan:
-            img_context, q_context, img_alpha, _ = \
+            img_context, q_context, img_alpha, q_alpha = \
                 self.attention(img_features, q_hidden_states, h_top)
         else:
             img_context, img_alpha = self.img_attention(h_top, img_features, coverage)
-            q_context, _           = self.q_attention(h_top, q_hidden_states)
+            q_context, q_alpha     = self.q_attention(h_top, q_hidden_states)
 
         # Update coverage (Bahdanau path only)
         if self.use_coverage and not self.use_dcan:
@@ -423,11 +453,19 @@ class LSTMDecoderWithAttention(nn.Module):
                 coverage = torch.zeros_like(img_alpha)
             coverage = coverage + img_alpha
 
-        lstm_input = torch.cat([embed.squeeze(1), img_context, q_context], dim=1).unsqueeze(1)
+        lstm_input = torch.cat([embed_1d, img_context, q_context], dim=1).unsqueeze(1)
         # (batch, 1, embed_size + hidden_size * 2)
 
         output, hidden = self.lstm(lstm_input, hidden)
-        logit = self.fc(self.out_proj(output.squeeze(1)))  # (batch, vocab_size)
+        vocab_logit = self.fc(self.out_proj(output.squeeze(1)))  # (batch, vocab_size)
+
+        if self.use_pgn and q_token_ids is not None:
+            p_gen = self.pgn(embed_1d, h_top, img_context)  # (batch,)
+            logit = PointerGeneratorHead.blend(
+                p_gen, vocab_logit, q_alpha, q_token_ids, self.vocab_size
+            )
+        else:
+            logit = vocab_logit
 
         return logit, hidden, img_alpha, coverage
 

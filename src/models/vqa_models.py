@@ -158,7 +158,7 @@ class VQAModelC(nn.Module):
                  embed_size=512, hidden_size=1024, num_layers=2, attn_dim=512, dropout=0.5,
                  pretrained_q_emb=None, pretrained_a_emb=None,
                  use_coverage=False, use_layer_norm=False, use_dropconnect=False,
-                 use_dcan=False):
+                 use_dcan=False, use_pgn=False):
         super().__init__()
 
         self.num_layers = num_layers
@@ -187,6 +187,7 @@ class VQAModelC(nn.Module):
             use_layer_norm=use_layer_norm,
             use_dropconnect=use_dropconnect,
             use_dcan=use_dcan,
+            use_pgn=use_pgn,
         )
 
     def forward(self, images, questions, target_seq):
@@ -199,30 +200,19 @@ class VQAModelC(nn.Module):
           logits        : (batch, max_a_len, answer_vocab_size)
           coverage_loss : scalar tensor (0.0 if coverage disabled)
         """
-        # ── Encode image ──────────────────────────────────────────
-        # Model A/B: (batch, hidden)      <- single global vector
-        # Model C  : (batch, 49, hidden)  <- 49 spatial regions
-        img_features = self.i_encoder(images)  # (batch, 49, hidden_size)
-
-        # L2 normalize each region independently
-        img_features = F.normalize(img_features, p=2, dim=-1)
-
-        # ── Encode question ────────────────────────────────────────
+        img_features = F.normalize(self.i_encoder(images), p=2, dim=-1)  # (batch, 49, H)
         q_feature, q_hidden_states = self.q_encoder(questions)
-        # q_feature: (batch, hidden_size)  q_hidden_states: (batch, q_len, hidden_size)
 
-        # ── Build h_0 via gated fusion ─────────────────────────────
-        img_mean = img_features.mean(dim=1)    # (batch, hidden_size)
-        fusion   = self.fusion(img_mean, q_feature)  # (batch, hidden_size)
+        img_mean = img_features.mean(dim=1)
+        fusion   = self.fusion(img_mean, q_feature)
 
-        h_0 = fusion.unsqueeze(0).repeat(self.num_layers, 1, 1)  # (num_layers, batch, hidden)
+        h_0 = fusion.unsqueeze(0).repeat(self.num_layers, 1, 1)
         c_0 = torch.zeros_like(h_0)
 
-        # ── Decode with dual attention ─────────────────────────────
-        # Pass img_features (49 regions) + q_hidden_states for dual attention
-        logits, coverage_loss = self.decoder((h_0, c_0), img_features, q_hidden_states, target_seq)
-        # (batch, max_a_len, answer_vocab_size)
-
+        logits, coverage_loss = self.decoder(
+            (h_0, c_0), img_features, q_hidden_states, target_seq,
+            q_token_ids=questions,
+        )
         return logits, coverage_loss
 
 
@@ -235,7 +225,7 @@ class VQAModelD(nn.Module):
                  attn_dim=512, freeze_cnn=True, dropout=0.5,
                  pretrained_q_emb=None, pretrained_a_emb=None,
                  use_coverage=False, use_layer_norm=False, use_dropconnect=False,
-                 use_dcan=False):
+                 use_dcan=False, use_pgn=False):
         super().__init__()
 
         self.num_layers = num_layers
@@ -263,33 +253,20 @@ class VQAModelD(nn.Module):
             use_layer_norm=use_layer_norm,
             use_dropconnect=use_dropconnect,
             use_dcan=use_dcan,
+            use_pgn=use_pgn,
         )
 
     def forward(self, images, questions, target_seq):
-        """
-        images    : (batch, 3, 224, 224)
-        questions : (batch, max_q_len)
-        target_seq: (batch, max_a_len)
-        returns   :
-          logits        : (batch, max_a_len, answer_vocab_size)
-          coverage_loss : scalar tensor (0.0 if coverage disabled)
-        """
-        # ResNet spatial: (batch, 49, hidden_size) — high-quality pretrained features
-        img_features = self.i_encoder(images)
-        img_features = F.normalize(img_features, p=2, dim=-1)
-
+        img_features = F.normalize(self.i_encoder(images), p=2, dim=-1)
         q_feature, q_hidden_states = self.q_encoder(questions)
-        # q_feature: (batch, hidden_size)  q_hidden_states: (batch, q_len, hidden_size)
-
-        # Mean-pool 49 regions -> 1 vector for gated fusion
-        img_mean = img_features.mean(dim=1)    # (batch, hidden_size)
+        img_mean = img_features.mean(dim=1)
         fusion   = self.fusion(img_mean, q_feature)
-
         h_0 = fusion.unsqueeze(0).repeat(self.num_layers, 1, 1)
         c_0 = torch.zeros_like(h_0)
-
-        # Decode with dual attention — pass img_features + q_hidden_states
-        logits, coverage_loss = self.decoder((h_0, c_0), img_features, q_hidden_states, target_seq)
+        logits, coverage_loss = self.decoder(
+            (h_0, c_0), img_features, q_hidden_states, target_seq,
+            q_token_ids=questions,
+        )
         return logits, coverage_loss
 
 
@@ -333,7 +310,7 @@ class VQAModelE(nn.Module):
                  embed_size=512, hidden_size=1024, num_layers=2,
                  attn_dim=512, freeze_cnn=True, dropout=0.5,
                  use_coverage=False, use_layer_norm=False, use_dropconnect=False,
-                 use_dcan=True, use_mutan=True,
+                 use_dcan=True, use_mutan=True, use_pgn=False,
                  pretrained_q_emb=None, pretrained_a_emb=None):
         super().__init__()
         self.num_layers = num_layers
@@ -356,17 +333,20 @@ class VQAModelE(nn.Module):
             use_layer_norm=use_layer_norm,
             use_dropconnect=use_dropconnect,
             use_dcan=use_dcan,
+            use_pgn=use_pgn,
         )
 
     def forward(self, images, questions, target_seq):
-        img_features           = self.i_encoder(images)           # (B, 49, H)
-        img_features           = F.normalize(img_features, p=2, dim=-1)
-        q_feature, q_hidden    = self.q_encoder(questions)        # (B,H), (B,L,H)
-        img_mean               = img_features.mean(dim=1)         # (B, H)
-        fused                  = self.fusion(q_feature, img_mean) # (B, H)  note: q first for MUTAN
+        img_features        = F.normalize(self.i_encoder(images), p=2, dim=-1)  # (B, 49, H)
+        q_feature, q_hidden = self.q_encoder(questions)
+        img_mean            = img_features.mean(dim=1)
+        fused               = self.fusion(q_feature, img_mean)   # MUTAN: q first
         h_0 = fused.unsqueeze(0).repeat(self.num_layers, 1, 1)
         c_0 = torch.zeros_like(h_0)
-        logits, cov_loss = self.decoder((h_0, c_0), img_features, q_hidden, target_seq)
+        logits, cov_loss = self.decoder(
+            (h_0, c_0), img_features, q_hidden, target_seq,
+            q_token_ids=questions,
+        )
         return logits, cov_loss
 
     def unfreeze_cnn(self):

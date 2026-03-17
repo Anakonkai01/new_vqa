@@ -71,7 +71,7 @@ def get_model(model_type, vocab_q_size, vocab_a_size,
               pretrained_q_emb=None, pretrained_a_emb=None,
               use_coverage=False, dropout=0.5,
               use_layer_norm=False, use_dropconnect=False,
-              use_dcan=False, use_mutan=False):
+              use_dcan=False, use_mutan=False, use_pgn=False):
     """Factory function: return the model corresponding to model_type."""
     kw = dict(pretrained_q_emb=pretrained_q_emb, pretrained_a_emb=pretrained_a_emb,
               dropout=dropout)
@@ -84,20 +84,20 @@ def get_model(model_type, vocab_q_size, vocab_a_size,
                          use_coverage=use_coverage,
                          use_layer_norm=use_layer_norm,
                          use_dropconnect=use_dropconnect,
-                         use_dcan=use_dcan, **kw)
+                         use_dcan=use_dcan, use_pgn=use_pgn, **kw)
     elif model_type == 'D':
         return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
                          use_coverage=use_coverage,
                          use_layer_norm=use_layer_norm,
                          use_dropconnect=use_dropconnect,
-                         use_dcan=use_dcan, **kw)
+                         use_dcan=use_dcan, use_pgn=use_pgn, **kw)
     elif model_type == 'E':
         return VQAModelE(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
                          use_coverage=use_coverage,
                          use_layer_norm=use_layer_norm,
                          use_dropconnect=use_dropconnect,
                          use_dcan=use_dcan,
-                         use_mutan=use_mutan, **kw)
+                         use_mutan=use_mutan, use_pgn=use_pgn, **kw)
     else:
         raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D, E.")
 
@@ -164,7 +164,9 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
         tok = current_token.unsqueeze(1)  # (B, 1)
 
         if model_type in ('C', 'D', 'E'):
-            logit, hidden, _, coverage = model.decoder.decode_step(tok, hidden, img_features, q_hidden, coverage)
+            logit, hidden, _, coverage = model.decoder.decode_step(
+                tok, hidden, img_features, q_hidden, coverage, q_token_ids=questions
+            )
             # logit: (B, vocab), hidden: updated (h, c)
         else:
             emb        = model.decoder.dropout(model.decoder.embedding(tok)) # (B, 1, embed)
@@ -212,7 +214,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           max_train_samples=None, max_val_samples=None,
           dropout=0.5, no_compile=False,
           grad_clip=5.0, label_smoothing=0.1,
-          use_mutan=False):
+          use_mutan=False, use_pgn=False):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -283,8 +285,15 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                            use_layer_norm=getattr(args, 'layer_norm', False),
                            use_dropconnect=getattr(args, 'dropconnect', False),
                            use_dcan=getattr(args, 'dcan', False),
-                           use_mutan=getattr(args, 'use_mutan', False)).to(DEVICE)
-    criterion = nn.CrossEntropyLoss(ignore_index=0, label_smoothing=label_smoothing)
+                           use_mutan=getattr(args, 'use_mutan', False),
+                           use_pgn=getattr(args, 'pgn', False)).to(DEVICE)
+    # PGN outputs log-probabilities (from PointerGeneratorHead.blend) instead of raw logits,
+    # so we must use NLLLoss. NLLLoss does not support label_smoothing natively; we skip it.
+    # Non-PGN models still use CrossEntropyLoss with label_smoothing.
+    if use_pgn:
+        criterion = nn.NLLLoss(ignore_index=0)
+    else:
+        criterion = nn.CrossEntropyLoss(ignore_index=0, label_smoothing=label_smoothing)
 
     # ── Optimizer — differential LR when fine-tuning the CNN backbone ──────────
     # Models A/C use scratch CNN → finetune_cnn flag has no effect on them.
@@ -636,6 +645,9 @@ if __name__ == "__main__":
     # Tier 4: MUTAN Tucker Fusion
     parser.add_argument('--use_mutan', action='store_true',
                         help='Tier 4: MUTAN Tucker Fusion instead of GatedFusion (Model E only)')
+    # Tier 5: Pointer-Generator Network
+    parser.add_argument('--pgn', action='store_true',
+                        help='Tier 5: Pointer-Generator Network — copy from question tokens (C/D/E)')
     parser.add_argument('--accum_steps', type=int, default=1,
                         help='Gradient accumulation steps (effective batch = batch_size × accum_steps)')
     parser.add_argument('--warmup_epochs', type=int, default=3,
@@ -665,7 +677,7 @@ if __name__ == "__main__":
           max_train_samples=args.max_train_samples, max_val_samples=args.max_val_samples,
           dropout=args.dropout, no_compile=args.no_compile,
           grad_clip=args.grad_clip, label_smoothing=args.label_smoothing,
-          use_mutan=args.use_mutan)
+          use_mutan=args.use_mutan, use_pgn=args.pgn)
         
         
         
