@@ -548,7 +548,7 @@ $$P(a_t) = \text{softmax}(W_o \cdot \text{proj}(h_t))$$
 Where $[\cdot ; \cdot]$ denotes concatenation, so the LSTM input size is $d_{\text{embed}} + 2 \times H = 512 + 2 \times 1024 = 2560$.
 
 **Why Bahdanau Attention (not Luong)?**
-- **Bahdanau (additive):** $e = v^\top \tanh(W_h h + W_s s)$ — uses a learned hidden layer to combine query and key. Works well with LSTMs because the tanh non-linearity matches the LSTM's activation functions.
+- **Bahdanau (additive):** $e = v^\top \tanh(W_{h} h + W_{s} s)$ — uses a learned hidden layer to combine query and key. Works well with LSTMs because the tanh non-linearity matches the LSTM's activation functions.
 - **Luong (dot-product):** $e = h^\top s$ — simpler but assumes query and key live in the same space, which is not true when attending over CNN features with LSTM states. Since our image spatial features and LSTM hidden states have different learned representations, additive attention is more appropriate.
 
 **Why Dual Attention (image + question)?**
@@ -695,8 +695,8 @@ $$\overrightarrow{h}_t = \text{LSTM}_{\rightarrow}(x_t, \overrightarrow{h}_{t-1}
 $$h_t = [\overrightarrow{h}_t \; ; \; \overleftarrow{h}_t] \quad \text{(concatenated)}$$
 
 **Outputs:**
-- $q_{\text{feature}} = [\overrightarrow{h_L} \; ; \; \overleftarrow{h_L}] \in \mathbb{R}^{1024}$ — final hidden state for fusion
-- $q_{\text{hidden}} \in \mathbb{R}^{B \times L_q \times 1024}$ — all timestep outputs for question attention (used only by Model C/D)
+- $q_{\text{feature}} = [\overrightarrow{h_{L}} \; ; \; \overleftarrow{h_{L}}] \in \mathbb{R}^{1024}$ — final hidden state for fusion
+- $q_{\text{hidden}} \in \mathbb{R}^{B \times L_{q} \times 1024}$ — all timestep outputs for question attention (used only by Model C/D)
 
 ### 7.2 Gated Fusion
 
@@ -704,9 +704,9 @@ $$h_t = [\overrightarrow{h}_t \; ; \; \overleftarrow{h}_t] \quad \text{(concaten
 
 | Fusion Method | Formula | Limitation |
 |---|---|---|
-| Concatenation | $[f_{\text{img}} ; f_q]$ | Doubles dimension; no interaction modeling |
-| Hadamard product | $f_{\text{img}} \odot f_q$ | Treats both modalities equally; no adaptivity |
-| **Gated Fusion (ours)** | $g \odot h_{\text{img}} + (1-g) \odot h_q$ | **Learnable gate** adapts per-dimension weighting |
+| Concatenation | $[f_{\text{img}} ; f_{q}]$ | Doubles dimension; no interaction modeling |
+| Hadamard product | $f_{\text{img}} \odot f_{q}$ | Treats both modalities equally; no adaptivity |
+| **Gated Fusion (ours)** | $g \odot h_{\text{img}} + (1-g) \odot h_{q}$ | **Learnable gate** adapts per-dimension weighting |
 
 The Gated Fusion module learns to combine image and question information adaptively:
 
@@ -748,7 +748,7 @@ The decoder output layer shares weights with the embedding layer (Press & Wolf, 
 $$h_t \xrightarrow{W_{\text{proj}}} \mathbb{R}^{d_{\text{embed}}} \xrightarrow{W_{\text{embed}}^\top} \mathbb{R}^{|V_A|}$$
 
 **Why weight tying?**
-1. **Parameter reduction:** Eliminates a separate $d_{\text{embed}} \times |V_A|$ output matrix
+1. **Parameter reduction:** Eliminates a separate $d_{\text{embed}} \times |V_{A}|$ output matrix
 2. **Regularization effect:** Forces the output distribution to be consistent with the input embedding space
 3. **Semantic coherence:** The model predicts words "in the same space" it reads them, encouraging consistent representations
 
@@ -1724,7 +1724,7 @@ Given that Li et al. use multi-task learning (a structural advantage we lack), o
 | Factor | Our advantage | Estimated contribution |
 |---|---|---|
 | **BiLSTM question encoder** | Bidirectional context capture vs. unidirectional GRU | Moderate — captures word dependencies in both directions |
-| **Dual attention (image + question)** | Attends over both visual regions AND question tokens at each decode step | Moderate — shown in §16.3 (+8.0% BLEU-4 relative over no-attn with scratch CNN; +2.8% with pretrained) |
+| **Dual attention (image + question)** | Attends over both visual regions AND question tokens at each decode step | Moderate — shown in §15.2 (+8.0% BLEU-4 relative over no-attn with scratch CNN; +2.8% with pretrained) |
 | **3-phase progressive training** | Phase 1 (teacher forcing) → Phase 2 (fine-tuning) → Phase 3 (scheduled sampling) vs. Li et al.'s single 15-epoch run | **Large** — scheduled sampling reduces exposure bias; 30 vs 15 epochs provides more optimization |
 | **GatedFusion** | Learnable gate balances image vs. question contribution | Small — likely minor gain over Hadamard |
 | **Coverage mechanism** | Prevents repetitive attention; helps explanation fluency | Small — shown in ablation to help qualitative fluency |
