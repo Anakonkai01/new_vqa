@@ -714,7 +714,7 @@ $$h_{\text{img}} = \tanh(W_{\text{img}} \cdot f_{\text{img}})$$
 
 $$h_q = \tanh(W_q \cdot f_q)$$
 
-$$g = \sigma(W_g \cdot [f_{\text{img}} \; ; \; f_q])$$
+$$g = \sigma(W_g \cdot [f_{\text{img}} \; f_q])$$
 
 $$\text{fusion} = g \odot h_{\text{img}} + (1 - g) \odot h_q$$
 
