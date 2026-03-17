@@ -72,10 +72,11 @@ def get_model(model_type, vocab_q_size, vocab_a_size,
               pretrained_q_emb=None, pretrained_a_emb=None,
               use_coverage=False, dropout=0.5,
               use_layer_norm=False, use_dropconnect=False,
-              use_dcan=False, use_mutan=False, use_pgn=False):
+              use_dcan=False, use_mutan=False, use_pgn=False,
+              use_q_highway=False, use_char_cnn=False):
     """Factory function: return the model corresponding to model_type."""
     kw = dict(pretrained_q_emb=pretrained_q_emb, pretrained_a_emb=pretrained_a_emb,
-              dropout=dropout)
+              dropout=dropout, use_q_highway=use_q_highway, use_char_cnn=use_char_cnn)
     if model_type == 'A':
         return VQAModelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
     elif model_type == 'B':
@@ -258,7 +259,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           dropout=0.5, no_compile=False,
           grad_clip=5.0, label_smoothing=0.1,
           use_mutan=False, use_pgn=False,
-          use_css=False, css_lambda=0.5, css_margin=1.0):
+          use_css=False, css_lambda=0.5, css_margin=1.0,
+          use_q_highway=False, use_char_cnn=False):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -330,7 +332,14 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                            use_dropconnect=getattr(args, 'dropconnect', False),
                            use_dcan=getattr(args, 'dcan', False),
                            use_mutan=getattr(args, 'use_mutan', False),
-                           use_pgn=getattr(args, 'pgn', False)).to(DEVICE)
+                           use_pgn=getattr(args, 'pgn', False),
+                           use_q_highway=getattr(args, 'q_highway', False),
+                           use_char_cnn=getattr(args, 'char_cnn', False)).to(DEVICE)
+
+    # Tier 7C: if char_cnn requested, build char table from vocabulary
+    if getattr(args, 'char_cnn', False) and hasattr(model.q_encoder, 'char_cnn'):
+        model.q_encoder.char_cnn.build_char_table(vocab_q)
+        print("Char-CNN         : built char table from vocab_questions")
     # PGN outputs log-probabilities (from PointerGeneratorHead.blend) instead of raw logits,
     # so we must use NLLLoss. NLLLoss does not support label_smoothing natively; we skip it.
     # Non-PGN models still use CrossEntropyLoss with label_smoothing.
@@ -705,6 +714,11 @@ if __name__ == "__main__":
     # Tier 5: Pointer-Generator Network
     parser.add_argument('--pgn', action='store_true',
                         help='Tier 5: Pointer-Generator Network — copy from question tokens (C/D/E)')
+    # Tier 7: Deep BiLSTM + Char-CNN question encoder
+    parser.add_argument('--q_highway', action='store_true',
+                        help='Tier 7B: Highway connections between BiLSTM layers in question encoder')
+    parser.add_argument('--char_cnn', action='store_true',
+                        help='Tier 7C: Char-CNN embedding prepended to word embeddings')
     # Tier 6: CSS Counterfactual Augmentation
     parser.add_argument('--css', action='store_true',
                         help='Tier 6: CSS counterfactual augmentation (visual+linguistic masking)')
@@ -742,7 +756,8 @@ if __name__ == "__main__":
           dropout=args.dropout, no_compile=args.no_compile,
           grad_clip=args.grad_clip, label_smoothing=args.label_smoothing,
           use_mutan=args.use_mutan, use_pgn=args.pgn,
-          use_css=args.css, css_lambda=args.css_lambda, css_margin=args.css_margin)
+          use_css=args.css, css_lambda=args.css_lambda, css_margin=args.css_margin,
+          use_q_highway=args.q_highway, use_char_cnn=args.char_cnn)
         
         
         

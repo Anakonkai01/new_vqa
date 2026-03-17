@@ -61,7 +61,8 @@ class GatedFusion(nn.Module):
 class VQAModelA(nn.Module):
     def __init__(self, vocab_size, answer_vocab_size,
                  embed_size=512, hidden_size=1024, num_layers=2, dropout=0.5,
-                 pretrained_q_emb=None, pretrained_a_emb=None):
+                 pretrained_q_emb=None, pretrained_a_emb=None,
+                 use_q_highway=False, use_char_cnn=False):
         super().__init__()
 
         self.num_layers = num_layers
@@ -71,7 +72,9 @@ class VQAModelA(nn.Module):
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
                                          hidden_size=hidden_size, num_layers=num_layers,
                                          dropout=dropout,
-                                         pretrained_embeddings=pretrained_q_emb)
+                                         pretrained_embeddings=pretrained_q_emb,
+                                         use_highway=use_q_highway,
+                                         use_char_cnn=use_char_cnn)
         self.fusion = GatedFusion(hidden_size)
         self.decoder = LSTMDecoder(vocab_size=answer_vocab_size, embed_size=embed_size,
                                    hidden_size=hidden_size, num_layers=num_layers,
@@ -117,7 +120,8 @@ class VQAModelA(nn.Module):
 class VQAModelB(nn.Module):
     def __init__(self, vocab_size, answer_vocab_size,
                  embed_size=512, hidden_size=1024, num_layers=2, freeze=True, dropout=0.5,
-                 pretrained_q_emb=None, pretrained_a_emb=None):
+                 pretrained_q_emb=None, pretrained_a_emb=None,
+                 use_q_highway=False, use_char_cnn=False):
         super().__init__()
 
         self.num_layers = num_layers  # stored for use when building initial hidden state
@@ -126,7 +130,9 @@ class VQAModelB(nn.Module):
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
                                          hidden_size=hidden_size, num_layers=num_layers,
                                          dropout=dropout,
-                                         pretrained_embeddings=pretrained_q_emb)
+                                         pretrained_embeddings=pretrained_q_emb,
+                                         use_highway=use_q_highway,
+                                         use_char_cnn=use_char_cnn)
         self.fusion = GatedFusion(hidden_size)
         self.decoder = LSTMDecoder(vocab_size=answer_vocab_size, embed_size=embed_size,
                                    hidden_size=hidden_size, num_layers=num_layers,
@@ -158,7 +164,7 @@ class VQAModelC(nn.Module):
                  embed_size=512, hidden_size=1024, num_layers=2, attn_dim=512, dropout=0.5,
                  pretrained_q_emb=None, pretrained_a_emb=None,
                  use_coverage=False, use_layer_norm=False, use_dropconnect=False,
-                 use_dcan=False, use_pgn=False):
+                 use_dcan=False, use_pgn=False, use_q_highway=False, use_char_cnn=False):
         super().__init__()
 
         self.num_layers = num_layers
@@ -167,11 +173,13 @@ class VQAModelC(nn.Module):
         # Unlike Model A: no mean pool; decoder attends over all 49 regions
         self.i_encoder = SimpleCNNSpatial(output_size=hidden_size)
 
-        # Question encoder — identical to A/B
+        # Question encoder
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
                                          hidden_size=hidden_size, num_layers=num_layers,
                                          dropout=dropout,
-                                         pretrained_embeddings=pretrained_q_emb)
+                                         pretrained_embeddings=pretrained_q_emb,
+                                         use_highway=use_q_highway,
+                                         use_char_cnn=use_char_cnn)
         self.fusion = GatedFusion(hidden_size)
 
         # Decoder with dual attention — receives img_features + q_hidden at every decode step
@@ -225,7 +233,7 @@ class VQAModelD(nn.Module):
                  attn_dim=512, freeze_cnn=True, dropout=0.5,
                  pretrained_q_emb=None, pretrained_a_emb=None,
                  use_coverage=False, use_layer_norm=False, use_dropconnect=False,
-                 use_dcan=False, use_pgn=False):
+                 use_dcan=False, use_pgn=False, use_q_highway=False, use_char_cnn=False):
         super().__init__()
 
         self.num_layers = num_layers
@@ -233,11 +241,13 @@ class VQAModelD(nn.Module):
         # ResNet101 pretrained, avgpool+fc removed, keeps spatial (batch, 49, hidden_size)
         self.i_encoder = ResNetSpatialEncoder(output_size=hidden_size, freeze=freeze_cnn)
 
-        # Question encoder — identical to A/B/C
+        # Question encoder
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
                                          hidden_size=hidden_size, num_layers=num_layers,
                                          dropout=dropout,
-                                         pretrained_embeddings=pretrained_q_emb)
+                                         pretrained_embeddings=pretrained_q_emb,
+                                         use_highway=use_q_highway,
+                                         use_char_cnn=use_char_cnn)
         self.fusion = GatedFusion(hidden_size)
 
         # Decoder with dual attention — identical to Model C
@@ -311,6 +321,7 @@ class VQAModelE(nn.Module):
                  attn_dim=512, freeze_cnn=True, dropout=0.5,
                  use_coverage=False, use_layer_norm=False, use_dropconnect=False,
                  use_dcan=True, use_mutan=True, use_pgn=False,
+                 use_q_highway=False, use_char_cnn=False,
                  pretrained_q_emb=None, pretrained_a_emb=None):
         super().__init__()
         self.num_layers = num_layers
@@ -319,7 +330,8 @@ class VQAModelE(nn.Module):
         self.i_encoder = ConvNeXtSpatialEncoder(output_size=hidden_size, freeze=freeze_cnn)
         self.q_encoder = QuestionEncoder(vocab_size=vocab_size, embed_size=embed_size,
                                          hidden_size=hidden_size, num_layers=num_layers,
-                                         dropout=dropout, pretrained_embeddings=pretrained_q_emb)
+                                         dropout=dropout, pretrained_embeddings=pretrained_q_emb,
+                                         use_highway=use_q_highway, use_char_cnn=use_char_cnn)
 
         self.fusion = MUTANFusion(hidden_size, hidden_size, hidden_size) if use_mutan \
                       else GatedFusion(hidden_size)
