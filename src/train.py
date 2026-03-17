@@ -21,6 +21,13 @@ from vocab import Vocabulary
 from training.css_augment import CSSAugmentor, css_contrastive_loss
 from training.scst import scst_step
 
+# ── wandb (optional — gracefully disabled if not installed / not requested) ──
+try:
+    import wandb as _wandb
+    _WANDB_AVAILABLE = True
+except ImportError:
+    _WANDB_AVAILABLE = False
+
 
 
 
@@ -262,11 +269,48 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           use_mutan=False, use_pgn=False,
           use_css=False, css_lambda=0.5, css_margin=1.0,
           use_q_highway=False, use_char_cnn=False,
-          use_scst=False, scst_lambda=0.5):
+          use_scst=False, scst_lambda=0.5,
+          use_wandb=False, wandb_project='vqa-e', wandb_run_name=None,
+          wandb_tags=None, phase=None):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
     vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
+
+    # ── Weights & Biases ──────────────────────────────────────────────────
+    _wb = None
+    if use_wandb and _WANDB_AVAILABLE:
+        _run_name = wandb_run_name or f"model_{model_type.lower()}_phase{phase or '?'}"
+        _config = dict(
+            model=model_type, phase=phase, epochs=epochs, lr=lr,
+            batch_size=batch_size, accum_steps=accum_steps,
+            effective_batch=batch_size * accum_steps,
+            dropout=dropout, weight_decay=weight_decay,
+            grad_clip=grad_clip, label_smoothing=label_smoothing,
+            warmup_epochs=warmup_epochs,
+            use_glove=use_glove, glove_dim=glove_dim,
+            layer_norm=getattr(args, 'layer_norm', False),
+            dropconnect=getattr(args, 'dropconnect', False),
+            dcan=getattr(args, 'dcan', False),
+            use_mutan=use_mutan, use_pgn=use_pgn,
+            use_coverage=use_coverage, coverage_lambda=coverage_lambda,
+            finetune_cnn=finetune_cnn, cnn_lr_factor=cnn_lr_factor,
+            scheduled_sampling=scheduled_sampling, ss_k=ss_k,
+            use_css=use_css, css_lambda=css_lambda,
+            use_scst=use_scst, scst_lambda=scst_lambda,
+            use_q_highway=use_q_highway, use_char_cnn=use_char_cnn,
+            augment=augment,
+        )
+        _wb = _wandb.init(
+            project=wandb_project,
+            name=_run_name,
+            config=_config,
+            tags=wandb_tags or [],
+            resume='allow',
+        )
+        print(f"W&B run          : {_wb.url}")
+    elif use_wandb and not _WANDB_AVAILABLE:
+        print("W&B requested but wandb not installed — pip install wandb")
 
     train_dataset = VQAEDataset(
         image_dir=TRAIN_IMAGE_DIR,
@@ -629,6 +673,18 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         with open(history_path, 'w') as f:
             json.dump(history, f, indent=2)
 
+        # ── W&B logging ───────────────────────────────────────────
+        if _wb is not None:
+            log_dict = {
+                'epoch':      epoch + 1,
+                'train/loss': avg_train_loss,
+                'val/loss':   avg_val_loss,
+                'lr':         current_lr,
+            }
+            if scheduled_sampling:
+                log_dict['train/ss_epsilon'] = ss_k / (ss_k + math.exp(epoch / ss_k))
+            _wb.log(log_dict, step=epoch + 1)
+
         # ── Checkpoint saving (storage-efficient) ─────────────────
         # comparison_epochs: epochs where we run compare.py (end of each phase)
         # Only keep per-epoch checkpoints at these milestones.
@@ -685,6 +741,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                         shutil.copy2(best_path, milestone_path)
                         print(f"  Copied best checkpoint → {milestone_path} (for compare.py)")
                     break
+
+    if _wb is not None:
+        _wb.finish()
 
 
 if __name__ == "__main__":
@@ -770,7 +829,19 @@ if __name__ == "__main__":
                         help='Maximum gradient norm for clipping (default: 5.0)')
     parser.add_argument('--label_smoothing', type=float, default=0.1,
                         help='Label smoothing factor for CrossEntropyLoss (default: 0.1)')
+    # Weights & Biases
+    parser.add_argument('--wandb', action='store_true',
+                        help='Enable Weights & Biases experiment tracking')
+    parser.add_argument('--wandb_project', type=str, default='vqa-e',
+                        help='W&B project name (default: vqa-e)')
+    parser.add_argument('--wandb_run_name', type=str, default=None,
+                        help='W&B run name (default: auto-generated)')
+    parser.add_argument('--wandb_tags', type=str, default=None,
+                        help='Comma-separated W&B tags, e.g. "modelE,phase1"')
+    parser.add_argument('--phase', type=int, default=None,
+                        help='Training phase number (1/2/3/4) for logging/naming')
     args = parser.parse_args()
+    _tags = [t.strip() for t in args.wandb_tags.split(',')] if args.wandb_tags else []
     train(model_type=args.model, epochs=args.epochs, lr=args.lr,
           batch_size=args.batch_size, resume=args.resume,
           scheduled_sampling=args.scheduled_sampling, ss_k=args.ss_k,
@@ -786,7 +857,10 @@ if __name__ == "__main__":
           use_mutan=args.use_mutan, use_pgn=args.pgn,
           use_css=args.css, css_lambda=args.css_lambda, css_margin=args.css_margin,
           use_q_highway=args.q_highway, use_char_cnn=args.char_cnn,
-          use_scst=args.scst, scst_lambda=args.scst_lambda)
+          use_scst=args.scst, scst_lambda=args.scst_lambda,
+          use_wandb=args.wandb, wandb_project=args.wandb_project,
+          wandb_run_name=args.wandb_run_name, wandb_tags=_tags,
+          phase=args.phase)
         
         
         
