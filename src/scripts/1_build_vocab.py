@@ -8,6 +8,10 @@ from vocab import Vocabulary
 # VQA-E single annotation file (contains question + answer + explanation)
 TRAIN_VQA_E_JSON = "data/vqa_e/VQA-E_train_set.json"
 
+# VQA v2.0 files
+TRAIN_VQA_V2_Q = "data/raw/vqa_v2/v2_OpenEnded_mscoco_train2014_questions.json"
+TRAIN_VQA_V2_A = "data/raw/vqa_v2/v2_mscoco_train2014_annotations.json"
+
 OUTPUT_DIR = "data/processed"
 
 
@@ -27,9 +31,28 @@ def main():
 
     print(f"Loaded {len(annotations)} annotations.")
 
+    # Load VQA v2.0 Data
+    questions_v2 = []
+    answers_v2 = []
+    try:
+        print(f"\nReading VQA v2.0 questions: {TRAIN_VQA_V2_Q}")
+        with open(TRAIN_VQA_V2_Q, 'r') as f:
+            q_data = json.load(f)
+            questions_v2 = [q['question'] for q in q_data.get('questions', [])]
+        print(f"Loaded {len(questions_v2)} VQA v2.0 questions.")
+        
+        print(f"Reading VQA v2.0 annotations: {TRAIN_VQA_V2_A}")
+        with open(TRAIN_VQA_V2_A, 'r') as f:
+            a_data = json.load(f)
+            answers_v2 = [a.get('multiple_choice_answer', '') for a in a_data.get('annotations', [])]
+        print(f"Loaded {len(answers_v2)} VQA v2.0 answers.")
+    except FileNotFoundError as e:
+        print(f"WARNING: VQA v2.0 files not found, proceeding with VQA-E only. Details: {e}")
+
     # Build question vocabulary from 'question' field
     print("\n1. Building question vocabulary...")
     questions_list = [ann['question'] for ann in annotations if 'question' in ann]
+    questions_list.extend(questions_v2)
     q_vocab = Vocabulary()
     q_vocab.build(questions_list, threshold=3)
     q_out_path = os.path.join(OUTPUT_DIR, 'vocab_questions.json')
@@ -51,18 +74,30 @@ def main():
         else:
             a_text = answer
         answers_list.append(a_text)
+    
+    answers_list.extend(answers_v2)
 
     # threshold=3: VQA-E is ~6x smaller than VQA 2.0, need to keep more words
     a_vocab = Vocabulary()
     a_vocab.build(answers_list, threshold=3)
+
+    # Force-Add Tier 6 CSS Tokens
+    ABSTENTION_VISUAL = "i cannot answer because the object is hidden"
+    ABSTENTION_LING = "i cannot answer because the question is unclear"
+    print("\n3. Force-adding Tier 6 CSS Tokens...")
+    for sentence in [ABSTENTION_VISUAL, ABSTENTION_LING]:
+        for word in a_vocab.tokenize(sentence):
+            if word not in a_vocab.word2idx:
+                a_vocab.add_word(word)
+
     a_out_path = os.path.join(OUTPUT_DIR, 'vocab_answers.json')
     a_vocab.save(a_out_path)
     print(f"   Vocab size: {len(a_vocab)} | Saved to: {a_out_path}")
     print(f"\nSample answer texts:")
     for ann in annotations[:3]:
         answer = ann.get('multiple_choice_answer', '')
-        exp = ann.get('explanation', [''])[0]
-        print(f"  Q: {ann['question']}")
+        exp = ann.get('explanation', [''])[0] if isinstance(ann.get('explanation'), list) else ''
+        print(f"  Q: {ann.get('question', '')}")
         print(f"  A: {answer} because {exp}\n")
 
 if __name__ == '__main__':

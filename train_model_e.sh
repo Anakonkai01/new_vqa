@@ -74,6 +74,13 @@ COMMON="
 
 RUN_PHASE="${1:-all}"
 
+if [[ "$RUN_PHASE" == "all" || "$RUN_PHASE" == "1" ]]; then
+    echo "============================================================"
+    echo "  BUILDING UNIFIED VOCABULARY (VQA-E + VQA v2.0)"
+    echo "============================================================"
+    python src/scripts/1_build_vocab.py
+fi
+
 # =============================================================================
 # Phase 1 — Baseline (15 epochs, LR=1e-3, ConvNeXt FROZEN)
 #
