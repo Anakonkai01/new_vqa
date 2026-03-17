@@ -69,7 +69,8 @@ def _fused_adam_available():
 
 def get_model(model_type, vocab_q_size, vocab_a_size,
               pretrained_q_emb=None, pretrained_a_emb=None,
-              use_coverage=False, dropout=0.5):
+              use_coverage=False, dropout=0.5,
+              use_layer_norm=False, use_dropconnect=False):
     """Factory function: return the model corresponding to model_type."""
     kw = dict(pretrained_q_emb=pretrained_q_emb, pretrained_a_emb=pretrained_a_emb,
               dropout=dropout)
@@ -79,10 +80,14 @@ def get_model(model_type, vocab_q_size, vocab_a_size,
         return VQAModelB(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
     elif model_type == 'C':
         return VQAModelC(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
-                         use_coverage=use_coverage, **kw)
+                         use_coverage=use_coverage,
+                         use_layer_norm=use_layer_norm,
+                         use_dropconnect=use_dropconnect, **kw)
     elif model_type == 'D':
         return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
-                         use_coverage=use_coverage, **kw)
+                         use_coverage=use_coverage,
+                         use_layer_norm=use_layer_norm,
+                         use_dropconnect=use_dropconnect, **kw)
     else:
         raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D.")
 
@@ -258,7 +263,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                            pretrained_q_emb=pretrained_q_emb,
                            pretrained_a_emb=pretrained_a_emb,
                            use_coverage=use_coverage,
-                           dropout=dropout).to(DEVICE)
+                           dropout=dropout,
+                           use_layer_norm=getattr(args, 'layer_norm', False),
+                           use_dropconnect=getattr(args, 'dropconnect', False)).to(DEVICE)
     criterion = nn.CrossEntropyLoss(ignore_index=0, label_smoothing=label_smoothing)
 
     # ── Optimizer — differential LR when fine-tuning the CNN backbone ──────────
@@ -600,6 +607,11 @@ if __name__ == "__main__":
                         help='Enable coverage mechanism to reduce repetition (models C/D only)')
     parser.add_argument('--coverage_lambda', type=float, default=1.0,
                         help='Weight for coverage loss term (default: 1.0)')
+    # Tier 1: LSTM structural fortification
+    parser.add_argument('--layer_norm', action='store_true',
+                        help='Tier 1A+1C: LayerNorm inside LSTM gates + Highway connections')
+    parser.add_argument('--dropconnect', action='store_true',
+                        help='Tier 1B: DropConnect on hidden-to-hidden weights (AWD-LSTM)')
     parser.add_argument('--accum_steps', type=int, default=1,
                         help='Gradient accumulation steps (effective batch = batch_size × accum_steps)')
     parser.add_argument('--warmup_epochs', type=int, default=3,

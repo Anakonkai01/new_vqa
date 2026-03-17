@@ -44,6 +44,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Tier-1 LSTM fortification helpers (imported from decoder_lstm)
+import os, sys
+sys.path.insert(0, os.path.dirname(__file__))
+from decoder_lstm import LayerNormLSTMStack, WeightDrop
+
 
 class BahdanauAttention(nn.Module):
     """
@@ -117,12 +122,17 @@ class LSTMDecoderWithAttention(nn.Module):
 
     def __init__(self, vocab_size, embed_size, hidden_size, num_layers,
                  attn_dim=512, dropout=0.5, pretrained_embeddings=None,
-                 use_coverage=False):
+                 use_coverage=False, use_layer_norm=False, use_dropconnect=False):
+        """
+        use_layer_norm  : replace nn.LSTM with LayerNormLSTMStack (Tier 1A + 1C)
+        use_dropconnect : apply WeightDrop to nn.LSTM (Tier 1B); ignored when use_layer_norm=True
+        """
         super().__init__()
 
         self.hidden_size  = hidden_size
         self.num_layers   = num_layers
         self.use_coverage = use_coverage
+        self.use_layer_norm = use_layer_norm
 
         # Embedding: supports GloVe pretrained vectors
         if pretrained_embeddings is not None:
@@ -144,27 +154,30 @@ class LSTMDecoderWithAttention(nn.Module):
         self.q_attention   = BahdanauAttention(hidden_size, attn_dim)
 
         # LSTM: input_size = embed_size + hidden_size * 2
-        # (token embedding + image context + question context)
-        self.lstm = nn.LSTM(
-            input_size=embed_size + hidden_size * 2,  # <- dual attention
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            batch_first=True,
-            dropout=dropout if num_layers > 1 else 0
-        )
+        lstm_input_size = embed_size + hidden_size * 2
+        if use_layer_norm:
+            self.lstm = LayerNormLSTMStack(
+                input_size=lstm_input_size, hidden_size=hidden_size,
+                num_layers=num_layers, dropout=dropout, use_highway=True,
+            )
+        else:
+            _lstm = nn.LSTM(
+                input_size=lstm_input_size,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                batch_first=True,
+                dropout=dropout if num_layers > 1 else 0,
+            )
+            if use_dropconnect and num_layers >= 1:
+                self.lstm = WeightDrop(_lstm, ['weight_hh_l0'], dropout=0.3)
+            else:
+                self.lstm = _lstm
 
-        # Weight Tying: hidden → embed_dim (projection) → vocab (tied with embedding)
-        #
-        # IMPORTANT: When GloVe is used, embedding_dim=300 (GloVe dim).
-        # Tying output with 300-dim embeddings creates a severe bottleneck
-        # (1024 → 300 → 8648 vocab). Instead, use embed_size (512) for
-        # output projection and DON'T tie weights with GloVe embeddings.
+        # Weight Tying
         if pretrained_embeddings is not None:
-            # GloVe: use embed_size for output, no weight tying
             self.out_proj = nn.Linear(hidden_size, embed_size)
             self.fc = nn.Linear(embed_size, vocab_size, bias=False)
         else:
-            # No GloVe: tie fc.weight = embedding.weight
             actual_embed_dim = self.embedding.embedding_dim
             self.out_proj = nn.Linear(hidden_size, actual_embed_dim)
             self.fc = nn.Linear(actual_embed_dim, vocab_size, bias=False)

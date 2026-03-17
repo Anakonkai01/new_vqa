@@ -335,7 +335,7 @@ def batch_greedy_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
 
 def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
                        beam_width=5, max_len=50, device='cpu',
-                       no_repeat_ngram_size=3):
+                       no_repeat_ngram_size=3, min_len=5, length_penalty=0.7):
     """
     Single-sample beam search for models A/B (no attention).
     Supports n-gram blocking to prevent repetitive output.
@@ -364,7 +364,7 @@ def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
         beams     = [(0.0, [start_idx], h0, c0)]
         completed = []
 
-        for _ in range(max_len):
+        for step in range(max_len):
             if not beams:
                 break
             candidates = []
@@ -378,6 +378,9 @@ def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
                     emb = model.decoder.embed_proj(emb)
                 out, (nh, nc) = model.decoder.lstm(emb, (bh, bc))     # (1, 1, hidden)
                 lp   = F.log_softmax(model.decoder.fc(model.decoder.out_proj(out.squeeze(1)))[0], dim=-1)  # (vocab,)
+                # Min-length: block <end> for first min_len steps
+                if step < min_len:
+                    lp[end_idx] = float('-inf')
                 # N-gram blocking: prevent repeated trigrams (or other n-grams)
                 _block_repeated_ngrams(lp, tokens, no_repeat_ngram_size)
                 topk_vals, topk_ids = lp.topk(beam_width)
@@ -393,8 +396,8 @@ def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
         if not completed:
             return ''
 
-        # Length-normalised: divide by sequence length to avoid bias toward short answers
-        completed.sort(key=lambda x: x[0] / max(len(x[1]) - 1, 1), reverse=True)
+        # Length penalty: score / len^alpha — stronger than /len, rewards fluent longer outputs
+        completed.sort(key=lambda x: x[0] / (max(len(x[1]) - 1, 1) ** length_penalty), reverse=True)
         best  = completed[0][1][1:]   # strip <start>
         words = [vocab_a.idx2word.get(t, '<unk>') for t in best if t != end_idx]
         return ' '.join(words)
@@ -402,7 +405,7 @@ def beam_search_decode(model, img_tensor, q_tensor, vocab_a,
 
 def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
                                       beam_width=5, max_len=50, device='cpu',
-                                      no_repeat_ngram_size=3):
+                                      no_repeat_ngram_size=3, min_len=5, length_penalty=0.7):
     """
     Single-sample beam search for models C/D (Bahdanau attention).
     Supports n-gram blocking to prevent repetitive output.
@@ -431,7 +434,7 @@ def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
         beams     = [(0.0, [start_idx], h0, c0, None)]  # last element = coverage
         completed = []
 
-        for _ in range(max_len):
+        for step in range(max_len):
             if not beams:
                 break
             candidates = []
@@ -442,6 +445,9 @@ def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
                 tok            = torch.tensor([[tokens[-1]]], dtype=torch.long, device=device)
                 logit, (nh, nc), _, new_cov = model.decoder.decode_step(tok, (bh, bc), img_features, q_hidden, b_cov)
                 lp             = F.log_softmax(logit[0], dim=-1)  # (vocab,)
+                # Min-length: block <end> for first min_len steps
+                if step < min_len:
+                    lp[end_idx] = float('-inf')
                 # N-gram blocking: prevent repeated trigrams (or other n-grams)
                 _block_repeated_ngrams(lp, tokens, no_repeat_ngram_size)
                 topk_vals, topk_ids = lp.topk(beam_width)
@@ -457,7 +463,8 @@ def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
         if not completed:
             return ''
 
-        completed.sort(key=lambda x: x[0] / max(len(x[1]) - 1, 1), reverse=True)
+        # Length penalty: score / len^alpha
+        completed.sort(key=lambda x: x[0] / (max(len(x[1]) - 1, 1) ** length_penalty), reverse=True)
         best  = completed[0][1][1:]   # strip <start>
         words = [vocab_a.idx2word.get(t, '<unk>') for t in best if t != end_idx]
         return ' '.join(words)
@@ -465,13 +472,14 @@ def beam_search_decode_with_attention(model, img_tensor, q_tensor, vocab_a,
 
 def batch_beam_search_decode(model, img_tensors, q_tensors, vocab_a,
                              beam_width=5, max_len=50, device='cpu',
-                             no_repeat_ngram_size=3):
+                             no_repeat_ngram_size=3, min_len=5, length_penalty=0.7):
     """Batch wrapper for beam_search_decode (models A/B)."""
     return [
         beam_search_decode(
             model, img_tensors[i], q_tensors[i], vocab_a,
             beam_width=beam_width, max_len=max_len, device=device,
-            no_repeat_ngram_size=no_repeat_ngram_size
+            no_repeat_ngram_size=no_repeat_ngram_size,
+            min_len=min_len, length_penalty=length_penalty,
         )
         for i in range(img_tensors.size(0))
     ]
@@ -479,13 +487,14 @@ def batch_beam_search_decode(model, img_tensors, q_tensors, vocab_a,
 
 def batch_beam_search_decode_with_attention(model, img_tensors, q_tensors, vocab_a,
                                             beam_width=5, max_len=50, device='cpu',
-                                            no_repeat_ngram_size=3):
+                                            no_repeat_ngram_size=3, min_len=5, length_penalty=0.7):
     """Batch wrapper for beam_search_decode_with_attention (models C/D)."""
     return [
         beam_search_decode_with_attention(
             model, img_tensors[i], q_tensors[i], vocab_a,
             beam_width=beam_width, max_len=max_len, device=device,
-            no_repeat_ngram_size=no_repeat_ngram_size
+            no_repeat_ngram_size=no_repeat_ngram_size,
+            min_len=min_len, length_penalty=length_penalty,
         )
         for i in range(img_tensors.size(0))
     ]
