@@ -184,11 +184,23 @@
           <div id="upload-placeholder">
             <i class="fa fa-cloud-upload-alt text-3xl mb-2" style="color:var(--muted)"></i>
             <p class="text-sm" style="color:var(--muted)">Drop image here or click to browse</p>
-            <p class="text-xs mt-1" style="color:#475569">JPG, PNG, WebP supported</p>
+            <div class="flex items-center justify-center gap-3 mt-2">
+              <p class="text-xs" style="color:#475569">JPG, PNG, WebP</p>
+              <span style="color:#334155;font-size:11px">·</span>
+              <kbd class="text-xs px-1.5 py-0.5 rounded font-mono"
+                   style="background:#1e293b;border:1px solid #334155;color:#94a3b8">Ctrl+V</kbd>
+              <span style="color:#334155;font-size:11px;margin-left:-4px" class="text-xs" style="color:#475569">to paste</span>
+            </div>
           </div>
           <img id="img-preview" src="" alt="preview"
                class="hidden rounded-lg w-full object-contain max-h-64"/>
         </div>
+        <!-- Paste hint strip (shown after image loaded, hidden when none) -->
+        <p id="paste-hint" class="text-xs text-center mb-2" style="color:#475569;display:none">
+          <kbd class="px-1.5 py-0.5 rounded font-mono"
+               style="background:#1e293b;border:1px solid #334155;color:#94a3b8">Ctrl+V</kbd>
+          anywhere to replace image
+        </p>
 
         <!-- Sample images -->
         <div class="flex items-center justify-between mb-2">
@@ -451,12 +463,43 @@ function handleDrop(evt) {
 }
 function setImage(dataUrl) {
   currentImageB64 = dataUrl;
-  const preview = document.getElementById('img-preview');
+  const preview     = document.getElementById('img-preview');
   const placeholder = document.getElementById('upload-placeholder');
+  const pasteHint   = document.getElementById('paste-hint');
   preview.src = dataUrl;
   preview.classList.remove('hidden');
   placeholder.classList.add('hidden');
+  if (pasteHint) pasteHint.style.display = 'block';
 }
+
+// ── Paste (Ctrl+V) ────────────────────────────────────────────────────────
+function handlePaste(evt) {
+  // Don't intercept if the user is typing in an input/textarea
+  const tag = document.activeElement && document.activeElement.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+
+  const items = (evt.clipboardData || evt.originalEvent?.clipboardData)?.items;
+  if (!items) return;
+
+  for (const item of items) {
+    if (item.type.startsWith('image/')) {
+      evt.preventDefault();
+      const file   = item.getAsFile();
+      const reader = new FileReader();
+      reader.onload = e => {
+        setImage(e.target.result);
+        showToast('Image pasted from clipboard!', 'info');
+        // Clear sample selection highlight
+        document.querySelectorAll('.sample-thumb').forEach(t => t.classList.remove('selected'));
+      };
+      reader.readAsDataURL(file);
+      return;
+    }
+  }
+  // Nothing image-like in clipboard
+  showToast('No image found in clipboard. Copy an image first.', 'warn');
+}
+document.addEventListener('paste', handlePaste);
 
 // ── Inference ─────────────────────────────────────────────────────────────
 async function runInference() {
