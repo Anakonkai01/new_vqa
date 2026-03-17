@@ -539,7 +539,7 @@ $$c_t^{q} = \sum_{j=1}^{L_q} \alpha_{t,j}^{q} \cdot q_j$$
 
 **Step 3 — LSTM Input (concatenated):**
 
-$$\text{input}_t = [\text{embed}(a_{t-1}) \; ; \; c_t^{\text{img}} \; ; \; c_t^{q}]$$
+$$\text{input}_t = [\text{embed}(a_{t-1}) \;  \; c_t^{\text{img}} \;  \; c_t^{q}]$$
 
 $$h_t, c_t = \text{LSTM}(\text{input}_t, h_{t-1}, c_{t-1})$$
 
@@ -765,7 +765,7 @@ The three-phase progressive training strategy is the result of careful reasoning
 ```mermaid
 graph LR
     subgraph Phase 1 - Baseline Training
-        P1A["Epochs 1-10"]
+        P1A["Epochs 1-15"]
         P1B["LR: 1e-3"]
         P1C["ResNet: FROZEN"]
         P1D["Teacher Forcing: 100%"]
@@ -773,7 +773,7 @@ graph LR
     end
 
     subgraph Phase 2 - Fine-tuning
-        P2A["Epochs 11-15"]
+        P2A["Epochs 15-25"]
         P2B["LR: 5e-4"]
         P2C["ResNet: layer3+4<br/>UNFROZEN (LR×0.1)"]
         P2D["Teacher Forcing: 100%"]
@@ -781,7 +781,7 @@ graph LR
     end
 
     subgraph Phase 3 - Scheduled Sampling
-        P3A["Epochs 16-20"]
+        P3A["Epochs 25-30"]
         P3B["LR: 2e-4"]
         P3C["ResNet: same"]
         P3D["SS: gradually reduce<br/>teacher forcing"]
