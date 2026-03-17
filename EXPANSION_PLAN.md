@@ -19,7 +19,7 @@
 - [x] Tier 0   — Free wins (length penalty α=0.7, min_len=5 in beam search)
 - [x] Tier D1  — Data bug fixes (flip guard, RandAugment, RandomResizedCrop, RandomErasing, all annotations)
 - [x] Tier 1   — LSTM fortification (LayerNormLSTMStack, WeightDrop, HighwayLayer — flags: --layer_norm --dropconnect)
-- [ ] Tier 2   — Dense Co-Attention DCAN (replaces BahdanauAttention)
+- [x] Tier 2   — Dense Co-Attention DCAN (replaces BahdanauAttention — flag: --dcan)
 - [ ] Tier 3A  — ConvNeXt-Base encoder (replaces ResNetSpatialEncoder for Model E)
 - [ ] Tier 4   — MUTAN Tucker Fusion (replaces GatedFusion for Model E)
 - [ ] Tier 5   — Pointer-Generator decoder (replaces output head)

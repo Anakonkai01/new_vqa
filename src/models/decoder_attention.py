@@ -50,6 +50,130 @@ sys.path.insert(0, os.path.dirname(__file__))
 from decoder_lstm import LayerNormLSTMStack, WeightDrop
 
 
+class DenseCoAttention(nn.Module):
+    """
+    Tier-2: Dense Co-Attention Network (DCAN).
+    Replaces the two BahdanauAttention modules in LSTMDecoderWithAttention
+    when use_dcan=True.
+
+    Four-step process:
+      1. Intra-modal self-attention on image regions  (region ↔ region)
+      2. Intra-modal self-attention on question words (word   ↔ word)
+      3. Inter-modal: image guides question attention
+      4. Inter-modal: question guides image attention
+
+    Output shapes match what LSTMDecoderWithAttention already expects:
+      img_context: (B, H)            — replaces BahdanauAttention image context
+      q_context:   (B, H)            — replaces BahdanauAttention question context
+      img_alpha:   (B, num_regions)  — for visualization / coverage
+      q_alpha:     (B, q_len)        — question attention weights
+    """
+
+    def __init__(self, hidden_size, num_heads=4):
+        super().__init__()
+        assert hidden_size % num_heads == 0, \
+            f"hidden_size ({hidden_size}) must be divisible by num_heads ({num_heads})"
+        self.hidden_size = hidden_size
+        self.num_heads   = num_heads
+        self.d_head      = hidden_size // num_heads
+        self.scale       = self.d_head ** -0.5
+
+        # Step 1: image self-attention projections
+        self.img_q = nn.Linear(hidden_size, hidden_size)
+        self.img_k = nn.Linear(hidden_size, hidden_size)
+        self.img_v = nn.Linear(hidden_size, hidden_size)
+        self.img_self_out = nn.Linear(hidden_size, hidden_size)
+        self.ln_img = nn.LayerNorm(hidden_size)
+
+        # Step 2: question self-attention projections
+        self.q_q  = nn.Linear(hidden_size, hidden_size)
+        self.q_k  = nn.Linear(hidden_size, hidden_size)
+        self.q_v  = nn.Linear(hidden_size, hidden_size)
+        self.q_self_out = nn.Linear(hidden_size, hidden_size)
+        self.ln_q = nn.LayerNorm(hidden_size)
+
+        # Step 3: image → question cross-attention (image queries question)
+        self.cross_iq_q = nn.Linear(hidden_size, hidden_size)
+        self.cross_iq_k = nn.Linear(hidden_size, hidden_size)
+        self.cross_iq_v = nn.Linear(hidden_size, hidden_size)
+
+        # Step 4: question → image cross-attention (question queries image)
+        self.cross_qi_q = nn.Linear(hidden_size, hidden_size)
+        self.cross_qi_k = nn.Linear(hidden_size, hidden_size)
+        self.cross_qi_v = nn.Linear(hidden_size, hidden_size)
+
+    def _reshape(self, x):
+        """(B, S, H) → (B, num_heads, S, d_head)"""
+        B, S, _ = x.shape
+        return x.view(B, S, self.num_heads, self.d_head).transpose(1, 2)
+
+    def _merge(self, x):
+        """(B, num_heads, S, d_head) → (B, S, H)"""
+        B, _, S, _ = x.shape
+        return x.transpose(1, 2).contiguous().view(B, S, self.hidden_size)
+
+    def _attn(self, Q, K, V, mask=None):
+        """Scaled dot-product. All: (B, heads, S, d_head). Returns (out, alpha_mean)."""
+        scores = torch.matmul(Q, K.transpose(-2, -1)) * self.scale   # (B, h, Sq, Sk)
+        if mask is not None:
+            scores = scores.masked_fill(~mask, float('-inf'))
+        alpha  = F.softmax(scores, dim=-1)
+        out    = torch.matmul(alpha, V)                               # (B, h, Sq, d)
+        return out, alpha.mean(dim=1)   # average over heads for visualization
+
+    def forward(self, img_feats, q_hidden, lstm_h, q_mask=None):
+        """
+        img_feats: (B, num_regions, H)
+        q_hidden:  (B, q_len, H)
+        lstm_h:    (B, H)  — not used directly, kept for API consistency
+        q_mask:    (B, q_len) bool, True = valid token (False = padding)
+
+        returns:
+          img_context: (B, H)
+          q_context:   (B, H)
+          img_alpha:   (B, num_regions)
+          q_alpha:     (B, q_len)
+        """
+        # ── Step 1: Image intra-modal self-attention ──────────────────────────
+        iQ = self._reshape(self.img_q(img_feats))
+        iK = self._reshape(self.img_k(img_feats))
+        iV = self._reshape(self.img_v(img_feats))
+        img_self_raw, _ = self._attn(iQ, iK, iV)
+        img_self = self.ln_img(img_feats + self.img_self_out(self._merge(img_self_raw)))
+
+        # ── Step 2: Question intra-modal self-attention ───────────────────────
+        qQ = self._reshape(self.q_q(q_hidden))
+        qK = self._reshape(self.q_k(q_hidden))
+        qV = self._reshape(self.q_v(q_hidden))
+        # Build padding mask: (B, 1, 1, q_len) — True where valid
+        if q_mask is not None:
+            q_attn_mask = q_mask.unsqueeze(1).unsqueeze(2)   # (B, 1, 1, q_len)
+        else:
+            q_attn_mask = None
+        q_self_raw, _ = self._attn(qQ, qK, qV, mask=q_attn_mask)
+        q_self = self.ln_q(q_hidden + self.q_self_out(self._merge(q_self_raw)))
+
+        # ── Step 3: Image → question (mean-pool image queries question words) ──
+        img_mean = img_self.mean(dim=1, keepdim=True)          # (B, 1, H)
+        cQ = self._reshape(self.cross_iq_q(img_mean))          # (B, nh, 1, d)
+        cK = self._reshape(self.cross_iq_k(q_self))
+        cV = self._reshape(self.cross_iq_v(q_self))
+        q_cross_out, q_alpha = self._attn(cQ, cK, cV, mask=q_attn_mask)
+        q_context = self._merge(q_cross_out).squeeze(1)        # (B, H)
+        q_alpha   = q_alpha.squeeze(1)                         # (B, q_len)
+
+        # ── Step 4: Question → image (q_context queries image regions) ────────
+        q_ctx_exp = q_context.unsqueeze(1)                     # (B, 1, H)
+        dQ = self._reshape(self.cross_qi_q(q_ctx_exp))
+        dK = self._reshape(self.cross_qi_k(img_self))
+        dV = self._reshape(self.cross_qi_v(img_self))
+        img_cross_out, img_alpha = self._attn(dQ, dK, dV)
+        img_context = self._merge(img_cross_out).squeeze(1)    # (B, H)
+        img_alpha   = img_alpha.squeeze(1)                     # (B, num_regions)
+
+        return img_context, q_context, img_alpha, q_alpha
+
+
 class BahdanauAttention(nn.Module):
     """
     Computes attention weights and context vector for one decode step.
@@ -122,17 +246,21 @@ class LSTMDecoderWithAttention(nn.Module):
 
     def __init__(self, vocab_size, embed_size, hidden_size, num_layers,
                  attn_dim=512, dropout=0.5, pretrained_embeddings=None,
-                 use_coverage=False, use_layer_norm=False, use_dropconnect=False):
+                 use_coverage=False, use_layer_norm=False, use_dropconnect=False,
+                 use_dcan=False, num_heads=4):
         """
-        use_layer_norm  : replace nn.LSTM with LayerNormLSTMStack (Tier 1A + 1C)
-        use_dropconnect : apply WeightDrop to nn.LSTM (Tier 1B); ignored when use_layer_norm=True
+        use_layer_norm  : Tier 1A+1C — LayerNormLSTMStack with highway connections
+        use_dropconnect : Tier 1B    — DropConnect on hidden-to-hidden weights
+        use_dcan        : Tier 2     — DenseCoAttention replacing both BahdanauAttention modules
+        num_heads       : DCAN heads (default 4, hidden_size must be divisible by num_heads)
         """
         super().__init__()
 
-        self.hidden_size  = hidden_size
-        self.num_layers   = num_layers
-        self.use_coverage = use_coverage
+        self.hidden_size    = hidden_size
+        self.num_layers     = num_layers
+        self.use_coverage   = use_coverage
         self.use_layer_norm = use_layer_norm
+        self.use_dcan       = use_dcan
 
         # Embedding: supports GloVe pretrained vectors
         if pretrained_embeddings is not None:
@@ -148,10 +276,13 @@ class LSTMDecoderWithAttention(nn.Module):
             self.embedding = nn.Embedding(vocab_size, embed_size, padding_idx=0)
             self.embed_proj = None
 
-        # Attention modules — dual attention over image AND question
-        # Coverage only on image attention (spatial repetition is the main issue)
-        self.img_attention = BahdanauAttention(hidden_size, attn_dim, use_coverage=use_coverage)
-        self.q_attention   = BahdanauAttention(hidden_size, attn_dim)
+        # Attention modules
+        if use_dcan:
+            self.attention = DenseCoAttention(hidden_size, num_heads=num_heads)
+            # img_attention / q_attention not needed, but keep names for coverage compat
+        else:
+            self.img_attention = BahdanauAttention(hidden_size, attn_dim, use_coverage=use_coverage)
+            self.q_attention   = BahdanauAttention(hidden_size, attn_dim)
 
         # LSTM: input_size = embed_size + hidden_size * 2
         lstm_input_size = embed_size + hidden_size * 2
@@ -222,9 +353,14 @@ class LSTMDecoderWithAttention(nn.Module):
             # Take the last layer's hidden state to compute attention
             h_top = hidden[0][-1]                 # (batch, hidden_size)
 
-            # Dual attention: attend over both image regions AND question tokens
-            img_context, img_alpha = self.img_attention(h_top, img_features, coverage)  # (batch, hidden_size)
-            q_context, _           = self.q_attention(h_top, q_hidden_states)           # (batch, hidden_size)
+            # Dual attention: Bahdanau (default) or DCAN (Tier 2)
+            if self.use_dcan:
+                img_context, q_context, img_alpha, _ = \
+                    self.attention(img_features, q_hidden_states, h_top)
+                # Coverage not used with DCAN (DCAN has its own intra-modal self-attention)
+            else:
+                img_context, img_alpha = self.img_attention(h_top, img_features, coverage)
+                q_context, _           = self.q_attention(h_top, q_hidden_states)
 
             # Coverage loss: penalize re-attending to already-attended regions
             # Original See et al.: sum(min(alpha, coverage)) — but this is ~constant
@@ -274,11 +410,15 @@ class LSTMDecoderWithAttention(nn.Module):
             embed = self.embed_proj(embed)              # (batch, 1, embed_size)
         h_top  = hidden[0][-1]                         # (batch, hidden_size)
 
-        img_context, img_alpha = self.img_attention(h_top, img_features, coverage)  # (batch, hidden_size)
-        q_context, _           = self.q_attention(h_top, q_hidden_states)           # (batch, hidden_size)
+        if self.use_dcan:
+            img_context, q_context, img_alpha, _ = \
+                self.attention(img_features, q_hidden_states, h_top)
+        else:
+            img_context, img_alpha = self.img_attention(h_top, img_features, coverage)
+            q_context, _           = self.q_attention(h_top, q_hidden_states)
 
-        # Update coverage: initialize on first step, accumulate thereafter
-        if self.use_coverage:
+        # Update coverage (Bahdanau path only)
+        if self.use_coverage and not self.use_dcan:
             if coverage is None:
                 coverage = torch.zeros_like(img_alpha)
             coverage = coverage + img_alpha

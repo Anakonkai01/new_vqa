@@ -157,7 +157,8 @@ class VQAModelC(nn.Module):
     def __init__(self, vocab_size, answer_vocab_size,
                  embed_size=512, hidden_size=1024, num_layers=2, attn_dim=512, dropout=0.5,
                  pretrained_q_emb=None, pretrained_a_emb=None,
-                 use_coverage=False, use_layer_norm=False, use_dropconnect=False):
+                 use_coverage=False, use_layer_norm=False, use_dropconnect=False,
+                 use_dcan=False):
         super().__init__()
 
         self.num_layers = num_layers
@@ -185,6 +186,7 @@ class VQAModelC(nn.Module):
             use_coverage=use_coverage,
             use_layer_norm=use_layer_norm,
             use_dropconnect=use_dropconnect,
+            use_dcan=use_dcan,
         )
 
     def forward(self, images, questions, target_seq):
@@ -232,7 +234,8 @@ class VQAModelD(nn.Module):
                  embed_size=512, hidden_size=1024, num_layers=2,
                  attn_dim=512, freeze_cnn=True, dropout=0.5,
                  pretrained_q_emb=None, pretrained_a_emb=None,
-                 use_coverage=False, use_layer_norm=False, use_dropconnect=False):
+                 use_coverage=False, use_layer_norm=False, use_dropconnect=False,
+                 use_dcan=False):
         super().__init__()
 
         self.num_layers = num_layers
@@ -259,6 +262,7 @@ class VQAModelD(nn.Module):
             use_coverage=use_coverage,
             use_layer_norm=use_layer_norm,
             use_dropconnect=use_dropconnect,
+            use_dcan=use_dcan,
         )
 
     def forward(self, images, questions, target_seq):
