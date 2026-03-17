@@ -539,7 +539,7 @@ $$c_t^{q} = \sum_{j=1}^{L_q} \alpha_{t,j}^{q} \cdot q_j$$
 
 **Step 3 — LSTM Input (concatenated):**
 
-$$\text{input}_t = [\text{embed}(a_{t-1}) \;  \; c_t^{\text{img}} \;  \; c_t^{q}]$$
+$$\text{input}_t = [\text{embed}(a_{t-1})  \; c_t^{\text{img}}  \; c_t^{q}]$$
 
 $$h_t, c_t = \text{LSTM}(\text{input}_t, h_{t-1}, c_{t-1})$$
 
