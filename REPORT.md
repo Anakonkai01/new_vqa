@@ -935,7 +935,7 @@ $$\text{lr}(e) = \eta_{\min} + \frac{1}{2}(\text{lr}_{\text{base}} - \eta_{\min}
 
 At each step, select the token with the highest probability:
 
-$$a_t = \arg\max_{w \in V_A} P(w \mid a_{<t}, I, Q)$$
+$$a_t = \arg\max_{w \in V_A} P(w \mid a_{\lt t}, I, Q)$$
 
 - **Advantage:** Fast single-pass decoding (one forward pass per token)
 - **Disadvantage:** May miss globally optimal sequences — a locally suboptimal token choice can lead to a better overall sequence
@@ -950,7 +950,7 @@ Maintains the top-$k$ candidate sequences at each step:
 4. Keep top-$k$ candidates
 5. Return the sequence with the highest **length-normalized** score:
 
-$$\text{score}(A) = \frac{1}{|A|} \sum_{t=1}^{|A|} \log P(a_t \mid a_{<t}, I, Q)$$
+$$\text{score}(A) = \frac{1}{|A|} \sum_{t=1}^{|A|} \log P(a_t \mid a_{\lt t}, I, Q)$$
 
 **Why length normalization?** Without it, beam search strongly favors shorter sequences (fewer log-probability terms to sum). Length normalization ensures fair comparison between sequences of different lengths.
 
