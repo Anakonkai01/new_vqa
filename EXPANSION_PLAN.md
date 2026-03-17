@@ -20,12 +20,12 @@
 - [x] Tier D1  — Data bug fixes (flip guard, RandAugment, RandomResizedCrop, RandomErasing, all annotations)
 - [x] Tier 1   — LSTM fortification (LayerNormLSTMStack, WeightDrop, HighwayLayer — flags: --layer_norm --dropconnect)
 - [x] Tier 2   — Dense Co-Attention DCAN (replaces BahdanauAttention — flag: --dcan)
-- [ ] Tier 3A  — ConvNeXt-Base encoder (replaces ResNetSpatialEncoder for Model E)
-- [ ] Tier 4   — MUTAN Tucker Fusion (replaces GatedFusion for Model E)
-- [ ] Tier 5   — Pointer-Generator decoder (replaces output head)
-- [ ] Tier 6   — Abstention-Aware CSS (counterfactual robustness)
-- [ ] Tier 7   — Deep BiLSTM + GloVe 840B + Char-CNN question encoder
-- [ ] Tier 8   — SCST Reinforcement Learning (Phase 4 training)
+- [x] Tier 3A  — ConvNeXt-Base encoder (replaces ResNetSpatialEncoder for Model E)
+- [x] Tier 4   — MUTAN Tucker Fusion (replaces GatedFusion for Model E)
+- [x] Tier 5   — Pointer-Generator decoder (copy from question tokens — flag: --pgn)
+- [x] Tier 6   — CSS counterfactual augmentation (flag: --css)
+- [x] Tier 7   — Deep BiLSTM + Highway + Char-CNN (flags: --q_highway --char_cnn)
+- [x] Tier 8   — SCST Reinforcement Learning (flag: --scst, Phase 4 training)
 - [ ] Tier 3B  — Faster R-CNN BUTD encoder (Model F, highest ceiling)
 - [ ] Tier 9   — ConceptNet + GNN knowledge integration (optional)
 
