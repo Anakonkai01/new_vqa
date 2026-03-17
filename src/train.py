@@ -19,6 +19,7 @@ from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, VQAMod
 from glove_utils import build_glove_matrix
 from vocab import Vocabulary
 from training.css_augment import CSSAugmentor, css_contrastive_loss
+from training.scst import scst_step
 
 
 
@@ -260,7 +261,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           grad_clip=5.0, label_smoothing=0.1,
           use_mutan=False, use_pgn=False,
           use_css=False, css_lambda=0.5, css_margin=1.0,
-          use_q_highway=False, use_char_cnn=False):
+          use_q_highway=False, use_char_cnn=False,
+          use_scst=False, scst_lambda=0.5):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -468,6 +470,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     if use_coverage and model_type in ('C', 'D', 'E'):
         print(f"Coverage Mechanism: ON | λ = {coverage_lambda}")
 
+    if use_scst:
+        print(f"SCST (Tier 8)     : ON | λ_scst={scst_lambda} (mixed CE + REINFORCE)")
+
     # Tier 6: CSS augmentor (only for C/D/E)
     css_augmentor = None
     if use_css and model_type in ('C', 'D', 'E'):
@@ -539,14 +544,32 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                     logits.view(-1, vocab_size),
                     decoder_target.contiguous().view(-1)
                 )
-                # Total loss = CE + λ_cov * coverage + λ_css * contrastive
+                # Total loss = CE + λ_cov * coverage + λ_css * contrastive + λ_scst * REINFORCE
                 loss = ce_loss + coverage_lambda * coverage_loss
                 if css_augmentor is not None:
                     css_loss = css_forward(model, model_type, imgs, questions, css_augmentor)
                     loss = loss + css_lambda * css_loss
-                # Scale loss for gradient accumulation
-                loss = loss / accum_steps
 
+            # SCST runs outside AMP context (BLEU computation is not differentiable)
+            if use_scst:
+                # Decode target tokens → text for BLEU reward
+                target_texts = []
+                for row in decoder_target:
+                    words = []
+                    for tid in row.tolist():
+                        if tid == 0 or tid == 2:  # pad or end
+                            break
+                        w = vocab_a.idx2word.get(tid, '<unk>') if hasattr(vocab_a, 'idx2word') \
+                            else vocab_a.idx_to_word.get(tid, '<unk>')
+                        words.append(w)
+                    target_texts.append(' '.join(words))
+                with autocast('cuda', enabled=use_amp, dtype=amp_dtype):
+                    rl_loss = scst_step(model, model_type, imgs, questions,
+                                        target_texts, vocab_a, device=DEVICE)
+                    loss = loss + scst_lambda * rl_loss
+
+            # Scale loss for gradient accumulation
+            loss = loss / accum_steps
             scaler.scale(loss).backward()
 
             # Step optimizer every accum_steps mini-batches (or at the last batch)
@@ -714,6 +737,11 @@ if __name__ == "__main__":
     # Tier 5: Pointer-Generator Network
     parser.add_argument('--pgn', action='store_true',
                         help='Tier 5: Pointer-Generator Network — copy from question tokens (C/D/E)')
+    # Tier 8: SCST Reinforcement Learning
+    parser.add_argument('--scst', action='store_true',
+                        help='Tier 8: SCST RL — mixed CE + REINFORCE (use after Phase 3)')
+    parser.add_argument('--scst_lambda', type=float, default=0.5,
+                        help='Weight for SCST RL loss term (default: 0.5)')
     # Tier 7: Deep BiLSTM + Char-CNN question encoder
     parser.add_argument('--q_highway', action='store_true',
                         help='Tier 7B: Highway connections between BiLSTM layers in question encoder')
@@ -757,7 +785,8 @@ if __name__ == "__main__":
           grad_clip=args.grad_clip, label_smoothing=args.label_smoothing,
           use_mutan=args.use_mutan, use_pgn=args.pgn,
           use_css=args.css, css_lambda=args.css_lambda, css_margin=args.css_margin,
-          use_q_highway=args.q_highway, use_char_cnn=args.char_cnn)
+          use_q_highway=args.q_highway, use_char_cnn=args.char_cnn,
+          use_scst=args.scst, scst_lambda=args.scst_lambda)
         
         
         
