@@ -20,6 +20,7 @@ from glove_utils import build_glove_matrix
 from vocab import Vocabulary
 from training.css_augment import CSSAugmentor, css_contrastive_loss
 from training.scst import scst_step
+from training.curriculum import CurriculumSampler, compute_complexity_scores
 
 # ── wandb (optional — gracefully disabled if not installed / not requested) ──
 try:
@@ -271,7 +272,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           use_q_highway=False, use_char_cnn=False,
           use_scst=False, scst_lambda=0.5,
           use_wandb=False, wandb_project='vqa-e', wandb_run_name=None,
-          wandb_tags=None, phase=None):
+          wandb_tags=None, phase=None,
+          use_curriculum=False,
+          use_ans_freq_weight=False):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -300,6 +303,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
             use_scst=use_scst, scst_lambda=scst_lambda,
             use_q_highway=use_q_highway, use_char_cnn=use_char_cnn,
             augment=augment,
+            use_curriculum=use_curriculum,
+            use_ans_freq_weight=use_ans_freq_weight,
         )
         _wb = _wandb.init(
             project=wandb_project,
@@ -335,10 +340,18 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
     pin_memory = torch.cuda.is_available()
 
+    # Tier D4: Curriculum sampler — sort easy→hard, advance pacing each epoch
+    curriculum_sampler = None
+    if use_curriculum:
+        scores = compute_complexity_scores(train_dataset.annotations)
+        curriculum_sampler = CurriculumSampler(scores, epoch=0, total_epochs=epochs)
+        print(f"Curriculum       : ON (TPCL — {len(scores)} samples sorted easy→hard)")
+
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=(curriculum_sampler is None),  # mutually exclusive with sampler
+        sampler=curriculum_sampler,
         collate_fn=vqa_collate_fn,
         num_workers=num_workers,
         pin_memory=pin_memory,
@@ -386,13 +399,35 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     if getattr(args, 'char_cnn', False) and hasattr(model.q_encoder, 'char_cnn'):
         model.q_encoder.char_cnn.build_char_table(vocab_q)
         print("Char-CNN         : built char table from vocab_questions")
+    # Tier D3: Answer frequency weights — down-weight common answers, up-weight rare ones.
+    # Inverse-frequency weighting: w_i = 1 / sqrt(count_i), normalized so mean weight = 1.
+    ans_freq_weights = None
+    if use_ans_freq_weight and not use_pgn:
+        from collections import Counter
+        all_answers = [ann.get('multiple_choice_answer', '') for ann in train_dataset.annotations]
+        counts = Counter(vocab_a.numericalize(a)[1] for a in all_answers
+                         if a)  # skip empty; [1] = first real token after <start>
+        vocab_size_a = len(vocab_a)
+        weights = torch.ones(vocab_size_a, device=DEVICE)
+        for idx, cnt in counts.items():
+            if 0 < idx < vocab_size_a:
+                weights[idx] = 1.0 / max(cnt, 1) ** 0.5
+        # Normalize so mean weight across vocabulary ≈ 1 (prevents LR shift)
+        weights = weights / weights.mean()
+        ans_freq_weights = weights
+        print(f"Ans Freq Weights : ON (D3 — {len(counts)} unique answers weighted)")
+
     # PGN outputs log-probabilities (from PointerGeneratorHead.blend) instead of raw logits,
     # so we must use NLLLoss. NLLLoss does not support label_smoothing natively; we skip it.
     # Non-PGN models still use CrossEntropyLoss with label_smoothing.
     if use_pgn:
         criterion = nn.NLLLoss(ignore_index=0)
     else:
-        criterion = nn.CrossEntropyLoss(ignore_index=0, label_smoothing=label_smoothing)
+        criterion = nn.CrossEntropyLoss(
+            ignore_index=0,
+            label_smoothing=label_smoothing,
+            weight=ans_freq_weights,
+        )
 
     # ── Optimizer — differential LR when fine-tuning the CNN backbone ──────────
     # Models A/C use scratch CNN → finetune_cnn flag has no effect on them.
@@ -552,6 +587,10 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         print("torch.compile    : OFF (--no_compile flag)")
 
     for epoch in tqdm.tqdm(range(start_epoch, start_epoch + epochs)):
+        # Tier D4: advance curriculum pacing each epoch
+        if curriculum_sampler is not None:
+            curriculum_sampler.set_epoch(epoch)
+
         # ── Train ────────────────────────────────────────────────
         model.train()
         total_loss = 0
@@ -840,6 +879,12 @@ if __name__ == "__main__":
                         help='Comma-separated W&B tags, e.g. "modelE,phase1"')
     parser.add_argument('--phase', type=int, default=None,
                         help='Training phase number (1/2/3/4) for logging/naming')
+    # Tier D4: Curriculum Learning
+    parser.add_argument('--curriculum', action='store_true',
+                        help='Tier D4: Task-Progressive Curriculum Learning — easy→hard sample ordering')
+    # Tier D3: Answer distribution balancing
+    parser.add_argument('--ans_freq_weight', action='store_true',
+                        help='Tier D3: Inverse-frequency answer weighting in CrossEntropyLoss')
     args = parser.parse_args()
     _tags = [t.strip() for t in args.wandb_tags.split(',')] if args.wandb_tags else []
     train(model_type=args.model, epochs=args.epochs, lr=args.lr,
@@ -860,7 +905,9 @@ if __name__ == "__main__":
           use_scst=args.scst, scst_lambda=args.scst_lambda,
           use_wandb=args.wandb, wandb_project=args.wandb_project,
           wandb_run_name=args.wandb_run_name, wandb_tags=_tags,
-          phase=args.phase)
+          phase=args.phase,
+          use_curriculum=args.curriculum,
+          use_ans_freq_weight=args.ans_freq_weight)
         
         
         

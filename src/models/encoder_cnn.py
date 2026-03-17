@@ -243,6 +243,42 @@ class ConvNeXtSpatialEncoder(nn.Module):
         return [p for p in self.features.parameters() if p.requires_grad]
 
 
+class BUTDFeatureEncoder(nn.Module):
+    """
+    Tier-3B: Bottom-Up Top-Down (BUTD) feature encoder.
+
+    Does NOT run Faster R-CNN at training time.  Instead it projects
+    pre-extracted RoI features (saved to disk by extract_butd_features.py)
+    from feat_dim → output_size using a learnable projection.
+
+    Input:  (B, k, feat_dim)  — pre-extracted features, variable k per image
+    Output: (B, k, output_size)
+
+    feat_dim = roi_feat_dim (2048) + spatial_dim (5)
+      spatial: [x1/W, y1/H, x2/W, y2/H, area/(W*H)]
+    Default feat_dim = 2053 (standard BUTD setup).
+    """
+
+    def __init__(self, feat_dim=2053, output_size=1024):
+        super().__init__()
+        self.proj = nn.Sequential(
+            nn.Linear(feat_dim, output_size),
+            nn.ReLU(inplace=True),
+            nn.LayerNorm(output_size),
+        )
+
+    def forward(self, x):
+        # x: (B, k, feat_dim)
+        return self.proj(x)  # (B, k, output_size)
+
+    # For API compatibility with ResNet/ConvNeXt encoders used in train.py
+    def unfreeze_top_layers(self):
+        pass   # nothing to unfreeze — no pretrained backbone
+
+    def backbone_params(self):
+        return []
+
+
 # test
 if __name__ == "__main__":
     import torch
