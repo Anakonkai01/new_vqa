@@ -81,8 +81,7 @@ By systematically varying these two axes (pretrained vs. scratch, attention vs. 
 
 | Aspect | Choice | Reason |
 |---|---|---|
-| **Framework** | PyTorch 2.10 + CUDA 12.8 | Industry standard, strong GPU support |
-| **Hardware** | NVIDIA RTX 3060 12GB | Available local GPU; limits batch sizes |
+| **Framework** | PyTorch 2.x + CUDA | Industry standard, strong GPU support |
 | **Architecture Family** | CNN-LSTM | Classic approach aligned with course requirements; strong baseline for studying multimodal integration |
 | **Language** | English only | VQA-E is English-only |
 
@@ -460,7 +459,7 @@ $$\text{ResNet101}[:-1] \rightarrow \text{Linear}(2048 \rightarrow 1024)$$
 - **Depth:** 101 layers provide rich hierarchical feature extraction (vs. ResNet50's 50 layers)
 - **Transfer learning:** Pretrained on ImageNet (1.2M images, 1000 classes), the network has learned powerful visual representations that transfer well to VQA
 - **Established baseline:** ResNet101 is the most commonly used backbone in VQA literature, enabling fair comparison with published results
-- **Why not deeper (ResNet152)?** Diminishing returns; 152 layers need more VRAM with marginal accuracy gain on VQA tasks
+- **Why not deeper (ResNet152)?** Diminishing returns; marginal accuracy gain on VQA tasks with significantly more computation
 
 **Selective Fine-tuning (Phase 2):**
 - **Early layers (conv1, layer1, layer2):** remain frozen — capture generic low-level features (edges, textures, colors) that are task-independent
@@ -551,7 +550,7 @@ $$h_t, c_t = \text{LSTM}(\text{input}_t, h_{t-1}, c_{t-1})$$
 
 $$P(a_t) = \text{softmax}(W_o \cdot \text{proj}(h_t))$$
 
-Where $[\cdot ; \cdot]$ denotes concatenation, so the LSTM input size is $\text{embed\_size} + 2 \times \text{hidden\_size} = 512 + 2 \times 1024 = 2560$.
+Where $[\cdot ; \cdot]$ denotes concatenation, so the LSTM input size is $d_{\text{embed}} + 2 \times H = 512 + 2 \times 1024 = 2560$.
 
 **Why Bahdanau Attention (not Luong)?**
 - **Bahdanau (additive):** $e = v^\top \tanh(W_h h + W_s s)$ — uses a learned hidden layer to combine query and key. Works well with LSTMs because the tanh non-linearity matches the LSTM's activation functions.
@@ -656,7 +655,7 @@ $$\text{ResNet101}[:-2] \rightarrow \text{Conv2d}(2048 \rightarrow 1024, k=1) \r
 
 **Trade-offs:**
 - Highest computational cost (large backbone + per-step attention loop)
-- Smallest batch size (16 due to VRAM; compensated by gradient accumulation)
+- Smallest batch size (16; compensated by gradient accumulation)
 - Slowest training (~4× slower than Model A per epoch)
 
 ---
@@ -673,7 +672,7 @@ $$\text{ResNet101}[:-2] \rightarrow \text{Conv2d}(2048 \rightarrow 1024, k=1) \r
 | Fine-tunable backbone? | N/A | Yes (Phase 2) | N/A | Yes (Phase 2) |
 | Decoder input size | 512 | 512 | 2560 | 2560 |
 | Approx. parameters | ~46M | ~83M | ~58M | ~96M |
-| Batch size (RTX 3060) | 64 | 32 | 32 | 16 |
+| Typical batch size | 64 | 32 | 32 | 16 |
 | Role | Baseline | +Pretrained | +Attention | +Both |
 
 ---
@@ -684,7 +683,7 @@ $$\text{ResNet101}[:-2] \rightarrow \text{Conv2d}(2048 \rightarrow 1024, k=1) \r
 
 All four models share the same **Bidirectional LSTM** question encoder:
 
-$$\text{Embedding}(V_Q, d_{\text{embed}}) \rightarrow \text{BiLSTM}(\text{hidden\_size} // 2 \text{ per direction}) \rightarrow h_{\text{final}}$$
+$$\text{Embedding}(V_Q,\, d_{\text{embed}}) \to \text{BiLSTM}\!\left(\tfrac{H}{2} \text{ per direction}\right) \to h_{\text{final}}$$
 
 | Parameter | Value |
 |---|---|
@@ -702,7 +701,7 @@ $$h_t = [\overrightarrow{h}_t \; ; \; \overleftarrow{h}_t] \quad \text{(concaten
 
 **Outputs:**
 - $q_{\text{feature}} = [\overrightarrow{h_L} \; ; \; \overleftarrow{h_L}] \in \mathbb{R}^{1024}$ — final hidden state for fusion
-- $q_{\text{hidden\_states}} \in \mathbb{R}^{B \times L_q \times 1024}$ — all timestep outputs for question attention (used only by Model C/D)
+- $q_{\text{hidden}} \in \mathbb{R}^{B \times L_q \times 1024}$ — all timestep outputs for question attention (used only by Model C/D)
 
 ### 7.2 Gated Fusion
 
@@ -751,7 +750,7 @@ Using GloVe embeddings provides the model with pre-existing knowledge of word re
 
 The decoder output layer shares weights with the embedding layer (Press & Wolf, 2017):
 
-$$\text{hidden} \xrightarrow{\text{out\_proj}} \mathbb{R}^{d_{\text{embed}}} \xrightarrow{W_{\text{embed}}^\top} \mathbb{R}^{|V_A|}$$
+$$h_t \xrightarrow{W_{\text{proj}}} \mathbb{R}^{d_{\text{embed}}} \xrightarrow{W_{\text{embed}}^\top} \mathbb{R}^{|V_A|}$$
 
 **Why weight tying?**
 1. **Parameter reduction:** Eliminates a separate $d_{\text{embed}} \times |V_A|$ output matrix
@@ -822,11 +821,11 @@ Each phase addresses a specific challenge:
 
 **Teacher Forcing Detail:**
 
-$$\text{decoder\_input} = \text{answer}[:, :-1] = [\texttt{<start>}, w_1, w_2, \dots, w_{n}]$$
+$$\text{decoder input} = \text{answer}[:, :-1] = [\langle\text{start}\rangle,\; w_1, w_2, \dots, w_{n}]$$
 
-$$\text{decoder\_target} = \text{answer}[:, 1:] = [w_1, w_2, \dots, w_{n}, \texttt{<end>}]$$
+$$\text{decoder target} = \text{answer}[:, 1:] = [w_1, w_2, \dots, w_{n},\; \langle\text{end}\rangle]$$
 
-$$\mathcal{L}_{\text{CE}} = \text{CrossEntropyLoss}(\text{logits}, \text{target}), \quad \text{ignore\_index} = 0 \; (\texttt{<pad>})$$
+$$\mathcal{L}_{\text{CE}} = \text{CrossEntropyLoss}(\text{logits},\; \text{target}), \quad \text{pad index} = 0 \; (\langle\text{pad}\rangle \text{ ignored})$$
 
 ### 8.3 Phase 2 — Fine-tuning (Epochs 11–15)
 
@@ -885,14 +884,14 @@ $$\text{lr}(e) = \eta_{\min} + \frac{1}{2}(\text{lr}_{\text{base}} - \eta_{\min}
 
 **Why cosine (not step decay)?** Cosine annealing provides a smooth, continuous decay without abrupt LR drops. Step decay (dividing LR by 10 at fixed epochs) causes sudden training instability. Cosine annealing has been shown to produce better final convergence in deep learning.
 
-### 8.6 Batch Sizes (RTX 3060 12GB VRAM)
+### 8.6 Batch Sizes
 
 | Model | Batch Size | Accumulation Steps | Effective Batch | Why This Size |
 |---|---|---|---|---|
-| A (SimpleCNN) | 64 | 2 | 128 | Lightweight model, fits easily |
-| B (ResNet101) | 32 | 4 | 128 | ResNet intermediate activations consume VRAM |
+| A (SimpleCNN) | 64 | 2 | 128 | Lightweight model |
+| B (ResNet101) | 32 | 4 | 128 | ResNet intermediate activations are memory-intensive |
 | C (SimpleCNN + Attn) | 32 | 2 | 64 | Attention loop stores 49 attention maps per step |
-| D (ResNet101 + Attn) | 16 | 4 | 64 | Largest model; attention + ResNet activations |
+| D (ResNet101 + Attn) | 16 | 4 | 64 | Largest model; combined ResNet + attention memory cost |
 
 ### 8.7 Training Process Flow
 
@@ -1037,8 +1036,8 @@ This section details the **11 architectural and training improvements** implemen
 |---|---|
 | **What** | Accumulate gradients over multiple mini-batches before updating parameters |
 | **Configuration** | Model-dependent: 2–4 accumulation steps (see batch size table) |
-| **Why** | The RTX 3060 (12GB VRAM) limits physical batch sizes, especially for Model D (16). However, very small effective batches lead to noisy gradient estimates and unstable training. Gradient accumulation simulates larger batches by summing gradients across multiple forward passes before calling `optimizer.step()`. Loss is divided by `accum_steps` to maintain correct gradient magnitude. |
-| **Impact** | Effective batch sizes of 64–128 despite limited VRAM; more stable training |
+| **Why** | GPU memory constraints limit physical batch sizes, especially for large models like D. Very small effective batches lead to noisy gradient estimates and unstable training. Gradient accumulation simulates larger batches by summing gradients across multiple forward passes before calling `optimizer.step()`. Loss is divided by `accum_steps` to maintain correct gradient magnitude. |
+| **Impact** | Effective batch sizes of 64–128 regardless of per-GPU memory capacity; more stable training |
 
 ---
 
@@ -1064,13 +1063,13 @@ This section details the **11 architectural and training improvements** implemen
 | **Ampere+** (≥ compute 8.0) | BFloat16 | Not needed | BF16 has the same exponent range as FP32, so no overflow issues |
 | **Older GPUs** | Float16 | Yes | FP16 has narrow dynamic range; GradScaler prevents underflow |
 
-**Why AMP?** Reduces memory usage by ~40% and speeds up computation by ~30–50% on modern GPUs, with negligible impact on model quality. This is critical for fitting Model D (the largest) on the RTX 3060.
+**Why AMP?** Reduces memory usage by ~40% and speeds up computation by ~30–50% on modern GPUs, with negligible impact on model quality — especially valuable for larger models like D.
 
-**Detection:** Automatic via `torch.cuda.get_device_capability()` — the RTX 3060 (compute 8.6) uses BF16.
+**Detection:** Automatic via `torch.cuda.get_device_capability()` — Ampere+ GPUs (compute ≥ 8.0) use BF16; older GPUs fall back to FP16 with GradScaler.
 
 ### 10.3 Gradient Accumulation (Detail)
 
-$$\text{effective batch} = \text{batch\_size} \times \text{accum\_steps}$$
+$$\text{effective batch} = \text{batch size} \times \text{accum steps}$$
 
 Loss is divided by `accum_steps` before `backward()`, and `optimizer.step()` is called every `accum_steps` mini-batches. This ensures the gradient statistics match what would be obtained with a single large batch.
 
@@ -1208,19 +1207,6 @@ Traditional VQA Accuracy (classification-based) counts exact matches against gro
 | SS decay $k$ | — | — | 5 | Controls scheduled sampling rate |
 | Coverage $\lambda$ | 1.0 | 1.0 | 1.0 | Weight for coverage loss (Models C/D) |
 | Early stopping patience | 5 | 5 | 5 | Epochs without improvement before stopping |
-
-### 13.3 Hardware & System
-
-| Parameter | Value |
-|---|---|
-| GPU | NVIDIA RTX 3060 (12GB VRAM) |
-| GPU Compute Capability | 8.6 (Ampere) |
-| AMP Precision | BFloat16 |
-| DataLoader workers | 4 |
-| Prefetch factor | 4 |
-| Pin memory | Yes |
-| cuDNN benchmark | Yes |
-| TF32 | Enabled |
 
 ---
 
@@ -1839,7 +1825,7 @@ Based on qualitative examination of model predictions across the validation set,
 
 3. **Architecture scope:** We study CNN-LSTM pipelines only. Modern transformer-based architectures (BLIP, BLIP-2, LLaVA) would likely outperform our models significantly, but fall outside the scope of this comparative study.
 
-4. **Training budget:** 30 epochs on RTX 3060 limits exploration. Longer training, larger batch sizes, or more aggressive hyperparameter search could improve all models.
+4. **Training budget:** 30 epochs limits hyperparameter exploration. Longer training, larger batch sizes, or more aggressive search could improve all models.
 
 5. **BERTScore discriminability:** As discussed in §15.4, BERTScore shows a near-ceiling effect (range 0.0076) across all four models for VQA-E output. This metric is less informative than BLEU-4 and METEOR for this specific task.
 
@@ -1872,7 +1858,7 @@ For the 9 improvements not isolated by the factorial design, we reason from firs
 | **Weight Tying** | Small regularization + ~9M parameter reduction | Press & Wolf (2017) show 1–2 PPL improvement on language modeling |
 | **Coverage Mechanism** | Reduces repetition in answers >12 tokens | Measurable via diversity metrics (entropy, unique n-gram ratio) |
 | **N-gram Blocking** | Eliminates beam search repetition artifacts | Hard constraint; ~1–2pp Exact Match improvement |
-| **Gradient Accumulation** | Training stability at effective batch=64–128 | Enables larger effective batches on 12GB VRAM |
+| **Gradient Accumulation** | Training stability at effective batch=64–128 | Enables larger effective batches under GPU memory constraints |
 
 #### 16.8.3 Proposed Full Ablation Study
 
