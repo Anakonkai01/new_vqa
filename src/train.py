@@ -18,6 +18,7 @@ from dataset import VQAEDataset, vqa_collate_fn
 from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, VQAModelE
 from glove_utils import build_glove_matrix
 from vocab import Vocabulary
+from training.css_augment import CSSAugmentor, css_contrastive_loss
 
 
 
@@ -187,6 +188,48 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
     return torch.stack(logits_list, dim=1)  # (B, max_len, vocab_size)
 
 
+def css_forward(model, model_type, imgs, questions, augmentor):
+    """
+    Tier-6: Compute CSS contrastive loss without running the full decoder.
+    Encodes both real and counterfactual samples, compares fused representations.
+
+    Returns: scalar contrastive loss tensor
+    """
+    # Encode real batch (reuse encoder already warmed up)
+    with torch.no_grad():
+        img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B, N, H)
+        img_mean     = img_features.mean(dim=1)                          # (B, H)
+        q_feature, _ = model.q_encoder(questions)                        # (B, H)
+
+    # Generate counterfactuals (no gradient — pure augmentation)
+    cf_img_feats, cf_questions = augmentor(questions, img_features.detach())
+
+    # Compute fused real representation (WITH gradient for the fusion/encoders)
+    img_features_grad = F.normalize(model.i_encoder(imgs), p=2, dim=-1)
+    img_mean_grad     = img_features_grad.mean(dim=1)
+    q_feature_grad, _ = model.q_encoder(questions)
+    if model_type == 'E':
+        f_real = model.fusion(q_feature_grad, img_mean_grad)    # MUTAN: q first
+    else:
+        f_real = model.fusion(img_mean_grad, q_feature_grad)    # GatedFusion: img first
+
+    # Visual CF: zeroed image regions + original questions (no gradient through cf_img)
+    cf_img_mean = cf_img_feats.mean(dim=1)  # (B, H)  — already detached
+    if model_type == 'E':
+        f_cf_visual = model.fusion(q_feature_grad, cf_img_mean)
+    else:
+        f_cf_visual = model.fusion(cf_img_mean, q_feature_grad)
+
+    # Linguistic CF: original image + masked questions (re-encode cf_questions)
+    cf_q_feat, _ = model.q_encoder(cf_questions)
+    if model_type == 'E':
+        f_cf_ling = model.fusion(cf_q_feat, img_mean_grad)
+    else:
+        f_cf_ling = model.fusion(img_mean_grad, cf_q_feat)
+
+    return css_contrastive_loss(f_real, f_cf_visual, f_cf_ling)
+
+
 # ── Training set (train2014) ─────────────────────────────────────
 TRAIN_IMAGE_DIR  = "data/raw/train2014"
 TRAIN_VQA_E_JSON = "data/vqa_e/VQA-E_train_set.json"
@@ -214,7 +257,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           max_train_samples=None, max_val_samples=None,
           dropout=0.5, no_compile=False,
           grad_clip=5.0, label_smoothing=0.1,
-          use_mutan=False, use_pgn=False):
+          use_mutan=False, use_pgn=False,
+          use_css=False, css_lambda=0.5, css_margin=1.0):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -414,6 +458,16 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     print(f"Model: {model_type} | Device: {DEVICE} | Dropout: {dropout}")
     if use_coverage and model_type in ('C', 'D', 'E'):
         print(f"Coverage Mechanism: ON | λ = {coverage_lambda}")
+
+    # Tier 6: CSS augmentor (only for C/D/E)
+    css_augmentor = None
+    if use_css and model_type in ('C', 'D', 'E'):
+        css_augmentor = CSSAugmentor(
+            mask_token_id=3,   # <unk> id in our vocab
+            mask_ratio=0.3,
+            region_mask_ratio=0.3,
+        )
+        print(f"CSS Augmentation : ON | λ={css_lambda} | margin={css_margin}")
     if accum_steps > 1:
         print(f"Gradient Accum   : {accum_steps} steps (effective batch = {batch_size * accum_steps})")
     if augment:
@@ -476,8 +530,11 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                     logits.view(-1, vocab_size),
                     decoder_target.contiguous().view(-1)
                 )
-                # Total loss = CE + λ * coverage_loss (coverage_loss is 0 when disabled)
+                # Total loss = CE + λ_cov * coverage + λ_css * contrastive
                 loss = ce_loss + coverage_lambda * coverage_loss
+                if css_augmentor is not None:
+                    css_loss = css_forward(model, model_type, imgs, questions, css_augmentor)
+                    loss = loss + css_lambda * css_loss
                 # Scale loss for gradient accumulation
                 loss = loss / accum_steps
 
@@ -648,6 +705,13 @@ if __name__ == "__main__":
     # Tier 5: Pointer-Generator Network
     parser.add_argument('--pgn', action='store_true',
                         help='Tier 5: Pointer-Generator Network — copy from question tokens (C/D/E)')
+    # Tier 6: CSS Counterfactual Augmentation
+    parser.add_argument('--css', action='store_true',
+                        help='Tier 6: CSS counterfactual augmentation (visual+linguistic masking)')
+    parser.add_argument('--css_lambda', type=float, default=0.5,
+                        help='Weight for CSS contrastive loss (default: 0.5)')
+    parser.add_argument('--css_margin', type=float, default=1.0,
+                        help='Margin for CSS hinge contrastive loss (default: 1.0)')
     parser.add_argument('--accum_steps', type=int, default=1,
                         help='Gradient accumulation steps (effective batch = batch_size × accum_steps)')
     parser.add_argument('--warmup_epochs', type=int, default=3,
@@ -677,7 +741,8 @@ if __name__ == "__main__":
           max_train_samples=args.max_train_samples, max_val_samples=args.max_val_samples,
           dropout=args.dropout, no_compile=args.no_compile,
           grad_clip=args.grad_clip, label_smoothing=args.label_smoothing,
-          use_mutan=args.use_mutan, use_pgn=args.pgn)
+          use_mutan=args.use_mutan, use_pgn=args.pgn,
+          use_css=args.css, css_lambda=args.css_lambda, css_margin=args.css_margin)
         
         
         
