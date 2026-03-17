@@ -5,4 +5,3 @@ checkpoints/
 *.zip
 data/glove/
 *.pth 
-# *.png
