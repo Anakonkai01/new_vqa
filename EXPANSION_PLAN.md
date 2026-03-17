@@ -1,10 +1,26 @@
 # VQA Expansion Plan — Implementation Reference
-# Last updated: 2026-03-17
+# Last updated: 2026-03-18
 # Sources: codebase analysis + Gemini research v1 + Gemini research v2-update
+#          + Gemini architectural review v3 (MHCA + Focal Loss corrections)
 #
 # CONSTRAINTS (hard):
 #   1. LSTM must remain the core temporal sequence processor
 #   2. NO transformers anywhere (no ViT, no BERT, no self-attention stacks)
+#   3. Cross-attention (Q from one modality, K/V from another) is ALLOWED
+#      Self-attention (Q, K, V all from same sequence) is FORBIDDEN
+#
+# ARCHITECTURAL REVIEW v3 CORRECTIONS (2026-03-18)
+# -------------------------------------------------
+# [CORRECTION A] DenseCoAttention REMOVED — it ran intra-modal self-attention
+#   O(T * (L_v^2 + L_q^2)) inside decode_step, violating constraint #3.
+#   REPLACED BY: MultiHeadCrossAttention (MHCA) — Q=h_t, K/V=memory — O(T*S).
+#
+# [CORRECTION B] Tier D3 (static class weights) SUPERSEDED by SequenceFocalLoss.
+#   CrossEntropyLoss(weight=w) applies the same scalar weight at every sequence
+#   position, penalizing grammar tokens ("because", "the") identically to answer
+#   tokens, causing catastrophic hallucinations in VQA-E explanation generation.
+#   REPLACED BY: SequenceFocalLoss — dynamically suppresses easy tokens via
+#   p_t = exp(-ce_t), focus factor = (1-p_t)^gamma. No static weight tensor.
 #
 # HOW TO USE THIS FILE:
 #   - Each tier has a [ ] checkbox. Mark [x] when complete, [~] when in-progress.
@@ -19,21 +35,46 @@
 - [x] Tier 0   — Free wins (length penalty α=0.7, min_len=5 in beam search)
 - [x] Tier D1  — Data bug fixes (flip guard, RandAugment, RandomResizedCrop, RandomErasing, all annotations)
 - [x] Tier 1   — LSTM fortification (LayerNormLSTMStack, WeightDrop, HighwayLayer — flags: --layer_norm --dropconnect)
-- [x] Tier 2   — Dense Co-Attention DCAN (replaces BahdanauAttention — flag: --dcan)
+- [x] Tier 2   — [SUPERSEDED → MHCA] DenseCoAttention was removed (self-attention violation).
+                  Now: MultiHeadCrossAttention always active in LSTMDecoderWithAttention.
+                  --dcan flag kept for backward compat (no-op). See CORRECTION A above.
 - [x] Tier 3A  — ConvNeXt-Base encoder (replaces ResNetSpatialEncoder for Model E)
 - [x] Tier 4   — MUTAN Tucker Fusion (replaces GatedFusion for Model E)
-- [x] Tier 5   — Pointer-Generator decoder (copy from question tokens — flag: --pgn)
+- [x] Tier 5   — Pointer-Generator decoder — q_alpha from q_mhca feeds P_copy (flag: --pgn)
 - [x] Tier 6   — CSS counterfactual augmentation (flag: --css)
 - [x] Tier 7   — Deep BiLSTM + Highway + Char-CNN (flags: --q_highway --char_cnn)
 - [x] Tier 8   — SCST Reinforcement Learning (flag: --scst, Phase 4 training)
-- [ ] Tier 3B  — Faster R-CNN BUTD encoder (Model F, highest ceiling)
-- [ ] Tier 9   — ConceptNet + GNN knowledge integration (optional)
+- [x] MHCA     — MultiHeadCrossAttention replaces both Bahdanau + DCAN (decoder_attention.py v3)
+                  Q=h_t (LSTM), K/V=img_features or q_hidden_states. O(T*S), fully compliant.
+- [x] Tier 3B  — Faster R-CNN BUTD encoder (Model F)
+                  BUTDFeatureEncoder (encoder_cnn.py), VQAModelF (vqa_models.py),
+                  BUTDDataset + butd_collate_fn (dataset.py),
+                  extract_butd_features.py (scripts/), --model F + --butd_feat_dir (train.py)
+                  feat_dim=1029 (ResNet50 FPN 1024 + 5 spatial). Pre-extract then train.
+- [x] Tier 9   — ConceptNet + GNN (src/models/concept_gnn.py)
+                  ConceptGNN: 2-layer GCN over ConceptNet/co-occurrence graph.
+                  Requires: pip install torch_geometric (MLP fallback if not installed).
+                  Standalone module — integrate into QuestionEncoder as optional enrichment.
 
 ### Data Tiers
-- [ ] Tier D2  — Dataset expansion (VQA v2.0 full + Visual Genome pre-train + GQA)
-- [ ] Tier D3  — Answer distribution balancing (freq weighting + soft labels)
-- [ ] Tier D4  — Task Progressive Curriculum Learning (TPCL)
-- [ ] Tier D5  — LLM synthetic data + hallucination noise filter
+- [x] Tier D2  — Mixed-Ratio Pretraining: build_mixed_sampler() in dataset.py
+                  Phase 1 DataLoader mixes 70% VQA v2.0 + 30% VQA-E via WeightedRandomSampler.
+                  Flag: --mix_vqa --mix_vqa_fraction 0.7
+                  Prevents length bias: pure VQA v2.0 teaches premature <end> (1-3 token answers).
+                  VQA-E oversampled 3× to anchor decoder length distribution toward explanations.
+- [x] Tier D3  — [CORRECTED] SequenceFocalLoss (src/training/losses.py — flag: --focal --focal_gamma)
+                  Replaces static CrossEntropyLoss(weight=...) which destroyed grammar tokens.
+                  p_t = exp(-ce_t) per position; common/easy tokens suppressed naturally.
+- [x] Tier D4  — [CORRECTED] Question-type curriculum (curriculum.py v2 — flag: --curriculum)
+                  Replaces answer-length heuristic with question-type complexity ordering:
+                  Stage 1 (0-25%): Binary (Yes/No)
+                  Stage 2 (25-50%): Color + Count
+                  Stage 3 (50-75%): What + Where
+                  Stage 4 (75-100%): Why + How (full dataset)
+- [x] Tier D5  — Hallucination filter + template synthetic QA
+                  filter_hallucinations.py: NER + length + copy + repetition heuristics (spaCy optional)
+                  generate_synthetic_qa.py: 50K template QA from COCO instances (no LLM needed)
+                  Requires spaCy for NER: pip install spacy && python -m spacy download en_core_web_sm
 
 ---
 

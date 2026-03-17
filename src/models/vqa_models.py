@@ -366,3 +366,76 @@ class VQAModelE(nn.Module):
 
     def cnn_backbone_params(self):
         return self.i_encoder.backbone_params()
+
+
+# ── Model F: BUTD Faster R-CNN features + MHCA + MUTAN + LSTM+Attn ───────────
+
+class VQAModelF(nn.Module):
+    """
+    Model F: Bottom-Up Top-Down (BUTD) features + MHCA + MUTAN + LSTM decoder.
+
+    Identical architecture to VQAModelE but uses BUTDFeatureEncoder instead of
+    ConvNeXtSpatialEncoder as the image encoder.
+
+    The key difference: forward() receives pre-extracted feature tensors
+    (B, k, feat_dim) instead of raw images (B, 3, 224, 224).
+    BUTDFeatureEncoder projects feat_dim → hidden_size with a learned MLP.
+
+    Expected to achieve highest ceiling because Faster R-CNN RoI features are
+    object-centric (semantically coherent regions) whereas CNN grid features are
+    spatially uniform (may include background, partial objects).
+
+    Training requires pre-extracting features with extract_butd_features.py first.
+    --model F uses BUTDDataset + butd_collate_fn in train.py.
+    """
+    def __init__(self, vocab_size, answer_vocab_size,
+                 feat_dim=1029, embed_size=512, hidden_size=1024, num_layers=2,
+                 attn_dim=512, dropout=0.5,
+                 use_coverage=False, use_layer_norm=False, use_dropconnect=False,
+                 use_mutan=True, use_pgn=False,
+                 use_q_highway=False, use_char_cnn=False,
+                 pretrained_q_emb=None, pretrained_a_emb=None):
+        super().__init__()
+        self.num_layers = num_layers
+        self.model_type = 'F'
+
+        from models.encoder_cnn import BUTDFeatureEncoder
+        self.i_encoder = BUTDFeatureEncoder(feat_dim=feat_dim, output_size=hidden_size)
+
+        self.q_encoder = QuestionEncoder(
+            vocab_size=vocab_size, embed_size=embed_size,
+            hidden_size=hidden_size, num_layers=num_layers,
+            dropout=dropout, pretrained_embeddings=pretrained_q_emb,
+            use_highway=use_q_highway, use_char_cnn=use_char_cnn)
+
+        self.fusion = MUTANFusion(hidden_size, hidden_size, hidden_size) if use_mutan \
+                      else GatedFusion(hidden_size)
+
+        self.decoder = LSTMDecoderWithAttention(
+            vocab_size=answer_vocab_size, embed_size=embed_size,
+            hidden_size=hidden_size, num_layers=num_layers,
+            attn_dim=attn_dim, dropout=dropout,
+            pretrained_embeddings=pretrained_a_emb,
+            use_coverage=use_coverage,
+            use_layer_norm=use_layer_norm,
+            use_dropconnect=use_dropconnect,
+            use_pgn=use_pgn,
+        )
+
+    def forward(self, img_feats, questions, target_seq):
+        """
+        img_feats : (B, k, feat_dim)  — pre-extracted BUTD features
+        questions : (B, q_len)
+        target_seq: (B, max_len)
+        """
+        img_features        = F.normalize(self.i_encoder(img_feats), p=2, dim=-1)  # (B, k, H)
+        q_feature, q_hidden = self.q_encoder(questions)
+        img_mean            = img_features.mean(dim=1)
+        fused               = self.fusion(q_feature, img_mean)  # MUTAN: q first
+        h_0 = fused.unsqueeze(0).repeat(self.num_layers, 1, 1)
+        c_0 = torch.zeros_like(h_0)
+        logits, cov_loss = self.decoder(
+            (h_0, c_0), img_features, q_hidden, target_seq,
+            q_token_ids=questions,
+        )
+        return logits, cov_loss

@@ -14,13 +14,14 @@ import tqdm
 sys.path.append(os.path.dirname(__file__))
 
 # Import modules
-from dataset import VQAEDataset, vqa_collate_fn
-from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, VQAModelE
+from dataset import VQAEDataset, VQADataset, vqa_collate_fn, build_mixed_sampler
+from models.vqa_models import VQAModelA, VQAModelB, VQAModelC, VQAModelD, VQAModelE, VQAModelF
 from glove_utils import build_glove_matrix
 from vocab import Vocabulary
 from training.css_augment import CSSAugmentor, css_contrastive_loss
 from training.scst import scst_step
 from training.curriculum import CurriculumSampler, compute_complexity_scores
+from training.losses import SequenceFocalLoss
 
 # ── wandb (optional — gracefully disabled if not installed / not requested) ──
 try:
@@ -109,8 +110,16 @@ def get_model(model_type, vocab_q_size, vocab_a_size,
                          use_dropconnect=use_dropconnect,
                          use_dcan=use_dcan,
                          use_mutan=use_mutan, use_pgn=use_pgn, **kw)
+    elif model_type == 'F':
+        return VQAModelF(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+                         use_coverage=use_coverage,
+                         use_layer_norm=use_layer_norm,
+                         use_dropconnect=use_dropconnect,
+                         use_mutan=use_mutan, use_pgn=use_pgn,
+                         use_q_highway=use_q_highway,
+                         use_char_cnn=use_char_cnn, **kw)
     else:
-        raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D, E.")
+        raise ValueError(f"Unknown model type: {model_type}. Choose from A, B, C, D, E, F.")
 
 
 def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
@@ -144,12 +153,12 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
     max_len = decoder_input.size(1)
 
     # ── Encode image + question ──────────────────────────────────────
-    if model_type in ('C', 'D', 'E'):
-        img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B, 49, H)
+    if model_type in ('C', 'D', 'E', 'F'):
+        img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B, 49/k, H)
         q_feat, q_hidden = model.q_encoder(questions)                    # (B, H), (B, qlen, H)
         img_mean = img_features.mean(dim=1)
-        # Model E: MUTAN expects (q, v) order; C/D GatedFusion: (img_mean, q_feat)
-        if model_type == 'E':
+        # Models E/F: MUTAN expects (q, v) order; C/D GatedFusion: (img_mean, q_feat)
+        if model_type in ('E', 'F'):
             fusion = model.fusion(q_feat, img_mean)
         else:
             fusion = model.fusion(img_mean, q_feat)
@@ -162,10 +171,10 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
     c = torch.zeros_like(h)
     hidden = (h, c)
 
-    # Coverage vector for models C/D/E
+    # Coverage vector for models C/D/E/F
     coverage = None
-    if model_type in ('C', 'D', 'E') and model.decoder.use_coverage:
-        coverage = imgs.new_zeros(B, img_features.size(1))  # (B, 49)
+    if model_type in ('C', 'D', 'E', 'F') and model.decoder.use_coverage:
+        coverage = imgs.new_zeros(B, img_features.size(1))  # (B, 49/k)
 
     # ── Step-by-step decoding ────────────────────────────────────────
     current_token = decoder_input[:, 0]   # (B,) — first token is always <start>
@@ -174,7 +183,7 @@ def ss_forward(model, model_type, imgs, questions, decoder_input, epsilon):
     for t in range(max_len):
         tok = current_token.unsqueeze(1)  # (B, 1)
 
-        if model_type in ('C', 'D', 'E'):
+        if model_type in ('C', 'D', 'E', 'F'):
             logit, hidden, _, coverage = model.decoder.decode_step(
                 tok, hidden, img_features, q_hidden, coverage, q_token_ids=questions
             )
@@ -218,21 +227,21 @@ def css_forward(model, model_type, imgs, questions, augmentor):
     img_features_grad = F.normalize(model.i_encoder(imgs), p=2, dim=-1)
     img_mean_grad     = img_features_grad.mean(dim=1)
     q_feature_grad, _ = model.q_encoder(questions)
-    if model_type == 'E':
+    if model_type in ('E', 'F'):
         f_real = model.fusion(q_feature_grad, img_mean_grad)    # MUTAN: q first
     else:
         f_real = model.fusion(img_mean_grad, q_feature_grad)    # GatedFusion: img first
 
     # Visual CF: zeroed image regions + original questions (no gradient through cf_img)
     cf_img_mean = cf_img_feats.mean(dim=1)  # (B, H)  — already detached
-    if model_type == 'E':
+    if model_type in ('E', 'F'):
         f_cf_visual = model.fusion(q_feature_grad, cf_img_mean)
     else:
         f_cf_visual = model.fusion(cf_img_mean, q_feature_grad)
 
     # Linguistic CF: original image + masked questions (re-encode cf_questions)
     cf_q_feat, _ = model.q_encoder(cf_questions)
-    if model_type == 'E':
+    if model_type in ('E', 'F'):
         f_cf_ling = model.fusion(cf_q_feat, img_mean_grad)
     else:
         f_cf_ling = model.fusion(img_mean_grad, cf_q_feat)
@@ -247,6 +256,11 @@ TRAIN_VQA_E_JSON = "data/vqa_e/VQA-E_train_set.json"
 # ── Validation set (val2014) ──────────────────────────────────────
 VAL_IMAGE_DIR  = "data/raw/val2014"
 VAL_VQA_E_JSON = "data/vqa_e/VQA-E_val_set.json"
+
+# ── VQA v2.0 paths (Tier D2 mixed pretraining) ────────────────────
+VQA_V2_TRAIN_Q_JSON   = "data/raw/vqa_data_json/v2_OpenEnded_mscoco_train2014_questions.json"
+VQA_V2_TRAIN_ANN_JSON = "data/raw/vqa_data_json/v2_mscoco_train2014_annotations.json"
+# VQA v2.0 images are the same train2014 directory — no extra download
 
 VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
 VOCAB_A_PATH  = "data/processed/vocab_answers.json"
@@ -274,7 +288,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           use_wandb=False, wandb_project='vqa-e', wandb_run_name=None,
           wandb_tags=None, phase=None,
           use_curriculum=False,
-          use_ans_freq_weight=False):
+          use_focal_loss=False, focal_gamma=2.0,
+          mix_vqa=False, mix_vqa_fraction=0.7,
+          butd_feat_dir=None):
     os.makedirs("checkpoints", exist_ok=True)
 
     vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
@@ -304,7 +320,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
             use_q_highway=use_q_highway, use_char_cnn=use_char_cnn,
             augment=augment,
             use_curriculum=use_curriculum,
-            use_ans_freq_weight=use_ans_freq_weight,
+            use_focal_loss=use_focal_loss, focal_gamma=focal_gamma,
+            mix_vqa=mix_vqa, mix_vqa_fraction=mix_vqa_fraction,
         )
         _wb = _wandb.init(
             project=wandb_project,
@@ -317,7 +334,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     elif use_wandb and not _WANDB_AVAILABLE:
         print("W&B requested but wandb not installed — pip install wandb")
 
-    train_dataset = VQAEDataset(
+    vqae_train_dataset = VQAEDataset(
         image_dir=TRAIN_IMAGE_DIR,
         vqa_e_json_path=TRAIN_VQA_E_JSON,
         vocab_q=vocab_q,
@@ -336,23 +353,91 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         max_samples=max_val_samples or MAX_VAL_SAMPLES
     )
 
-    print(f"Train: {len(train_dataset)} | Val: {len(val_dataset)}")
+    # Tier 3B: Model F uses pre-extracted BUTD features instead of raw images
+    if model_type == 'F':
+        if butd_feat_dir is None:
+            raise ValueError("--model F requires --butd_feat_dir (run extract_butd_features.py first)")
+        from dataset import BUTDDataset, butd_collate_fn
+        vqae_train_dataset = BUTDDataset(
+            feat_dir=butd_feat_dir,
+            vqa_e_json_path=TRAIN_VQA_E_JSON,
+            vocab_q=vocab_q, vocab_a=vocab_a,
+            split='train2014', max_samples=max_train_samples or MAX_TRAIN_SAMPLES,
+        )
+        val_dataset = BUTDDataset(
+            feat_dir=butd_feat_dir,
+            vqa_e_json_path=VAL_VQA_E_JSON,
+            vocab_q=vocab_q, vocab_a=vocab_a,
+            split='val2014', max_samples=max_val_samples or MAX_VAL_SAMPLES,
+        )
+        _collate = butd_collate_fn
+        print(f"BUTD Features    : {butd_feat_dir}")
+    else:
+        _collate = vqa_collate_fn
 
     pin_memory = torch.cuda.is_available()
 
-    # Tier D4: Curriculum sampler — sort easy→hard, advance pacing each epoch
+    # ── Tier D2: Mixed-Ratio Pretraining ────────────────────────────────────
+    # Phase 1 only: mix VQA v2.0 (short answers) with VQA-E (long explanations)
+    # to inject vocabulary breadth without inducing premature <end> length bias.
+    # --mix_vqa is intended for Phase 1 only; later phases use pure VQA-E.
+    mixed_sampler   = None
+    train_dataset   = vqae_train_dataset   # default: pure VQA-E
+
+    if mix_vqa:
+        vqa_v2_files_ok = (os.path.exists(VQA_V2_TRAIN_Q_JSON) and
+                           os.path.exists(VQA_V2_TRAIN_ANN_JSON))
+        if not vqa_v2_files_ok:
+            print(f"[WARN] --mix_vqa requested but VQA v2.0 JSON files not found:")
+            print(f"  {VQA_V2_TRAIN_Q_JSON}")
+            print(f"  {VQA_V2_TRAIN_ANN_JSON}")
+            print("  Falling back to pure VQA-E training.")
+        else:
+            vqa_v2_dataset = VQADataset(
+                image_dir=TRAIN_IMAGE_DIR,
+                question_json_path=VQA_V2_TRAIN_Q_JSON,
+                annotations_json_path=VQA_V2_TRAIN_ANN_JSON,
+                vocab_q=vocab_q,
+                vocab_a=vocab_a,
+                split='train2014',
+                max_samples=max_train_samples or MAX_TRAIN_SAMPLES,
+                augment=augment,
+            )
+            train_dataset, mixed_sampler = build_mixed_sampler(
+                vqa_v2_dataset, vqae_train_dataset,
+                vqa_fraction=mix_vqa_fraction,
+            )
+            print(f"Mixed Pretraining: ON (D2) — "
+                  f"VQA v2.0 {mix_vqa_fraction:.0%} / "
+                  f"VQA-E {1-mix_vqa_fraction:.0%}")
+            print(f"  VQA v2.0: {len(vqa_v2_dataset):,} | "
+                  f"VQA-E: {len(vqae_train_dataset):,} | "
+                  f"ConcatDataset: {len(train_dataset):,}")
+
+    print(f"Train: {len(train_dataset)} | Val: {len(val_dataset)}")
+
+    # ── Tier D4: Curriculum sampler — sort by question-type complexity ───────
+    # Mutually exclusive with mixed_sampler (cannot use two samplers simultaneously).
+    # If both are requested, mixed_sampler takes precedence (Phase 1 is the priority).
     curriculum_sampler = None
-    if use_curriculum:
-        scores = compute_complexity_scores(train_dataset.annotations)
+    if use_curriculum and mixed_sampler is None:
+        # compute_question_type_scores works on the VQA-E annotations
+        scores = compute_complexity_scores(vqae_train_dataset.annotations)
         curriculum_sampler = CurriculumSampler(scores, epoch=0, total_epochs=epochs)
-        print(f"Curriculum       : ON (TPCL — {len(scores)} samples sorted easy→hard)")
+        print(f"Curriculum       : ON (D4 — question-type stages, "
+              f"{len(scores)} samples)")
+    elif use_curriculum and mixed_sampler is not None:
+        print("Curriculum       : SKIPPED (incompatible with --mix_vqa in same phase)")
+
+    # Choose the active sampler (at most one can be active)
+    active_sampler = mixed_sampler or curriculum_sampler
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        shuffle=(curriculum_sampler is None),  # mutually exclusive with sampler
-        sampler=curriculum_sampler,
-        collate_fn=vqa_collate_fn,
+        shuffle=(active_sampler is None),  # mutually exclusive with sampler
+        sampler=active_sampler,
+        collate_fn=_collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=(num_workers > 0),
@@ -363,7 +448,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        collate_fn=vqa_collate_fn,
+        collate_fn=_collate,
         num_workers=num_workers,
         pin_memory=pin_memory,
         persistent_workers=(num_workers > 0),
@@ -399,42 +484,33 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     if getattr(args, 'char_cnn', False) and hasattr(model.q_encoder, 'char_cnn'):
         model.q_encoder.char_cnn.build_char_table(vocab_q)
         print("Char-CNN         : built char table from vocab_questions")
-    # Tier D3: Answer frequency weights — down-weight common answers, up-weight rare ones.
-    # Inverse-frequency weighting: w_i = 1 / sqrt(count_i), normalized so mean weight = 1.
-    ans_freq_weights = None
-    if use_ans_freq_weight and not use_pgn:
-        from collections import Counter
-        all_answers = [ann.get('multiple_choice_answer', '') for ann in train_dataset.annotations]
-        counts = Counter(vocab_a.numericalize(a)[1] for a in all_answers
-                         if a)  # skip empty; [1] = first real token after <start>
-        vocab_size_a = len(vocab_a)
-        weights = torch.ones(vocab_size_a, device=DEVICE)
-        for idx, cnt in counts.items():
-            if 0 < idx < vocab_size_a:
-                weights[idx] = 1.0 / max(cnt, 1) ** 0.5
-        # Normalize so mean weight across vocabulary ≈ 1 (prevents LR shift)
-        weights = weights / weights.mean()
-        ans_freq_weights = weights
-        print(f"Ans Freq Weights : ON (D3 — {len(counts)} unique answers weighted)")
-
-    # PGN outputs log-probabilities (from PointerGeneratorHead.blend) instead of raw logits,
-    # so we must use NLLLoss. NLLLoss does not support label_smoothing natively; we skip it.
-    # Non-PGN models still use CrossEntropyLoss with label_smoothing.
+    # ── Loss function ──────────────────────────────────────────────────────────
+    # PGN outputs log-probabilities via PointerGeneratorHead.blend → NLLLoss.
+    # Non-PGN: SequenceFocalLoss (Tier D3, when --focal) or plain CrossEntropyLoss.
+    #
+    # Why NOT CrossEntropyLoss(weight=class_weights) for autoregressive models:
+    #   Static class weights penalize every occurrence of a token id regardless
+    #   of position.  Weight for "because" (common) would be ~0.1, destroying
+    #   the structural hinge of VQA-E explanations at every decode step.
+    #   SequenceFocalLoss computes per-position p_t = exp(-ce_t) and suppresses
+    #   easy/common tokens naturally — no explicit weight tensor needed.
     if use_pgn:
         criterion = nn.NLLLoss(ignore_index=0)
+        if use_focal_loss:
+            print("Focal Loss       : skipped (incompatible with PGN NLLLoss)")
+    elif use_focal_loss:
+        criterion = SequenceFocalLoss(gamma=focal_gamma, pad_idx=0,
+                                      label_smoothing=label_smoothing)
+        print(f"Loss             : SequenceFocalLoss (Tier D3) γ={focal_gamma}")
     else:
-        criterion = nn.CrossEntropyLoss(
-            ignore_index=0,
-            label_smoothing=label_smoothing,
-            weight=ans_freq_weights,
-        )
+        criterion = nn.CrossEntropyLoss(ignore_index=0, label_smoothing=label_smoothing)
 
     # ── Optimizer — differential LR when fine-tuning the CNN backbone ──────────
     # Models A/C use scratch CNN → finetune_cnn flag has no effect on them.
     # Models B/D use frozen ResNet → finetune_cnn selectively unfreezes
     # layer3 + layer4 with a smaller LR (cnn_lr_factor × base_lr) to avoid
     # catastrophic forgetting of pretrained ImageNet knowledge.
-    if finetune_cnn and model_type in ('B', 'D', 'E'):
+    if finetune_cnn and model_type in ('B', 'D', 'E', 'F'):
         model.i_encoder.unfreeze_top_layers()
         backbone_param_ids = {id(p) for p in model.i_encoder.backbone_params()}
         backbone_params = [p for p in model.parameters()
@@ -546,7 +622,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         print(f"  Resumed at epoch {start_epoch} | best_val_loss: {best_val_loss:.4f}")
 
     print(f"Model: {model_type} | Device: {DEVICE} | Dropout: {dropout}")
-    if use_coverage and model_type in ('C', 'D', 'E'):
+    if use_coverage and model_type in ('C', 'D', 'E', 'F'):
         print(f"Coverage Mechanism: ON | λ = {coverage_lambda}")
 
     if use_scst:
@@ -554,7 +630,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
     # Tier 6: CSS augmentor (only for C/D/E)
     css_augmentor = None
-    if use_css and model_type in ('C', 'D', 'E'):
+    if use_css and model_type in ('C', 'D', 'E', 'F'):
         css_augmentor = CSSAugmentor(
             mask_token_id=3,   # <unk> id in our vocab
             mask_ratio=0.3,
@@ -588,6 +664,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
     for epoch in tqdm.tqdm(range(start_epoch, start_epoch + epochs)):
         # Tier D4: advance curriculum pacing each epoch
+        # (curriculum_sampler is None when mix_vqa is active — they're mutually exclusive)
         if curriculum_sampler is not None:
             curriculum_sampler.set_epoch(epoch)
 
@@ -787,7 +864,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a VQA model.")
-    parser.add_argument('--model',      type=str,   default='A', choices=['A', 'B', 'C', 'D', 'E'],
+    parser.add_argument('--model',      type=str,   default='A', choices=['A', 'B', 'C', 'D', 'E', 'F'],
                         help='Model architecture (default: A)')
     parser.add_argument('--epochs',     type=int,   default=10,
                         help='Number of training epochs (default: 10)')
@@ -879,12 +956,21 @@ if __name__ == "__main__":
                         help='Comma-separated W&B tags, e.g. "modelE,phase1"')
     parser.add_argument('--phase', type=int, default=None,
                         help='Training phase number (1/2/3/4) for logging/naming')
+    # Tier D2: Mixed-ratio pretraining
+    parser.add_argument('--mix_vqa', action='store_true',
+                        help='Tier D2: Mix VQA v2.0 + VQA-E in Phase 1 to prevent length bias')
+    parser.add_argument('--mix_vqa_fraction', type=float, default=0.7,
+                        help='Fraction of each batch from VQA v2.0 when --mix_vqa (default 0.7)')
     # Tier D4: Curriculum Learning
     parser.add_argument('--curriculum', action='store_true',
-                        help='Tier D4: Task-Progressive Curriculum Learning — easy→hard sample ordering')
-    # Tier D3: Answer distribution balancing
-    parser.add_argument('--ans_freq_weight', action='store_true',
-                        help='Tier D3: Inverse-frequency answer weighting in CrossEntropyLoss')
+                        help='Tier D4: Question-type curriculum — binary→color/count→what/where→why/how')
+    # Tier D3: Autoregressive Masked Focal Loss
+    parser.add_argument('--focal', action='store_true',
+                        help='Tier D3: SequenceFocalLoss — dynamic focus on hard tokens (replaces CE)')
+    parser.add_argument('--focal_gamma', type=float, default=2.0,
+                        help='Focal loss gamma (focusing parameter, default 2.0)')
+    parser.add_argument('--butd_feat_dir', type=str, default=None,
+                        help='Tier 3B: directory of pre-extracted BUTD .pt feature files (--model F only)')
     args = parser.parse_args()
     _tags = [t.strip() for t in args.wandb_tags.split(',')] if args.wandb_tags else []
     train(model_type=args.model, epochs=args.epochs, lr=args.lr,
@@ -907,7 +993,9 @@ if __name__ == "__main__":
           wandb_run_name=args.wandb_run_name, wandb_tags=_tags,
           phase=args.phase,
           use_curriculum=args.curriculum,
-          use_ans_freq_weight=args.ans_freq_weight)
+          use_focal_loss=args.focal, focal_gamma=args.focal_gamma,
+          mix_vqa=args.mix_vqa, mix_vqa_fraction=args.mix_vqa_fraction,
+          butd_feat_dir=args.butd_feat_dir)
         
         
         
