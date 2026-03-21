@@ -1,7 +1,11 @@
-data/ 
+./data/ 
 __pycache__/checkpoints/*.pth
 __pycache__/
-checkpoints/
+./checkpoints/
 *.zip
-data/glove/
+./data/glove/
 *.pth 
+*.pt 
+*.png
+*.jpg
+*.json
