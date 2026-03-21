@@ -12,7 +12,7 @@ Output: data/butd_features/{image_id}.pt
 Usage:
   python src/scripts/extract_butd_features.py \\
       --splits train2014 val2014 \\
-      --image_dir data/raw \\
+      --image_dir data/images \\
       --output_dir data/butd_features \\
       --top_k 36 \\
       --batch_size 1
@@ -97,10 +97,12 @@ def extract_one(model, img_tensor, top_k=36):
         y1 = (boxes[:, 1] / iH).unsqueeze(1)
         x2 = (boxes[:, 2] / iW).unsqueeze(1)
         y2 = (boxes[:, 3] / iH).unsqueeze(1)
-        area = ((x2 - x1) * (y2 - y1)).clamp(min=0)
+        w = (x2 - x1).clamp(min=0)
+        h = (y2 - y1).clamp(min=0)
+        area = (w * h).clamp(min=0)
 
-        spatial = torch.cat([x1, y1, x2, y2, area], dim=1)   # (k, 5)
-        feat = torch.cat([box_feats, spatial], dim=1).cpu()   # (k, 1029)
+        spatial = torch.cat([x1, y1, x2, y2, w, h, area], dim=1)   # (k, 7)
+        feat = torch.cat([box_feats, spatial], dim=1).cpu()   # (k, 1031)
 
     return feat
 
@@ -143,7 +145,7 @@ def process_split(model, split, image_dir, output_dir, top_k, max_images):
 def main():
     parser = argparse.ArgumentParser(description="Extract BUTD RoI features from COCO images.")
     parser.add_argument('--splits',     nargs='+', default=['train2014', 'val2014'])
-    parser.add_argument('--image_dir',  type=str,  default='data/raw',
+    parser.add_argument('--image_dir',  type=str,  default='data/images',
                         help='Root dir containing train2014/ and val2014/ subdirs')
     parser.add_argument('--output_dir', type=str,  default='data/butd_features',
                         help='Directory to save .pt feature files')

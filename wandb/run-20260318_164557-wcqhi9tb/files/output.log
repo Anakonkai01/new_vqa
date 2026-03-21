@@ -1,0 +1,75 @@
+W&B run          : https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-e/runs/wcqhi9tb
+Train: 181298 | Val: 88488
+Curriculum       : ON (D4 — question-type stages, 181298 samples)
+Loading GloVe 300d embeddings ...
+  Loaded 400,000 GloVe vectors (300d)
+  GloVe coverage: 13502/13877 = 97.3%
+  Joint Vocab coverage: 97.3%
+Char-CNN         : built char table from vocab
+Loss             : SequenceFocalLoss (Tier D3) γ=2.0
+CNN fine-tuning  : ON | backbone LR = 5.00e-05  other LR = 5.00e-04
+  trainable backbone params : 84,868,096
+Weight decay     : 1.0e-04
+LR Warmup        : DISABLED (resume training)
+LR Schedule      : CosineAnnealing (T_max=20, eta_min=5.0e-06)
+AMP: BFloat16 (Ampere+ detected — no GradScaler needed)
+Resuming from: checkpoints/model_e_resume.pth
+  Optimizer state skipped (param groups 1 → 2) — using fresh optimizer with current LR settings.
+  Resumed at epoch 20 | best_val_loss: 2.9478
+Model: E | Device: cuda | Dropout: 0.3
+Coverage Mechanism: ON | λ = 0.5
+Data augmentation: ON (RandomHorizontalFlip + ColorJitter)
+Early stopping   : patience=5
+torch.compile    : OFF (--no_compile flag)
+  0%|                                                                              | 0/20 [00:09<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 1044, in <module>
+    train(model_type=args.model, epochs=args.epochs, lr=args.lr,
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 729, in train
+    else model(imgs, questions, decoder_input)
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/models/vqa_models.py", line 358, in forward
+    logits, cov_loss = self.decoder(
+                       ^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/models/decoder_attention.py", line 329, in forward
+    img_context, img_alpha = self.img_mhca(
+                             ^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/models/decoder_attention.py", line 146, in forward
+    scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale       # (B, nh, 1, S)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 15.46 GiB of which 28.62 MiB is free. Including non-PyTorch memory, this process has 14.63 GiB memory in use. Of the allocated memory 13.48 GiB is allocated by PyTorch, and 255.34 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Exception ignored in atexit callback: <function _MultiProcessingDataLoaderIter._clean_up_worker at 0x731cce54b2e0>
+Traceback (most recent call last):
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/utils/data/dataloader.py", line 1701, in _clean_up_worker
+    w.join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/multiprocessing/process.py", line 149, in join
+    res = self._popen.wait(timeout)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/multiprocessing/popen_fork.py", line 40, in wait
+    if not wait([self.sentinel], timeout):
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/multiprocessing/connection.py", line 948, in wait
+    ready = selector.select(timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/selectors.py", line 415, in select
+    fd_event_list = self._selector.poll(timeout)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt:

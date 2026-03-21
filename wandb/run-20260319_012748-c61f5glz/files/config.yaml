@@ -1,0 +1,195 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            ts84ek4bgt221xfc6onfjlnjtqpelq01:
+                args:
+                    - --model
+                    - E
+                    - --use_mutan
+                    - --layer_norm
+                    - --dropconnect
+                    - --q_highway
+                    - --char_cnn
+                    - --no_compile
+                    - --glove
+                    - --glove_dim
+                    - "300"
+                    - --coverage
+                    - --coverage_lambda
+                    - "0.5"
+                    - --augment
+                    - --batch_size
+                    - "64"
+                    - --accum_steps
+                    - "4"
+                    - --num_workers
+                    - "16"
+                    - --dropout
+                    - "0.3"
+                    - --weight_decay
+                    - "1e-4"
+                    - --grad_clip
+                    - "2.0"
+                    - --label_smoothing
+                    - "0.1"
+                    - --wandb
+                    - --wandb_project
+                    - vqa-e
+                    - --epochs
+                    - "15"
+                    - --lr
+                    - "2e-4"
+                    - --warmup_epochs
+                    - "0"
+                    - --curriculum
+                    - --focal
+                    - --finetune_cnn
+                    - --cnn_lr_factor
+                    - "0.1"
+                    - --scheduled_sampling
+                    - --ss_k
+                    - "5"
+                    - --early_stopping
+                    - "7"
+                    - --reset_best_val_loss
+                    - --resume
+                    - checkpoints/model_e_epoch45.pth
+                    - --phase
+                    - "3"
+                    - --wandb_run_name
+                    - model_e_phase3_b64
+                    - --wandb_tags
+                    - modelE,phase3,scheduled-sampling,curriculum
+                codePath: src/train.py
+                codePathLocal: src/train.py
+                cpu_count: 20
+                cpu_count_logical: 28
+                cudaVersion: "13.1"
+                disk:
+                    /:
+                        total: "495916032000"
+                        used: "400324968448"
+                email: nguyentranhoangnhan18@gmail.com
+                executable: /home/anakonkai-5070ti/miniconda3/envs/d2l/bin/python
+                git:
+                    commit: 2d5eba09f7130e909c757badb5e3ea8213984cf2
+                    remote: git@github.com:Anakonkai01/new_vqa.git
+                gpu: NVIDIA GeForce RTX 5070 Ti
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 8960
+                      memoryTotal: "17094934528"
+                      name: NVIDIA GeForce RTX 5070 Ti
+                      uuid: GPU-64187d93-f2bb-d43f-6c63-2547df16a9a4
+                host: 5070ti
+                memory:
+                    total: "33392193536"
+                os: Linux-6.17.0-19-generic-x86_64-with-glibc2.39
+                program: /home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py
+                python: CPython 3.11.15
+                root: /home/anakonkai-5070ti/workspace/vqa-final/new_vqa
+                startedAt: "2026-03-18T18:27:48.102840Z"
+                writerId: ts84ek4bgt221xfc6onfjlnjtqpelq01
+        m: []
+        python_version: 3.11.15
+        t:
+            "1":
+                - 1
+                - 41
+                - 105
+            "2":
+                - 1
+                - 41
+                - 105
+            "3":
+                - 2
+                - 13
+                - 15
+                - 16
+                - 61
+            "4": 3.11.15
+            "5": 0.25.1
+            "12": 0.25.1
+            "13": linux-x86_64
+accum_steps:
+    value: 4
+augment:
+    value: true
+batch_size:
+    value: 64
+cnn_lr_factor:
+    value: 0.1
+coverage_lambda:
+    value: 0.5
+css_lambda:
+    value: 0.5
+dcan:
+    value: false
+dropconnect:
+    value: true
+dropout:
+    value: 0.3
+effective_batch:
+    value: 256
+epochs:
+    value: 15
+finetune_cnn:
+    value: true
+focal_gamma:
+    value: 2
+glove_dim:
+    value: 300
+grad_clip:
+    value: 2
+label_smoothing:
+    value: 0.1
+layer_norm:
+    value: true
+lr:
+    value: 0.0002
+mix_vqa:
+    value: false
+mix_vqa_fraction:
+    value: 0.7
+model:
+    value: E
+phase:
+    value: 3
+scheduled_sampling:
+    value: true
+scst_bleu_weight:
+    value: 0.5
+scst_lambda:
+    value: 0.5
+scst_length_bonus:
+    value: 0
+scst_meteor_weight:
+    value: 0.5
+ss_k:
+    value: 5
+use_char_cnn:
+    value: true
+use_coverage:
+    value: true
+use_css:
+    value: false
+use_curriculum:
+    value: true
+use_focal_loss:
+    value: true
+use_glove:
+    value: true
+use_mutan:
+    value: true
+use_pgn:
+    value: false
+use_q_highway:
+    value: true
+use_scst:
+    value: false
+warmup_epochs:
+    value: 0
+weight_decay:
+    value: 0.0001

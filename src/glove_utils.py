@@ -7,7 +7,7 @@ Provides functions to:
 
 Usage:
     from glove_utils import build_glove_matrix
-    matrix = build_glove_matrix(vocab, glove_dim=300, glove_path="data/glove")
+    matrix = build_glove_matrix(vocab, glove_dim=300, glove_path="data/embeddings")
     # matrix: (vocab_size, glove_dim) numpy array, rows aligned with vocab.word2idx
 """
 
@@ -17,7 +17,7 @@ import zipfile
 import numpy as np
 
 GLOVE_URL  = "https://nlp.stanford.edu/data/glove.6B.zip"
-GLOVE_DIR  = "data/glove"
+GLOVE_DIR  = "data/embeddings"
 
 
 def download_glove(glove_dir=GLOVE_DIR, dim=300):
@@ -105,7 +105,7 @@ if __name__ == "__main__":
     from vocab import Vocabulary
 
     vocab = Vocabulary()
-    vocab.load("data/processed/vocab_questions.json")
+    vocab.load("data/processed/vocab_joint.json")
 
     matrix, cov = build_glove_matrix(vocab, glove_dim=300)
     print(f"Matrix shape: {matrix.shape}")   # (4546, 300)

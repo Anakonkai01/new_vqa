@@ -60,6 +60,7 @@ COMMON="
   --dropconnect
   --q_highway
   --char_cnn
+  --no_compile
   --glove --glove_dim 300
   --coverage --coverage_lambda 0.5
   --augment
@@ -94,21 +95,51 @@ fi
 # starts at epoch 4. Early stopping patience=5 will abort if stuck.
 # =============================================================================
 run_phase1() {
+    PHASE1_TOTAL=20
+    PHASE1_RESUME_FLAG=""
+    PHASE1_WARMUP=3
+    PHASE1_EPOCHS=${PHASE1_TOTAL}
+
+    RESUME_P1="checkpoints/model_e_resume.pth"
+    if [ -f "${RESUME_P1}" ]; then
+        DONE=$(python -c "
+import torch, sys
+ckpt = torch.load('${RESUME_P1}', map_location='cpu', weights_only=False)
+done = ckpt.get('epoch', 0)
+remaining = ${PHASE1_TOTAL} - done
+if remaining <= 0:
+    sys.exit(0)
+print(done, remaining)
+" 2>/dev/null) || true
+
+        if [ -z "$DONE" ]; then
+            echo "  Phase 1 already complete (${PHASE1_TOTAL} epochs done). Skipping."
+            return 0
+        fi
+
+        DONE_EP=$(echo "$DONE" | awk '{print $1}')
+        PHASE1_EPOCHS=$(echo "$DONE" | awk '{print $2}')
+        PHASE1_RESUME_FLAG="--resume ${RESUME_P1}"
+        PHASE1_WARMUP=0   # warmup already done; cosine scheduler resumes from saved state
+        echo "  Auto-detected resume: ${DONE_EP} epochs done → ${PHASE1_EPOCHS} remaining"
+    fi
+
     echo ""
     echo "════════════════════════════════════════════════════════════"
-    echo "  PHASE 1 — Baseline (15 ep, lr=1e-3, ConvNeXt frozen)"
+    echo "  PHASE 1 — Baseline (${PHASE1_EPOCHS} ep remaining / ${PHASE1_TOTAL} total)"
     echo "  mix_vqa: ON | curriculum: OFF (blocked) | focal: ON"
     echo "  Batch: ${BATCH_SIZE}×${ACCUM_STEPS} = $((BATCH_SIZE * ACCUM_STEPS)) effective"
     echo "════════════════════════════════════════════════════════════"
     # shellcheck disable=SC2086
     python src/train.py ${COMMON} \
-        --epochs 20 \
+        --epochs ${PHASE1_EPOCHS} \
         --lr 1e-3 \
-        --warmup_epochs 3 \
+        --warmup_epochs ${PHASE1_WARMUP} \
         --mix_vqa --mix_vqa_fraction 0.7 \
         --focal \
         --early_stopping 5 \
         --phase 1 \
+        ${PHASE1_RESUME_FLAG} \
         --wandb_run_name "model_e_phase1_b${BATCH_SIZE}" \
         --wandb_tags "modelE,phase1,frozen-cnn,mix-vqa"
     echo "✓ Phase 1 done → checkpoints/model_e_best.pth"
@@ -131,7 +162,7 @@ run_phase1() {
 run_phase2() {
     echo ""
     echo "════════════════════════════════════════════════════════════"
-    echo "  PHASE 2 — CNN Fine-tune (12 ep, lr=5e-4, ConvNeXt unfrozen)"
+    echo "  PHASE 2 — CNN Fine-tune (max 20 ep / early_stop=5, lr=5e-4, ConvNeXt unfrozen)"
     echo "  mix_vqa: OFF | curriculum: ON | focal: ON"
     echo "════════════════════════════════════════════════════════════"
     RESUME="checkpoints/model_e_resume.pth"
@@ -149,6 +180,7 @@ run_phase2() {
         --finetune_cnn \
         --cnn_lr_factor 0.1 \
         --early_stopping 5 \
+        --reset_best_val_loss \
         --resume "${RESUME}" \
         --phase 2 \
         --wandb_run_name "model_e_phase2_b${BATCH_SIZE}" \
@@ -157,30 +189,45 @@ run_phase2() {
 }
 
 # =============================================================================
-# Phase 3 — Scheduled Sampling (7 epochs, LR=2e-4)
+# Phase 3 — Scheduled Sampling (15 epochs max, LR=2e-4)
 #
 # Flags:
 #   --mix_vqa       OFF → pure VQA-E
 #   --curriculum    ON
 #   --focal         ON
 #
-# 7 epochs (up from 5): LSTM needs time to adjust to its own output distribution.
-# If repetition artifacts are visible in outputs, add more epochs here.
+# 15 epochs, patience=7: SS disrupts training for ~5 epochs as the LSTM
+# adapts from 100% teacher forcing to seeing its own imperfect output.
+# patience=3 is too aggressive — train loss must rise before falling again.
+# ε schedule: 0.833 (ep0) → 0.375 (ep14) over 15 relative epochs.
+#
+# Resume priority: model_e_epoch45.pth (Phase 2 best, val=2.8734) if available,
+# otherwise model_e_resume.pth. This handles the case where Phase 3 was run
+# with patience=3 and resume.pth was overwritten with degraded Phase 3 state.
 # =============================================================================
 run_phase3() {
     echo ""
     echo "════════════════════════════════════════════════════════════"
-    echo "  PHASE 3 — Scheduled Sampling (7 ep, lr=2e-4)"
-    echo "  mix_vqa: OFF | curriculum: ON | focal: ON"
+    echo "  PHASE 3 — Scheduled Sampling (15 ep max, lr=2e-4, ε: 0.833→0.375)"
+    echo "  mix_vqa: OFF | curriculum: ON | focal: ON | patience=7"
     echo "════════════════════════════════════════════════════════════"
-    RESUME="checkpoints/model_e_resume.pth"
+    # Resume priority: epoch51 (P3 best, Phase 5 PGN start) > epoch45 (P2 best) > resume.pth
+    if [ -f "checkpoints/model_e_epoch51.pth" ]; then
+        RESUME="checkpoints/model_e_epoch51.pth"
+        echo "  Using Phase 3 best checkpoint: model_e_epoch51.pth (P3 best — Phase 5 PGN resume)"
+    elif [ -f "checkpoints/model_e_epoch45.pth" ]; then
+        RESUME="checkpoints/model_e_epoch45.pth"
+        echo "  Using Phase 2 best checkpoint: model_e_epoch45.pth (ep36, val=2.8734)"
+    else
+        RESUME="checkpoints/model_e_resume.pth"
+    fi
     if [ ! -f "${RESUME}" ]; then
         echo "ERROR: ${RESUME} not found. Run Phase 2 first."
         exit 1
     fi
     # shellcheck disable=SC2086
     python src/train.py ${COMMON} \
-        --epochs 7 \
+        --epochs 15 \
         --lr 2e-4 \
         --warmup_epochs 0 \
         --curriculum \
@@ -189,11 +236,13 @@ run_phase3() {
         --cnn_lr_factor 0.1 \
         --scheduled_sampling \
         --ss_k 5 \
-        --early_stopping 3 \
+        --pgn \
+        --early_stopping 7 \
+        --reset_best_val_loss \
         --resume "${RESUME}" \
         --phase 3 \
-        --wandb_run_name "model_e_phase3_b${BATCH_SIZE}" \
-        --wandb_tags "modelE,phase3,scheduled-sampling,curriculum"
+        --wandb_run_name "model_e_phase3_pgn_b${BATCH_SIZE}" \
+        --wandb_tags "modelE,phase3,scheduled-sampling,curriculum,pgn"
     echo "✓ Phase 3 done → checkpoints/model_e_best.pth"
 }
 
@@ -216,7 +265,7 @@ run_phase4() {
     echo ""
     echo "════════════════════════════════════════════════════════════"
     echo "  PHASE 4 — SCST RL (3 ep, lr=5e-5, REINFORCE+CE)"
-    echo "  mix_vqa: OFF | curriculum: ON | focal: OFF (plain CE)"
+    echo "  mix_vqa: OFF | curriculum: ON | focal: OFF | length_bonus: 0.03"
     echo "════════════════════════════════════════════════════════════"
     RESUME="checkpoints/model_e_resume.pth"
     if [ ! -f "${RESUME}" ]; then
@@ -225,7 +274,7 @@ run_phase4() {
     fi
     # shellcheck disable=SC2086
     python src/train.py ${COMMON} \
-        --epochs 3 \
+        --epochs 5 \
         --lr 5e-5 \
         --warmup_epochs 0 \
         --curriculum \
@@ -235,11 +284,13 @@ run_phase4() {
         --scst_lambda 0.5 \
         --scst_bleu_weight 0.5 \
         --scst_meteor_weight 0.5 \
-        --scst_length_bonus 0.0 \
+        --scst_length_bonus 0.03 \
+        --pgn \
+        --reset_best_val_loss \
         --resume "${RESUME}" \
         --phase 4 \
-        --wandb_run_name "model_e_phase4_b${BATCH_SIZE}" \
-        --wandb_tags "modelE,phase4,scst-rl,curriculum"
+        --wandb_run_name "model_e_phase4_pgn_b${BATCH_SIZE}" \
+        --wandb_tags "modelE,phase4,scst-rl,curriculum,pgn"
     echo "✓ Phase 4 done → checkpoints/model_e_best.pth"
 }
 
@@ -249,7 +300,7 @@ echo "VQA-E Model E — RTX 5070 Ti (Blackwell, BF16)"
 echo "Batch: ${BATCH_SIZE} | Workers: ${NUM_WORKERS} | Dropout: ${DROPOUT}"
 echo "W&B: ${WANDB:-0}"
 echo ""
-echo "Phase schedule: 15 + 12 + 7 + 3 = 37 total epochs"
+echo "Phase schedule: 20 + 20 + 7 + 3 (max) — early_stopping terminates each phase early"
 
 case "${RUN_PHASE}" in
     1)    run_phase1 ;;

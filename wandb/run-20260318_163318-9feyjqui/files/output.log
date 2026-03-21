@@ -1,0 +1,23 @@
+W&B run          : https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-e/runs/9feyjqui
+Train: 181298 | Val: 88488
+Curriculum       : ON (D4 — question-type stages, 181298 samples)
+Loading GloVe 300d embeddings ...
+Traceback (most recent call last):
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 1044, in <module>
+    train(model_type=args.model, epochs=args.epochs, lr=args.lr,
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          batch_size=args.batch_size, resume=args.resume,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<22 lines>...
+          mix_vqa=args.mix_vqa, mix_vqa_fraction=args.mix_vqa_fraction,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          butd_feat_dir=args.butd_feat_dir)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 482, in train
+    matrix, cov = build_glove_matrix(vocab, glove_dim=glove_dim)
+                  ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/glove_utils.py", line 85, in build_glove_matrix
+    vectors    = load_glove_vectors(glove_path, glove_dim)
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/glove_utils.py", line 60, in load_glove_vectors
+    vec   = np.array(parts[1:], dtype=np.float32)
+KeyboardInterrupt

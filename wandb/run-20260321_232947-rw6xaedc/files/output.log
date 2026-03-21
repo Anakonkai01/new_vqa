@@ -1,0 +1,43 @@
+W&B active: https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-model-h/runs/rw6xaedc
+Loading features from data/vg_features ...
+Loading data from data/processed/merged_train_filtered.json ...
+Dynamically inferred feature shapes: region=1029, grid=256
+Loading FastText...
+[INFO] Loading FastText model from data/embeddings/cc.en.300.bin (this takes ~10 seconds)...
+Warning : `load_model` does not return WordVectorModel or SupervisedModel any more, but a `FastText` object which is very similar.
+[INFO] FastText Built: Covered 9937/9937 words (100% effectively).
+[INFO] Exact FastText Vocab Hits: 9628/9937 (96.89%)
+[INFO] OOV Handled via Sub-word n-grams: 308
+[INFO] Loading FastText model from data/embeddings/cc.en.300.bin (this takes ~10 seconds)...
+Warning : `load_model` does not return WordVectorModel or SupervisedModel any more, but a `FastText` object which is very similar.
+[INFO] FastText Built: Covered 11271/11271 words (100% effectively).
+[INFO] Exact FastText Vocab Hits: 10982/11271 (97.44%)
+[INFO] OOV Handled via Sub-word n-grams: 288
+FastText locked and loaded!
+Model H (MAC) parameters: 51,654,485
+torch.compile: ON
+Loaded weights from Phase 1 to start fresh Phase 2. Metrics & Optimizer reset.
+Epoch 1/50 [Train]: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:56<00:00,  7.76it/s, loss=1.597, acc=63.2%, gnorm=0.54, vram=10.9G]
+Epoch 2/50 [Train]: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:56<00:00,  7.77it/s, loss=1.582, acc=62.7%, gnorm=0.54, vram=11.1G]
+Epoch 1 | Trn_Loss: 1.6349 | Val_Loss: 2.1876 | Trn_Acc: 62.7% | Val_Acc: 55.8% | GNorm: nan | LR: 1.00e-04
+Epoch 3/50 [Train]: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:57<00:00,  7.72it/s, loss=1.635, acc=62.1%, gnorm=0.55, vram=11.1G]
+Epoch 2 | Trn_Loss: 1.5960 | Val_Loss: 2.1912 | Trn_Acc: 63.3% | Val_Acc: 55.7% | GNorm: nan | LR: 9.99e-05
+Epoch 4/50 [Train]: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:58<00:00,  7.70it/s, loss=1.554, acc=64.8%, gnorm=0.57, vram=11.1G]
+Epoch 3 | Trn_Loss: 1.5707 | Val_Loss: 2.1989 | Trn_Acc: 63.7% | Val_Acc: 55.6% | GNorm: 0.47 | LR: 9.96e-05
+Epoch 5/50 [Train]: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:56<00:00,  7.77it/s, loss=1.501, acc=64.9%, gnorm=0.56, vram=11.1G]
+Epoch 4 | Trn_Loss: 1.5495 | Val_Loss: 2.1992 | Trn_Acc: 64.0% | Val_Acc: 55.6% | GNorm: 0.47 | LR: 9.91e-05
+Epoch 6/50 [Train]: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:57<00:00,  7.75it/s, loss=1.644, acc=62.2%, gnorm=0.60, vram=11.1G]
+Epoch 5 | Trn_Loss: 1.5299 | Val_Loss: 2.2032 | Trn_Acc: 64.4% | Val_Acc: 55.6% | GNorm: 0.48 | LR: 9.84e-05
+Epoch 7/50 [Train]: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:57<00:00,  7.76it/s, loss=1.501, acc=65.1%, gnorm=0.58, vram=11.1G]
+Epoch 6 | Trn_Loss: 1.5113 | Val_Loss: 2.2037 | Trn_Acc: 64.6% | Val_Acc: 55.7% | GNorm: nan | LR: 9.76e-05
+Epoch 8/50 [Train]: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:58<00:00,  7.70it/s, loss=1.617, acc=60.7%, gnorm=0.60, vram=11.1G]
+Epoch 7 | Trn_Loss: 1.4927 | Val_Loss: 2.2091 | Trn_Acc: 65.0% | Val_Acc: 55.6% | GNorm: nan | LR: 9.65e-05
+Epoch 9/50 [Train]: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:56<00:00,  7.76it/s, loss=1.486, acc=65.8%, gnorm=0.60, vram=11.1G]
+Epoch 8 | Trn_Loss: 1.4755 | Val_Loss: 2.2117 | Trn_Acc: 65.2% | Val_Acc: 55.6% | GNorm: 0.48 | LR: 9.53e-05
+Epoch 10/50 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:56<00:00,  7.79it/s, loss=1.433, acc=67.2%, gnorm=0.58, vram=11.1G]
+Epoch 9 | Trn_Loss: 1.4589 | Val_Loss: 2.2211 | Trn_Acc: 65.5% | Val_Acc: 55.5% | GNorm: nan | LR: 9.39e-05
+Epoch 11/50 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:56<00:00,  7.76it/s, loss=1.418, acc=65.8%, gnorm=0.55, vram=13.0G]
+Epoch 10 | Trn_Loss: 1.4428 | Val_Loss: 2.2158 | Trn_Acc: 65.8% | Val_Acc: 55.6% | GNorm: 0.49 | LR: 9.23e-05
+                                                                                                                                                                                                                     
+Epoch 11 | Trn_Loss: 1.4274 | Val_Loss: 2.2225 | Trn_Acc: 66.1% | Val_Acc: 55.5% | GNorm: nan | LR: 9.05e-05
+Early stopping triggered after 10 epochs without improvement.

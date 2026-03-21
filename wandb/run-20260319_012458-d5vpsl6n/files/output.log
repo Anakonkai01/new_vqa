@@ -1,0 +1,25 @@
+W&B run          : https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-e/runs/d5vpsl6n
+Train: 181298 | Val: 88488
+Curriculum       : ON (D4 — question-type stages, 181298 samples)
+Loading GloVe 300d embeddings ...
+  Loaded 400,000 GloVe vectors (300d)
+  GloVe coverage: 13502/13877 = 97.3%
+  Joint Vocab coverage: 97.3%
+Traceback (most recent call last):
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 1059, in <module>
+    train(model_type=args.model, epochs=args.epochs, lr=args.lr,
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 499, in train
+    use_char_cnn=getattr(args, 'char_cnn', False)).to(DEVICE)
+                                                   ^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1381, in to
+    return self._apply(convert)
+           ^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 933, in _apply
+    module._apply(fn)
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 964, in _apply
+    param_applied = fn(param)
+                    ^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1367, in convert
+    return t.to(
+           ^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 508.00 MiB. GPU 0 has a total capacity of 15.46 GiB of which 273.75 MiB is free. Process 1894907 has 13.69 GiB memory in use. Including non-PyTorch memory, this process has 686.00 MiB memory in use. Of the allocated memory 403.61 MiB is allocated by PyTorch, and 10.39 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

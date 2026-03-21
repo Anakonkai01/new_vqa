@@ -1,0 +1,50 @@
+W&B run          : https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-e/runs/04q6vy8f
+Train: 181298 | Val: 88488
+Curriculum       : ON (D4 — question-type stages, 181298 samples)
+Loading GloVe 300d embeddings ...
+  Loaded 400,000 GloVe vectors (300d)
+  GloVe coverage: 13502/13877 = 97.3%
+  Joint Vocab coverage: 97.3%
+Char-CNN         : built char table from vocab
+Focal Loss       : skipped (incompatible with PGN NLLLoss)
+CNN fine-tuning  : ON | backbone LR = 2.00e-05  other LR = 2.00e-04
+  trainable backbone params : 84,868,096
+Weight decay     : 1.0e-04
+LR Warmup        : DISABLED (resume training)
+LR Schedule      : CosineAnnealing (T_max=15, eta_min=2.0e-06)
+AMP: BFloat16 (Ampere+ detected — no GradScaler needed)
+Resuming from: checkpoints/model_e_epoch51.pth
+  [INFO] Newly initialized keys (not in checkpoint): ['decoder.pgn.W_x.weight', 'decoder.pgn.W_h.weight', 'decoder.pgn.W_ctx.weight', 'decoder.pgn.W_ctx.bias']
+  Optimizer state skipped (checkpoint has no optimizer_state_dict) — using fresh optimizer with current LR settings.
+  best_val_loss reset to inf (new phase — early stopping starts fresh)
+  Resumed at epoch 42 | best_val_loss: inf
+Model: E | Device: cuda | Dropout: 0.3
+Coverage Mechanism: ON | λ = 0.5
+Gradient Accum   : 2 steps (effective batch = 192)
+Data augmentation: ON (RandomHorizontalFlip + ColorJitter)
+Early stopping   : patience=7
+Scheduled Sampling: ON | k=5.0 (epsilon decays from 0.83 to 0.23 over 15 epochs)
+torch.compile    : OFF (--no_compile flag)
+  0%|          | 0/15 [00:09<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 1146, in <module>
+    train(model_type=args.model, epochs=args.epochs, lr=args.lr,
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 743, in train
+    logits  = ss_forward(model, model_type, imgs, questions,
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 194, in ss_forward
+    logit, hidden, _, coverage = model.decoder.decode_step(
+                                 ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/models/decoder_attention.py", line 390, in decode_step
+    img_context, img_alpha = self.img_mhca(
+                             ^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/models/decoder_attention.py", line 165, in forward
+    context = torch.matmul(alpha, v)                                  # (B, nh, 1, d)
+              ^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 15.44 GiB of which 37.69 MiB is free. Including non-PyTorch memory, this process has 14.38 GiB memory in use. Of the allocated memory 13.29 GiB is allocated by PyTorch, and 193.86 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)

@@ -93,11 +93,10 @@ class VQAEDataset(Dataset):
     Target sequence: "<start> answer because explanation <end>"
     Images: same COCO 2014 images as VQA 2.0 (no new download needed).
     """
-    def __init__(self, image_dir, vqa_e_json_path, vocab_q, vocab_a,
+    def __init__(self, image_dir, vqa_e_json_path, vocab,
                  split='train2014', max_samples=None, augment=False):
         self.image_dir    = image_dir
-        self.vocab_q      = vocab_q
-        self.vocab_a      = vocab_a
+        self.vocab        = vocab
         self.split        = split
         self.augment      = augment
         self.transform    = _build_transforms(augment)
@@ -124,8 +123,8 @@ class VQAEDataset(Dataset):
         explanation = random.choice(valid_exps) if valid_exps else ''
 
         a_text   = f"{answer} because {explanation}" if explanation else answer
-        q_tensor = torch.tensor(self.vocab_q.numericalize(q_text), dtype=torch.long)
-        a_tensor = torch.tensor(self.vocab_a.numericalize(a_text), dtype=torch.long)
+        q_tensor = torch.tensor(self.vocab.numericalize(q_text), dtype=torch.long)
+        a_tensor = torch.tensor(self.vocab.numericalize(a_text), dtype=torch.long)
 
         img_name  = f"COCO_{self.split}_{img_id:012d}.jpg"
         img_path  = os.path.join(self.image_dir, img_name)
@@ -140,7 +139,7 @@ class VQAEDataset(Dataset):
 
 class VQADataset(Dataset):
     def __init__(self, image_dir, question_json_path,
-                 annotations_json_path, vocab_q, vocab_a,
+                 annotations_json_path, vocab,
                  split='train2014', max_samples=None, augment=False):
         """
         split      : 'train2014' or 'val2014'
@@ -148,8 +147,7 @@ class VQADataset(Dataset):
         augment    : if True, apply augmentation (train only — NOT for val/test)
         """
         self.image_dir = image_dir
-        self.vocab_q   = vocab_q
-        self.vocab_a   = vocab_a
+        self.vocab     = vocab
         self.split     = split
         self.augment   = augment
         self.transform = _build_transforms(augment)
@@ -179,12 +177,12 @@ class VQADataset(Dataset):
         q_id   = q_info['question_id']
         img_id = q_info['image_id']
 
-        q_tensor = torch.tensor(self.vocab_q.numericalize(q_text), dtype=torch.long)
+        q_tensor = torch.tensor(self.vocab.numericalize(q_text), dtype=torch.long)
 
         # D1: randomly pick one of the 10 human annotations each epoch
         answers = self.qid2answers.get(q_id, [''])
         a_text  = random.choice(answers) if answers else ''
-        a_tensor = torch.tensor(self.vocab_a.numericalize(a_text), dtype=torch.long)
+        a_tensor = torch.tensor(self.vocab.numericalize(a_text), dtype=torch.long)
 
         img_name   = f"COCO_{self.split}_{img_id:012d}.jpg"
         img_path   = os.path.join(self.image_dir, img_name)
@@ -219,9 +217,14 @@ def build_mixed_sampler(vqa_v2_dataset: Dataset, vqae_dataset: Dataset,
     length distribution toward long-form explanations.
 
     Default: 70% VQA v2.0 / 30% VQA-E.
-    The 70/30 split is empirically grounded: VQA v2.0 has ~660K samples vs. VQA-E's
-    ~210K — without reweighting, VQA v2.0 would dominate (3:1 ratio) and induce
-    length bias; 70/30 gives VQA-E 3× oversampling relative to its natural frequency.
+    VQA v2.0 (~444K) and VQA-E (~181K) have a 2.45:1 natural ratio, so VQA-E would
+    naturally occupy ~29% of a combined dataset anyway. The 70/30 weighted sampler
+    gives VQA-E exactly 30% of each batch — a marginal 1.05× oversample vs. natural
+    frequency. The real benefit is VOCABULARY BREADTH (VQA v2.0 exposes the model
+    to more factual diversity), not oversampling. Length bias from VQA v2.0's 87%
+    single-token answers (59% of each batch) is mitigated by context-conditioning:
+    MHCA reads question tokens at every decode step, so the model learns that
+    "why/how" questions require long explanations.
 
     Args:
         vqa_v2_dataset : VQADataset  (short answers, VQA v2.0)
@@ -269,11 +272,11 @@ class BUTDDataset(VQAEDataset):
       spatial: [x1/W, y1/H, x2/W, y2/H, area/(W*H)]
       k = number of region proposals kept (up to top_k in extraction, default 36)
     """
-    def __init__(self, feat_dir, vqa_e_json_path, vocab_q, vocab_a,
+    def __init__(self, feat_dir, vqa_e_json_path, vocab,
                  split='train2014', max_samples=None):
         # Call parent but skip augment/image loading — we load .pt features instead
         super().__init__(image_dir='', vqa_e_json_path=vqa_e_json_path,
-                         vocab_q=vocab_q, vocab_a=vocab_a, split=split,
+                         vocab=vocab, split=split,
                          max_samples=max_samples, augment=False)
         self.feat_dir = feat_dir
 
@@ -293,8 +296,8 @@ class BUTDDataset(VQAEDataset):
         explanation = random.choice(valid_exps) if valid_exps else ''
         a_text   = f"{answer} because {explanation}" if explanation else answer
 
-        q_tensor = torch.tensor(self.vocab_q.numericalize(q_text), dtype=torch.long)
-        a_tensor = torch.tensor(self.vocab_a.numericalize(a_text), dtype=torch.long)
+        q_tensor = torch.tensor(self.vocab.numericalize(q_text), dtype=torch.long)
+        a_tensor = torch.tensor(self.vocab.numericalize(a_text), dtype=torch.long)
         return feat_tensor, q_tensor, a_tensor
 
 

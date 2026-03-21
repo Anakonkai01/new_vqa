@@ -1,0 +1,58 @@
+W&B run          : https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-e/runs/pmvrw69k
+Mixed Pretraining: ON (D2) — VQA v2.0 70% / VQA-E 30%
+  VQA v2.0: 443,757 | VQA-E: 181,298 | ConcatDataset: 625,055
+Train: 625055 | Val: 88488
+Loading GloVe 300d embeddings ...
+  Loaded 400,000 GloVe vectors (300d)
+  GloVe coverage: 13502/13877 = 97.3%
+  Joint Vocab coverage: 97.3%
+Char-CNN         : built char table from vocab
+Loss             : SequenceFocalLoss (Tier D3) γ=2.0
+Weight decay     : 1.0e-04
+LR Warmup        : 3 epochs (lr/10 → lr)
+LR Schedule      : CosineAnnealing (T_max=17, eta_min=1.0e-05)
+AMP: BFloat16 (Ampere+ detected — no GradScaler needed)
+Model: E | Device: cuda | Dropout: 0.3
+Coverage Mechanism: ON | λ = 0.5
+Data augmentation: ON (RandomHorizontalFlip + ColorJitter)
+Early stopping   : patience=5
+torch.compile    : OFF (--no_compile flag)
+  0%|                                                    | 0/20 [05:53<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 1030, in <module>
+    train(model_type=args.model, epochs=args.epochs, lr=args.lr,
+    ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          batch_size=args.batch_size, resume=args.resume,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<22 lines>...
+          mix_vqa=args.mix_vqa, mix_vqa_fraction=args.mix_vqa_fraction,
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+          butd_feat_dir=args.butd_feat_dir)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 729, in train
+    else model(imgs, questions, decoder_input)
+         ~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/models/vqa_models.py", line 353, in forward
+    q_feature, q_hidden = self.q_encoder(questions)
+                          ~~~~~~~~~~~~~~^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/models/encoder_question.py", line 172, in forward
+    char_feats = self.char_cnn(questions)          # (B, L, 300)
+  File "/home/anakonkai-5070ti/miniconda3/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/lib/python3.13/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/models/encoder_question.py", line 77, in forward
+    char_ids = self.char_table.to(word_ids.device)[word_ids.view(-1)].view(B, S, self.MAX_WORD_LEN)
+               ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

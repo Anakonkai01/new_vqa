@@ -1,0 +1,115 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            pmz4mropi94js682oriucx247xj1wj50:
+                args:
+                    - --phase
+                    - "1"
+                    - --epochs
+                    - "30"
+                    - --patience
+                    - "5"
+                    - --batch_size
+                    - "128"
+                    - --vg_feat_dir
+                    - data/vg_features
+                    - --use_fasttext
+                    - --wandb
+                codePath: src/train_h.py
+                codePathLocal: src/train_h.py
+                cpu_count: 20
+                cpu_count_logical: 28
+                cudaVersion: "13.1"
+                disk:
+                    /:
+                        total: "495916032000"
+                        used: "423585058816"
+                email: nguyentranhoangnhan18@gmail.com
+                executable: /home/anakonkai-5070ti/miniconda3/envs/d2l/bin/python
+                git:
+                    commit: 2d5eba09f7130e909c757badb5e3ea8213984cf2
+                    remote: git@github.com:Anakonkai01/new_vqa.git
+                gpu: NVIDIA GeForce RTX 5070 Ti
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 8960
+                      memoryTotal: "17094934528"
+                      name: NVIDIA GeForce RTX 5070 Ti
+                      uuid: GPU-64187d93-f2bb-d43f-6c63-2547df16a9a4
+                host: 5070ti
+                memory:
+                    total: "33389203456"
+                os: Linux-6.17.0-19-generic-x86_64-with-glibc2.39
+                program: /home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train_h.py
+                python: CPython 3.11.15
+                root: /home/anakonkai-5070ti/workspace/vqa-final/new_vqa
+                startedAt: "2026-03-21T11:30:06.438217Z"
+                writerId: pmz4mropi94js682oriucx247xj1wj50
+        m: []
+        python_version: 3.11.15
+        t:
+            "1":
+                - 1
+                - 41
+                - 105
+            "2":
+                - 1
+                - 41
+                - 105
+            "3":
+                - 13
+                - 16
+            "4": 3.11.15
+            "5": 0.25.1
+            "12": 0.25.1
+            "13": linux-x86_64
+batch_size:
+    value: 128
+dropout:
+    value: 0.5
+dry_run:
+    value: false
+epochs:
+    value: 30
+exact_match_lambda:
+    value: 1
+infonce:
+    value: false
+lr:
+    value: 0.001
+merged_json:
+    value: data/processed/merged_train_filtered.json
+num_workers:
+    value: 8
+ohp_lambda:
+    value: 0
+patience:
+    value: 5
+phase:
+    value: 1
+resume:
+    value: null
+scheduled_sampling:
+    value: false
+scst:
+    value: false
+ss_k:
+    value: 5
+use_fasttext:
+    value: true
+vg_feat_dir:
+    value: data/vg_features
+vocab_a_path:
+    value: data/processed/vocab_answers.json
+vocab_q_path:
+    value: data/processed/vocab_questions.json
+wandb:
+    value: true
+wandb_project:
+    value: vqa-model-h
+wandb_run_name:
+    value: null
+warmup_epochs:
+    value: 2

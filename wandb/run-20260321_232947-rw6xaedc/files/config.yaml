@@ -1,0 +1,125 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            hmhgoamkw7tkrj0r0ynwnbxsohe2bawj:
+                args:
+                    - --phase
+                    - "2"
+                    - --epochs
+                    - "50"
+                    - --patience
+                    - "10"
+                    - --batch_size
+                    - "128"
+                    - --lr
+                    - "1e-4"
+                    - --warmup_epochs
+                    - "0"
+                    - --resume
+                    - checkpoints/h/model_h_phase1_best.pth
+                    - --vg_feat_dir
+                    - data/vg_features
+                    - --use_fasttext
+                    - --save_legacy_alias
+                    - --wandb
+                codePath: src/train_h.py
+                codePathLocal: src/train_h.py
+                cpu_count: 20
+                cpu_count_logical: 28
+                cudaVersion: "13.1"
+                disk:
+                    /:
+                        total: "495916032000"
+                        used: "423234768896"
+                email: nguyentranhoangnhan18@gmail.com
+                executable: /home/anakonkai-5070ti/miniconda3/envs/d2l/bin/python
+                git:
+                    commit: 2d5eba09f7130e909c757badb5e3ea8213984cf2
+                    remote: git@github.com:Anakonkai01/new_vqa.git
+                gpu: NVIDIA GeForce RTX 5070 Ti
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      cudaCores: 8960
+                      memoryTotal: "17094934528"
+                      name: NVIDIA GeForce RTX 5070 Ti
+                      uuid: GPU-64187d93-f2bb-d43f-6c63-2547df16a9a4
+                host: 5070ti
+                memory:
+                    total: "33389203456"
+                os: Linux-6.17.0-19-generic-x86_64-with-glibc2.39
+                program: /home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train_h.py
+                python: CPython 3.11.15
+                root: /home/anakonkai-5070ti/workspace/vqa-final/new_vqa
+                startedAt: "2026-03-21T16:29:47.640416Z"
+                writerId: hmhgoamkw7tkrj0r0ynwnbxsohe2bawj
+        m: []
+        python_version: 3.11.15
+        t:
+            "1":
+                - 1
+                - 41
+                - 105
+            "2":
+                - 1
+                - 41
+                - 105
+            "3":
+                - 2
+                - 13
+                - 16
+            "4": 3.11.15
+            "5": 0.25.1
+            "12": 0.25.1
+            "13": linux-x86_64
+batch_size:
+    value: 128
+dropout:
+    value: 0.5
+dry_run:
+    value: false
+epochs:
+    value: 50
+exact_match_lambda:
+    value: 1
+infonce:
+    value: false
+lr:
+    value: 0.0001
+merged_json:
+    value: data/processed/merged_train_filtered.json
+num_workers:
+    value: 8
+ohp_lambda:
+    value: 0
+patience:
+    value: 10
+phase:
+    value: 2
+resume:
+    value: checkpoints/h/model_h_phase1_best.pth
+save_legacy_alias:
+    value: true
+scheduled_sampling:
+    value: false
+scst:
+    value: false
+ss_k:
+    value: 5
+use_fasttext:
+    value: true
+vg_feat_dir:
+    value: data/vg_features
+vocab_a_path:
+    value: data/processed/vocab_answers.json
+vocab_q_path:
+    value: data/processed/vocab_questions.json
+wandb:
+    value: true
+wandb_project:
+    value: vqa-model-h
+wandb_run_name:
+    value: null
+warmup_epochs:
+    value: 0

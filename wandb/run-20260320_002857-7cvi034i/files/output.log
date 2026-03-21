@@ -1,0 +1,34 @@
+W&B run          : https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-e/runs/7cvi034i
+Train: 181298 | Val: 88488
+Curriculum       : ON (D4 — question-type stages, 181298 samples)
+Loading GloVe 300d embeddings ...
+  Loaded 400,000 GloVe vectors (300d)
+  GloVe coverage: 13502/13877 = 97.3%
+  Joint Vocab coverage: 97.3%
+Char-CNN         : built char table from vocab
+CNN fine-tuning  : ON | backbone LR = 5.00e-06  other LR = 5.00e-05
+  trainable backbone params : 84,868,096
+Weight decay     : 1.0e-04
+LR Warmup        : DISABLED (resume training)
+LR Schedule      : CosineAnnealing (T_max=5, eta_min=5.0e-07)
+AMP: BFloat16 (Ampere+ detected — no GradScaler needed)
+Resuming from: checkpoints/model_e_resume.pth
+  Optimizer & scheduler state restored.
+  best_val_loss reset to inf (new phase — early stopping starts fresh)
+  Resumed at epoch 52 | best_val_loss: inf
+Model: E | Device: cuda | Dropout: 0.3
+Coverage Mechanism: ON | λ = 0.5
+SCST (Tier 8)     : ON | λ_scst=0.5 (mixed CE + REINFORCE)
+  Reward          : 0.50×BLEU-4 + 0.50×METEOR + 0.03×LengthBonus
+Gradient Accum   : 2 steps (effective batch = 128)
+Data augmentation: ON (RandomHorizontalFlip + ColorJitter)
+torch.compile    : OFF (--no_compile flag)
+100%|██████████| 5/5 [1:58:32<00:00, 1422.54s/it]
+Epoch 53/57 | Train: 1.2950 | Val: 2.1697 | LR: 5.15e-05
+  -> New best val loss: 2.1697. Saved best checkpoint.
+Epoch 54/57 | Train: 1.3670 | Val: 2.1634 | LR: 3.48e-05
+  -> New best val loss: 2.1634. Saved best checkpoint.
+Epoch 55/57 | Train: 1.3433 | Val: 2.1636 | LR: 2.09e-05
+Epoch 56/57 | Train: 1.3306 | Val: 2.1599 | LR: 1.06e-05
+  -> New best val loss: 2.1599. Saved best checkpoint.
+Epoch 57/57 | Train: 1.3142 | Val: 2.1599 | LR: 4.16e-06

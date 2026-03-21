@@ -19,8 +19,8 @@ Output: JSON in same format as VQA-E_train_set.json
 
 Usage:
   python src/scripts/generate_synthetic_qa.py \\
-      --instances_json data/raw/vqa_data_json/instances_train2014.json \\
-      --output         data/vqa_e/VQA-E_synthetic.json \\
+      --instances_json data/annotations/vqa_v2/instances_train2014.json \\
+      --output         data/annotations/vqa_e/VQA-E_synthetic.json \\
       --max_per_image  3 \\
       --max_total      50000
 """

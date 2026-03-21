@@ -1,0 +1,27 @@
+W&B run          : https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-e/runs/jiy70xpz
+Mixed Pretraining: ON (D2) — VQA v2.0 70% / VQA-E 30%
+  VQA v2.0: 443,757 | VQA-E: 181,298 | ConcatDataset: 625,055
+Train: 625055 | Val: 88488
+Loading GloVe 300d embeddings ...
+  Loaded 400,000 GloVe vectors (300d)
+  GloVe coverage: 13502/13877 = 97.3%
+  Joint Vocab coverage: 97.3%
+Char-CNN         : built char table from vocab
+Loss             : SequenceFocalLoss (Tier D3) γ=2.0
+Weight decay     : 1.0e-04
+LR Warmup        : 3 epochs (lr/10 → lr)
+LR Schedule      : CosineAnnealing (T_max=17, eta_min=1.0e-05)
+AMP: BFloat16 (Ampere+ detected — no GradScaler needed)
+Model: E | Device: cuda | Dropout: 0.3
+Coverage Mechanism: ON | λ = 0.5
+Data augmentation: ON (RandomHorizontalFlip + ColorJitter)
+Early stopping   : patience=5
+torch.compile    : OFF (--no_compile flag)
+  0%|                                                                                               | 0/20 [02:00<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 1030, in <module>
+    train(model_type=args.model, epochs=args.epochs, lr=args.lr,
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 782, in train
+    total_loss += loss.item() * accum_steps  # undo the /accum_steps for logging
+                  ^^^^^^^^^^^
+KeyboardInterrupt

@@ -1,0 +1,44 @@
+W&B run          : https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-e/runs/c61f5glz
+Train: 181298 | Val: 88488
+Curriculum       : ON (D4 — question-type stages, 181298 samples)
+Loading GloVe 300d embeddings ...
+  Loaded 400,000 GloVe vectors (300d)
+  GloVe coverage: 13502/13877 = 97.3%
+  Joint Vocab coverage: 97.3%
+Char-CNN         : built char table from vocab
+Loss             : SequenceFocalLoss (Tier D3) γ=2.0
+CNN fine-tuning  : ON | backbone LR = 2.00e-05  other LR = 2.00e-04
+  trainable backbone params : 84,868,096
+Weight decay     : 1.0e-04
+LR Warmup        : DISABLED (resume training)
+LR Schedule      : CosineAnnealing (T_max=15, eta_min=2.0e-06)
+AMP: BFloat16 (Ampere+ detected — no GradScaler needed)
+Resuming from: checkpoints/model_e_epoch45.pth
+  Optimizer state skipped (checkpoint has no optimizer_state_dict) — using fresh optimizer with current LR settings.
+  best_val_loss reset to inf (new phase — early stopping starts fresh)
+  Resumed at epoch 36 | best_val_loss: inf
+Model: E | Device: cuda | Dropout: 0.3
+Coverage Mechanism: ON | λ = 0.5
+Gradient Accum   : 4 steps (effective batch = 256)
+Data augmentation: ON (RandomHorizontalFlip + ColorJitter)
+Early stopping   : patience=7
+Scheduled Sampling: ON | k=5.0 (epsilon decays from 0.83 to 0.23 over 15 epochs)
+torch.compile    : OFF (--no_compile flag)
+ 47%|████████████████████████████████████████████████████▋                                                            | 7/15 [1:37:57<1:51:57, 839.64s/it]
+Epoch 37/51 | Train: 2.9861 | Val: 2.8896 | LR: 2.00e-04 | SS ϵ: 0.833
+  -> New best val loss: 2.8896. Saved best checkpoint.
+Epoch 38/51 | Train: 2.9978 | Val: 2.8977 | LR: 1.98e-04 | SS ϵ: 0.804
+  Val loss did not improve (1/7)
+Epoch 39/51 | Train: 3.0421 | Val: 2.8988 | LR: 1.91e-04 | SS ϵ: 0.770
+  Val loss did not improve (2/7)
+Epoch 40/51 | Train: 3.1005 | Val: 2.9079 | LR: 1.81e-04 | SS ϵ: 0.733
+  Val loss did not improve (3/7)
+Epoch 41/51 | Train: 3.1465 | Val: 2.9214 | LR: 1.67e-04 | SS ϵ: 0.692
+  Val loss did not improve (4/7)
+Epoch 42/51 | Train: 3.2150 | Val: 2.9433 | LR: 1.50e-04 | SS ϵ: 0.648
+  Val loss did not improve (5/7)
+Epoch 43/51 | Train: 3.2789 | Val: 2.9413 | LR: 1.32e-04 | SS ϵ: 0.601
+  Val loss did not improve (6/7)
+Epoch 44/51 | Train: 3.3603 | Val: 2.9636 | LR: 1.11e-04 | SS ϵ: 0.552
+  Val loss did not improve (7/7)
+  Early stopping triggered after 44 epochs.

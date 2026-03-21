@@ -1,0 +1,77 @@
+W&B run          : https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-e/runs/eb7aeojh
+Train: 181298 | Val: 88488
+Curriculum       : ON (D4 — question-type stages, 181298 samples)
+Loading GloVe 300d embeddings ...
+  Loaded 400,000 GloVe vectors (300d)
+  GloVe coverage: 13502/13877 = 97.3%
+  Joint Vocab coverage: 97.3%
+Char-CNN         : built char table from vocab
+CNN fine-tuning  : ON | backbone LR = 5.00e-06  other LR = 5.00e-05
+  trainable backbone params : 84,868,096
+Weight decay     : 1.0e-04
+LR Warmup        : DISABLED (resume training)
+LR Schedule      : CosineAnnealing (T_max=3, eta_min=5.0e-07)
+AMP: BFloat16 (Ampere+ detected — no GradScaler needed)
+Resuming from: checkpoints/model_e_resume.pth
+  Optimizer state skipped (checkpoint has no optimizer_state_dict) — using fresh optimizer with current LR settings.
+  best_val_loss reset to inf (new phase — early stopping starts fresh)
+  Resumed at epoch 37 | best_val_loss: inf
+Model: E | Device: cuda | Dropout: 0.3
+Coverage Mechanism: ON | λ = 0.5
+SCST (Tier 8)     : ON | λ_scst=0.5 (mixed CE + REINFORCE)
+  Reward          : 0.50×BLEU-4 + 0.50×METEOR + 0.03×LengthBonus
+Gradient Accum   : 4 steps (effective batch = 256)
+Data augmentation: ON (RandomHorizontalFlip + ColorJitter)
+torch.compile    : OFF (--no_compile flag)
+  0%|                                                                                                                                                                                                                               | 0/3 [00:29<?, ?it/s]
+Traceback (most recent call last):
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 1060, in <module>
+    train(model_type=args.model, epochs=args.epochs, lr=args.lr,
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train.py", line 775, in train
+    rl_loss = scst_step(model, model_type, imgs, questions,
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/training/scst.py", line 366, in scst_step
+    sample_texts, log_prob_sums = _sampling_decode(
+                                  ^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/training/scst.py", line 286, in _sampling_decode
+    logit, hidden, _, _ = model.decoder.decode_step(
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/models/decoder_attention.py", line 390, in decode_step
+    img_context, img_alpha = self.img_mhca(
+                             ^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/models/decoder_attention.py", line 138, in forward
+    v = self.V_proj(memory)                          # (B, S, H)
+        ^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/linear.py", line 134, in forward
+    return F.linear(input, self.weight, self.bias)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 MiB. GPU 0 has a total capacity of 15.44 GiB of which 12.62 MiB is free. Including non-PyTorch memory, this process has 14.36 GiB memory in use. Of the allocated memory 13.32 GiB is allocated by PyTorch, and 142.16 MiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (https://pytorch.org/docs/stable/notes/cuda.html#environment-variables)
+Exception ignored in atexit callback: <function _MultiProcessingDataLoaderIter._clean_up_worker at 0x726d3653f4c0>
+Traceback (most recent call last):
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/utils/data/dataloader.py", line 1701, in _clean_up_worker
+    w.join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/multiprocessing/process.py", line 149, in join
+    res = self._popen.wait(timeout)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/multiprocessing/popen_fork.py", line 40, in wait
+    if not wait([self.sentinel], timeout):
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/multiprocessing/connection.py", line 948, in wait
+    ready = selector.select(timeout)
+            ^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/selectors.py", line 415, in select
+    fd_event_list = self._selector.poll(timeout)
+                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt:

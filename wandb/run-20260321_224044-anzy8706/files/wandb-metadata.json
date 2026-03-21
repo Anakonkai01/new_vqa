@@ -1,0 +1,61 @@
+{
+  "os": "Linux-6.17.0-19-generic-x86_64-with-glibc2.39",
+  "python": "CPython 3.11.15",
+  "startedAt": "2026-03-21T15:40:44.745880Z",
+  "args": [
+    "--phase",
+    "2",
+    "--epochs",
+    "50",
+    "--patience",
+    "10",
+    "--batch_size",
+    "128",
+    "--lr",
+    "1e-4",
+    "--warmup_epochs",
+    "0",
+    "--resume",
+    "checkpoints/h/model_h_phase1_best.pth",
+    "--vg_feat_dir",
+    "data/vg_features",
+    "--use_fasttext",
+    "--save_legacy_alias",
+    "--wandb"
+  ],
+  "program": "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train_h.py",
+  "codePath": "src/train_h.py",
+  "codePathLocal": "src/train_h.py",
+  "git": {
+    "remote": "git@github.com:Anakonkai01/new_vqa.git",
+    "commit": "2d5eba09f7130e909c757badb5e3ea8213984cf2"
+  },
+  "email": "nguyentranhoangnhan18@gmail.com",
+  "root": "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa",
+  "host": "5070ti",
+  "executable": "/home/anakonkai-5070ti/miniconda3/envs/d2l/bin/python",
+  "cpu_count": 20,
+  "cpu_count_logical": 28,
+  "gpu": "NVIDIA GeForce RTX 5070 Ti",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "495916032000",
+      "used": "421976178688"
+    }
+  },
+  "memory": {
+    "total": "33389203456"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 5070 Ti",
+      "memoryTotal": "17094934528",
+      "cudaCores": 8960,
+      "architecture": "Blackwell",
+      "uuid": "GPU-64187d93-f2bb-d43f-6c63-2547df16a9a4"
+    }
+  ],
+  "cudaVersion": "13.1",
+  "writerId": "nozouycjzmrofbp7az7hwrjko53sct8m"
+}

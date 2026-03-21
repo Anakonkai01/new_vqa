@@ -1,0 +1,72 @@
+W&B active: https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-model-h/runs/anzy8706
+Loading features from data/vg_features ...
+Loading data from data/processed/merged_train_filtered.json ...
+Dynamically inferred feature shapes: region=1029, grid=256
+Loading FastText...
+[INFO] Loading FastText model from data/embeddings/cc.en.300.bin (this takes ~10 seconds)...
+Warning : `load_model` does not return WordVectorModel or SupervisedModel any more, but a `FastText` object which is very similar.
+[INFO] FastText Built: Covered 9937/9937 words (100% effectively).
+[INFO] Exact FastText Vocab Hits: 9628/9937 (96.89%)
+[INFO] OOV Handled via Sub-word n-grams: 308
+[INFO] Loading FastText model from data/embeddings/cc.en.300.bin (this takes ~10 seconds)...
+Warning : `load_model` does not return WordVectorModel or SupervisedModel any more, but a `FastText` object which is very similar.
+[INFO] FastText Built: Covered 11271/11271 words (100% effectively).
+[INFO] Exact FastText Vocab Hits: 10982/11271 (97.44%)
+[INFO] OOV Handled via Sub-word n-grams: 288
+FastText locked and loaded!
+Model H (MAC) parameters: 51,654,485
+torch.compile: ON
+Loaded weights from Phase 1 to start fresh Phase 2. Metrics & Optimizer reset.
+Epoch 1/50 [Train]: 100%|█| 1373/1373 [02:55<00:00,  7.81it/s, loss=1.669, acc=62.3%, gnorm=0.54, vram=11.
+Epoch 2/50 [Train]: 100%|█| 1373/1373 [02:57<00:00,  7.74it/s, loss=1.519, acc=63.7%, gnorm=0.49, vram=11.
+Epoch 1 | Trn_Loss: 1.6187 | Val_Loss: 2.1916 | Trn_Acc: 63.0% | Val_Acc: 55.7% | GNorm: 0.45 | LR: 1.00e-05
+Epoch 3/50 [Train]: 100%|█| 1373/1373 [02:57<00:00,  7.72it/s, loss=1.521, acc=66.3%, gnorm=0.54, vram=11.
+Epoch 2 | Trn_Loss: 1.5951 | Val_Loss: 2.1876 | Trn_Acc: 63.5% | Val_Acc: 55.8% | GNorm: 0.44 | LR: 9.99e-06
+Epoch 4/50 [Train]: 100%|█| 1373/1373 [02:57<00:00,  7.73it/s, loss=1.577, acc=63.4%, gnorm=0.52, vram=11.
+Epoch 3 | Trn_Loss: 1.5840 | Val_Loss: 2.1850 | Trn_Acc: 63.7% | Val_Acc: 55.8% | GNorm: nan | LR: 9.96e-06
+Epoch 5/50 [Train]: 100%|█| 1373/1373 [02:58<00:00,  7.70it/s, loss=1.456, acc=67.4%, gnorm=0.51, vram=11.
+Epoch 4 | Trn_Loss: 1.5753 | Val_Loss: 2.1824 | Trn_Acc: 63.8% | Val_Acc: 55.9% | GNorm: nan | LR: 9.92e-06
+Epoch 6/50 [Train]: 100%|█| 1373/1373 [02:56<00:00,  7.77it/s, loss=1.451, acc=66.1%, gnorm=0.52, vram=11.
+Epoch 5 | Trn_Loss: 1.5689 | Val_Loss: 2.1832 | Trn_Acc: 64.0% | Val_Acc: 55.9% | GNorm: 0.45 | LR: 9.86e-06
+Epoch 7/50 [Train]: 100%|█| 1373/1373 [02:57<00:00,  7.72it/s, loss=1.640, acc=63.4%, gnorm=0.56, vram=11.
+Epoch 6 | Trn_Loss: 1.5646 | Val_Loss: 2.1874 | Trn_Acc: 64.1% | Val_Acc: 55.9% | GNorm: 0.45 | LR: 9.78e-06
+Epoch 8/50 [Train]: 100%|█| 1373/1373 [02:57<00:00,  7.72it/s, loss=1.603, acc=63.8%, gnorm=0.51, vram=11.
+Epoch 7 | Trn_Loss: 1.5587 | Val_Loss: 2.1838 | Trn_Acc: 64.1% | Val_Acc: 55.9% | GNorm: 0.45 | LR: 9.68e-06
+Epoch 9/50 [Train]: 100%|█| 1373/1373 [02:58<00:00,  7.69it/s, loss=1.526, acc=65.2%, gnorm=0.51, vram=11.
+Epoch 8 | Trn_Loss: 1.5535 | Val_Loss: 2.1828 | Trn_Acc: 64.2% | Val_Acc: 56.0% | GNorm: nan | LR: 9.57e-06
+Epoch 10/50 [Train]: 100%|█| 1373/1373 [02:57<00:00,  7.72it/s, loss=1.517, acc=64.8%, gnorm=0.53, vram=11
+Epoch 9 | Trn_Loss: 1.5493 | Val_Loss: 2.1847 | Trn_Acc: 64.3% | Val_Acc: 55.9% | GNorm: nan | LR: 9.44e-06
+Epoch 11/50 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:56<00:00,  7.76it/s, loss=1.434, acc=65.3%, gnorm=0.49, vram=11.3G]
+Epoch 10 | Trn_Loss: 1.5452 | Val_Loss: 2.1860 | Trn_Acc: 64.4% | Val_Acc: 56.0% | GNorm: 0.45 | LR: 9.30e-06
+Epoch 12/50 [Train]: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:58<00:00,  7.70it/s, loss=1.478, acc=67.2%, gnorm=0.54, vram=11.3G]
+Epoch 11 | Trn_Loss: 1.5417 | Val_Loss: 2.1873 | Trn_Acc: 64.5% | Val_Acc: 56.0% | GNorm: 0.45 | LR: 9.14e-06
+Epoch 13/50 [Train]:   2%|█▉                                                                                                        | 25/1373 [00:03<03:05,  7.26it/s, loss=1.525, acc=63.7%, gnorm=0.44, vram=11.3G]
+Epoch 12 | Trn_Loss: 1.5387 | Val_Loss: 2.1849 | Trn_Acc: 64.5% | Val_Acc: 55.9% | GNorm: 0.45 | LR: 8.97e-06
+Traceback (most recent call last):
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train_h.py", line 423, in <module>
+    train_h(parse_args())
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train_h.py", line 233, in train_h
+    out, cov_loss_scalar = model.forward_with_cov(
+                           ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/models/vqa_model_h.py", line 259, in forward_with_cov
+    logits, cov_loss = self.decoder(
+                       ^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/models/decoders/attention.py", line 207, in forward
+    output, hidden = self.lstm(lstm_input.unsqueeze(1), hidden)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+    return forward_call(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/nn/modules/rnn.py", line 1141, in forward
+    result = _VF.lstm(
+             ^^^^^^^^^
+KeyboardInterrupt

@@ -78,7 +78,7 @@ def _fused_adam_available():
         return False
 
 
-def get_model(model_type, vocab_q_size, vocab_a_size,
+def get_model(model_type, vocab_size,
               pretrained_q_emb=None, pretrained_a_emb=None,
               use_coverage=False, dropout=0.5,
               use_layer_norm=False, use_dropconnect=False,
@@ -88,30 +88,30 @@ def get_model(model_type, vocab_q_size, vocab_a_size,
     kw = dict(pretrained_q_emb=pretrained_q_emb, pretrained_a_emb=pretrained_a_emb,
               dropout=dropout, use_q_highway=use_q_highway, use_char_cnn=use_char_cnn)
     if model_type == 'A':
-        return VQAModelA(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
+        return VQAModelA(vocab_size=vocab_size, answer_vocab_size=vocab_size, **kw)
     elif model_type == 'B':
-        return VQAModelB(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size, **kw)
+        return VQAModelB(vocab_size=vocab_size, answer_vocab_size=vocab_size, **kw)
     elif model_type == 'C':
-        return VQAModelC(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+        return VQAModelC(vocab_size=vocab_size, answer_vocab_size=vocab_size,
                          use_coverage=use_coverage,
                          use_layer_norm=use_layer_norm,
                          use_dropconnect=use_dropconnect,
                          use_dcan=use_dcan, use_pgn=use_pgn, **kw)
     elif model_type == 'D':
-        return VQAModelD(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+        return VQAModelD(vocab_size=vocab_size, answer_vocab_size=vocab_size,
                          use_coverage=use_coverage,
                          use_layer_norm=use_layer_norm,
                          use_dropconnect=use_dropconnect,
                          use_dcan=use_dcan, use_pgn=use_pgn, **kw)
     elif model_type == 'E':
-        return VQAModelE(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+        return VQAModelE(vocab_size=vocab_size, answer_vocab_size=vocab_size,
                          use_coverage=use_coverage,
                          use_layer_norm=use_layer_norm,
                          use_dropconnect=use_dropconnect,
                          use_dcan=use_dcan,
                          use_mutan=use_mutan, use_pgn=use_pgn, **kw)
     elif model_type == 'F':
-        return VQAModelF(vocab_size=vocab_q_size, answer_vocab_size=vocab_a_size,
+        return VQAModelF(vocab_size=vocab_size, answer_vocab_size=vocab_size,
                          use_coverage=use_coverage,
                          use_layer_norm=use_layer_norm,
                          use_dropconnect=use_dropconnect,
@@ -270,20 +270,19 @@ def css_forward(model, model_type, imgs, questions, augmentor, img_mask=None):
 
 
 # ── Training set (train2014) ─────────────────────────────────────
-TRAIN_IMAGE_DIR  = "data/raw/train2014"
-TRAIN_VQA_E_JSON = "data/vqa_e/VQA-E_train_set.json"
+TRAIN_IMAGE_DIR  = "data/images/train2014"
+TRAIN_VQA_E_JSON = "data/annotations/vqa_e/VQA-E_train_set.json"
 
 # ── Validation set (val2014) ──────────────────────────────────────
-VAL_IMAGE_DIR  = "data/raw/val2014"
-VAL_VQA_E_JSON = "data/vqa_e/VQA-E_val_set.json"
+VAL_IMAGE_DIR  = "data/images/val2014"
+VAL_VQA_E_JSON = "data/annotations/vqa_e/VQA-E_val_set.json"
 
 # ── VQA v2.0 paths (Tier D2 mixed pretraining) ────────────────────
-VQA_V2_TRAIN_Q_JSON   = "data/raw/vqa_data_json/v2_OpenEnded_mscoco_train2014_questions.json"
-VQA_V2_TRAIN_ANN_JSON = "data/raw/vqa_data_json/v2_mscoco_train2014_annotations.json"
+VQA_V2_TRAIN_Q_JSON   = "data/annotations/vqa_v2/v2_OpenEnded_mscoco_train2014_questions.json"
+VQA_V2_TRAIN_ANN_JSON = "data/annotations/vqa_v2/v2_mscoco_train2014_annotations.json"
 # VQA v2.0 images are the same train2014 directory — no extra download
 
-VOCAB_Q_PATH  = "data/processed/vocab_questions.json"
-VOCAB_A_PATH  = "data/processed/vocab_answers.json"
+VOCAB_JOINT_PATH  = "data/processed/vocab_joint.json"
 
 # Set to a number (e.g. 10000) to cap samples for quick pipeline tests.
 MAX_TRAIN_SAMPLES = None
@@ -311,11 +310,11 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
           use_curriculum=False,
           use_focal_loss=False, focal_gamma=2.0,
           mix_vqa=False, mix_vqa_fraction=0.7,
+          reset_best_val_loss=False,
           butd_feat_dir=None):
     os.makedirs("checkpoints", exist_ok=True)
 
-    vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
-    vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
+    vocab = Vocabulary(); vocab.load(VOCAB_JOINT_PATH)
 
     # ── Weights & Biases ──────────────────────────────────────────────────
     _wb = None
@@ -360,8 +359,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     vqae_train_dataset = VQAEDataset(
         image_dir=TRAIN_IMAGE_DIR,
         vqa_e_json_path=TRAIN_VQA_E_JSON,
-        vocab_q=vocab_q,
-        vocab_a=vocab_a,
+        vocab=vocab,
         split='train2014',
         max_samples=max_train_samples or MAX_TRAIN_SAMPLES,
         augment=augment
@@ -370,8 +368,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     val_dataset = VQAEDataset(
         image_dir=VAL_IMAGE_DIR,
         vqa_e_json_path=VAL_VQA_E_JSON,
-        vocab_q=vocab_q,
-        vocab_a=vocab_a,
+        vocab=vocab,
         split='val2014',
         max_samples=max_val_samples or MAX_VAL_SAMPLES
     )
@@ -384,13 +381,13 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         vqae_train_dataset = BUTDDataset(
             feat_dir=butd_feat_dir,
             vqa_e_json_path=TRAIN_VQA_E_JSON,
-            vocab_q=vocab_q, vocab_a=vocab_a,
+            vocab=vocab,
             split='train2014', max_samples=max_train_samples or MAX_TRAIN_SAMPLES,
         )
         val_dataset = BUTDDataset(
             feat_dir=butd_feat_dir,
             vqa_e_json_path=VAL_VQA_E_JSON,
-            vocab_q=vocab_q, vocab_a=vocab_a,
+            vocab=vocab,
             split='val2014', max_samples=max_val_samples or MAX_VAL_SAMPLES,
         )
         _collate = butd_collate_fn
@@ -420,8 +417,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                 image_dir=TRAIN_IMAGE_DIR,
                 question_json_path=VQA_V2_TRAIN_Q_JSON,
                 annotations_json_path=VQA_V2_TRAIN_ANN_JSON,
-                vocab_q=vocab_q,
-                vocab_a=vocab_a,
+                vocab=vocab,
                 split='train2014',
                 max_samples=max_train_samples or MAX_TRAIN_SAMPLES,
                 augment=augment,
@@ -484,13 +480,12 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     if use_glove:
         import torch as _t
         print(f"Loading GloVe {glove_dim}d embeddings ...")
-        q_matrix, q_cov = build_glove_matrix(vocab_q, glove_dim=glove_dim)
-        a_matrix, a_cov = build_glove_matrix(vocab_a, glove_dim=glove_dim)
-        pretrained_q_emb = _t.tensor(q_matrix)
-        pretrained_a_emb = _t.tensor(a_matrix)
-        print(f"  Q-vocab coverage: {q_cov:.1%} | A-vocab coverage: {a_cov:.1%}")
+        matrix, cov = build_glove_matrix(vocab, glove_dim=glove_dim)
+        pretrained_q_emb = _t.tensor(matrix)
+        pretrained_a_emb = _t.tensor(matrix)
+        print(f"  Joint Vocab coverage: {cov:.1%}")
 
-    model     = get_model(model_type, len(vocab_q), len(vocab_a),
+    model     = get_model(model_type, len(vocab),
                            pretrained_q_emb=pretrained_q_emb,
                            pretrained_a_emb=pretrained_a_emb,
                            use_coverage=use_coverage,
@@ -505,8 +500,8 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
     # Tier 7C: if char_cnn requested, build char table from vocabulary
     if getattr(args, 'char_cnn', False) and hasattr(model.q_encoder, 'char_cnn'):
-        model.q_encoder.char_cnn.build_char_table(vocab_q)
-        print("Char-CNN         : built char table from vocab_questions")
+        model.q_encoder.char_cnn.build_char_table(vocab)
+        print("Char-CNN         : built char table from vocab")
     # ── Loss function ──────────────────────────────────────────────────────────
     # PGN outputs log-probabilities via PointerGeneratorHead.blend → NLLLoss.
     # Non-PGN: SequenceFocalLoss (Tier D3, when --focal) or plain CrossEntropyLoss.
@@ -616,31 +611,40 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
         # Optimizer/scheduler state can only be restored when the model
         # architecture AND optimizer layout are unchanged.  Skip restore when:
-        #  1. Param group count changed (e.g. frozen → unfreeze adds a group)
-        #  2. Model gained new parameters (e.g. Phase 1→2 adds W_cov for coverage)
-        # In both cases, start with a fresh optimizer + the new LR from CLI args.
-        saved_groups = len(ckpt['optimizer_state_dict']['param_groups'])
-        current_groups = len(optimizer.param_groups)
+        #  1. No optimizer_state_dict in checkpoint (milestone/best checkpoints
+        #     saved without optimizer state to save disk space)
+        #  2. Param group count changed (e.g. frozen → unfreeze adds a group)
+        #  3. Model gained new parameters (e.g. Phase 1→2 adds W_cov for coverage)
+        # In all cases, start with a fresh optimizer + the new LR from CLI args.
         model_changed = bool(incompatible.missing_keys or incompatible.unexpected_keys)
-        if saved_groups == current_groups and not model_changed:
-            optimizer.load_state_dict(ckpt['optimizer_state_dict'])
-            if 'warmup_scheduler_state_dict' in ckpt:
-                warmup_scheduler.load_state_dict(ckpt['warmup_scheduler_state_dict'])
-                if 'cosine_scheduler_state_dict' in ckpt:
-                    cosine_scheduler.load_state_dict(ckpt['cosine_scheduler_state_dict'])
-            scaler.load_state_dict(ckpt['scaler_state_dict'])
-            print("  Optimizer & scheduler state restored.")
+        if 'optimizer_state_dict' not in ckpt:
+            print("  Optimizer state skipped (checkpoint has no optimizer_state_dict) "
+                  "— using fresh optimizer with current LR settings.")
         else:
-            reason = []
-            if saved_groups != current_groups:
-                reason.append(f"param groups {saved_groups} → {current_groups}")
-            if model_changed:
-                reason.append(f"model architecture changed ({len(incompatible.missing_keys)} new keys)")
-            print(f"  Optimizer state skipped ({', '.join(reason)}) "
-                  f"— using fresh optimizer with current LR settings.")
+            saved_groups = len(ckpt['optimizer_state_dict']['param_groups'])
+            current_groups = len(optimizer.param_groups)
+            if saved_groups == current_groups and not model_changed:
+                optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                if 'warmup_scheduler_state_dict' in ckpt:
+                    warmup_scheduler.load_state_dict(ckpt['warmup_scheduler_state_dict'])
+                    if 'cosine_scheduler_state_dict' in ckpt:
+                        cosine_scheduler.load_state_dict(ckpt['cosine_scheduler_state_dict'])
+                scaler.load_state_dict(ckpt['scaler_state_dict'])
+                print("  Optimizer & scheduler state restored.")
+            else:
+                reason = []
+                if saved_groups != current_groups:
+                    reason.append(f"param groups {saved_groups} → {current_groups}")
+                if model_changed:
+                    reason.append(f"model architecture changed ({len(incompatible.missing_keys)} new keys)")
+                print(f"  Optimizer state skipped ({', '.join(reason)}) "
+                      f"— using fresh optimizer with current LR settings.")
 
         start_epoch   = ckpt['epoch']          # last completed epoch
         best_val_loss = ckpt['best_val_loss']
+        if reset_best_val_loss:
+            best_val_loss = float('inf')
+            print("  best_val_loss reset to inf (new phase — early stopping starts fresh)")
         history       = ckpt.get('history', history)
         print(f"  Resumed at epoch {start_epoch} | best_val_loss: {best_val_loss:.4f}")
 
@@ -677,7 +681,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     if scheduled_sampling:
         print(f"Scheduled Sampling: ON | k={ss_k} (epsilon decays from "
               f"{ss_k/(ss_k+math.exp(0/ss_k)):.2f} to "
-              f"{ss_k/(ss_k+math.exp((start_epoch+epochs-1)/ss_k)):.2f} over training)")
+              f"{ss_k/(ss_k+math.exp((epochs-1)/ss_k)):.2f} over {epochs} epochs)")
 
     # ── torch.compile — requires python3.12-dev (for Triton) ──────────
     # NOTE: Models C/D use a step-by-step attention loop with mutable coverage
@@ -692,6 +696,9 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     elif no_compile:
         print("torch.compile    : OFF (--no_compile flag)")
 
+    global_step   = 0    # optimizer-step counter (cumulative across all epochs this phase)
+    _LOG_EVERY_N  = 50   # log step-level W&B metrics every N optimizer steps
+
     for epoch in tqdm.tqdm(range(start_epoch, start_epoch + epochs)):
         # Tier D4: advance curriculum pacing each epoch
         # (curriculum_sampler is None when mix_vqa is active — they're mutually exclusive)
@@ -701,6 +708,11 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         # ── Train ────────────────────────────────────────────────
         model.train()
         total_loss = 0
+        # Per-epoch component accumulators (for W&B epoch-level breakdown)
+        _ep_ce = 0.0; _ep_cov = 0.0; _ep_css = 0.0; _ep_rl = 0.0
+        _ep_grad_norm = 0.0; _ep_opt_steps = 0
+        _ep_scst = {'reward_greedy': 0.0, 'reward_sample': 0.0,
+                    'advantage_mean': 0.0, 'advantage_std': 0.0, 'n': 0}
         optimizer.zero_grad()  # zero once before accumulation loop
 
         for step_idx, batch in enumerate(train_loader):
@@ -723,9 +735,11 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
             with autocast('cuda', enabled=use_amp, dtype=amp_dtype):
                 if scheduled_sampling:
-                    # Inverse-sigmoid epsilon decay: higher k = slower decay
-                    # epoch 0 -> epsilon~1 (mostly GT), last epoch -> epsilon lowers
-                    epsilon = ss_k / (ss_k + math.exp(epoch / ss_k))
+                    # Inverse-sigmoid epsilon decay using RELATIVE epoch (0-indexed within phase).
+                    # Must use (epoch - start_epoch), NOT absolute epoch — otherwise
+                    # epsilon ≈ 0.001 when resuming at epoch 40+ (exp(8+) is huge).
+                    relative_epoch = epoch - start_epoch
+                    epsilon = ss_k / (ss_k + math.exp(relative_epoch / ss_k))
                     logits  = ss_forward(model, model_type, imgs, questions,
                                          decoder_input, epsilon, img_mask=img_mask)
                     coverage_loss = torch.tensor(0.0, device=DEVICE)
@@ -747,12 +761,24 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                 )
                 # Total loss = CE + λ_cov * coverage + λ_css * contrastive + λ_scst * REINFORCE
                 loss = ce_loss + coverage_lambda * coverage_loss
+                css_loss = torch.tensor(0.0, device=DEVICE)
                 if css_augmentor is not None:
                     css_loss = css_forward(model, model_type, imgs, questions,
                                            css_augmentor, img_mask=img_mask)
                     loss = loss + css_lambda * css_loss
 
-            # SCST runs outside AMP context (BLEU computation is not differentiable)
+            # Backward CE+coverage+CSS immediately — frees the ConvNeXt/MUTAN
+            # computation graph before SCST launches its own forward passes.
+            # Without this, peak VRAM = CE graph + SCST sampling graph → OOM.
+            scaler.scale(loss / accum_steps).backward()
+            # Capture component values (after backward, graph freed)
+            _batch_ce  = ce_loss.item()
+            _batch_cov = coverage_loss.item()
+            _batch_css = css_loss.item()
+
+            # SCST runs AFTER CE backward (CE graph is freed → ~40% less peak VRAM)
+            rl_loss = None
+            _scst_stats = None
             if use_scst:
                 # Decode target tokens → text for BLEU reward
                 target_texts = []
@@ -761,31 +787,63 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
                     for tid in row.tolist():
                         if tid == 0 or tid == 2:  # pad or end
                             break
-                        w = vocab_a.idx2word.get(tid, '<unk>') if hasattr(vocab_a, 'idx2word') \
-                            else vocab_a.idx_to_word.get(tid, '<unk>')
+                        w = vocab.idx2word.get(tid, '<unk>') if hasattr(vocab, 'idx2word') \
+                            else vocab.idx_to_word.get(tid, '<unk>')
                         words.append(w)
                     target_texts.append(' '.join(words))
                 with autocast('cuda', enabled=use_amp, dtype=amp_dtype):
-                    rl_loss = scst_step(model, model_type, imgs, questions,
-                                        target_texts, vocab_a, device=DEVICE,
-                                        bleu_weight=scst_bleu_weight,
-                                        meteor_weight=scst_meteor_weight,
-                                        length_bonus_weight=scst_length_bonus)
-                    loss = loss + scst_lambda * rl_loss
-
-            # Scale loss for gradient accumulation
-            loss = loss / accum_steps
-            scaler.scale(loss).backward()
+                    rl_loss, _scst_stats = scst_step(
+                        model, model_type, imgs, questions,
+                        target_texts, vocab, device=DEVICE,
+                        max_len=decoder_input.size(1),
+                        bleu_weight=scst_bleu_weight,
+                        meteor_weight=scst_meteor_weight,
+                        length_bonus_weight=scst_length_bonus,
+                        return_stats=True)
+                scaler.scale(scst_lambda * rl_loss / accum_steps).backward()
 
             # Step optimizer every accum_steps mini-batches (or at the last batch)
             if (step_idx + 1) % accum_steps == 0 or (step_idx + 1) == len(train_loader):
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip)
                 scaler.step(optimizer)
                 scaler.update()
                 optimizer.zero_grad()
+                global_step += 1
+                _ep_grad_norm  += grad_norm.item()
+                _ep_opt_steps  += 1
+                _ep_ce  += _batch_ce;  _ep_cov += _batch_cov;  _ep_css += _batch_css
+                if rl_loss is not None:
+                    _ep_rl += rl_loss.item()
+                    if _scst_stats is not None:
+                        _ep_scst['reward_greedy']   += _scst_stats['scst/reward_greedy']
+                        _ep_scst['reward_sample']   += _scst_stats['scst/reward_sample']
+                        _ep_scst['advantage_mean']  += _scst_stats['scst/advantage_mean']
+                        _ep_scst['advantage_std']   += _scst_stats['scst/advantage_std']
+                        _ep_scst['n'] += 1
 
-            total_loss += loss.item() * accum_steps  # undo the /accum_steps for logging
+                # ── Per-step W&B logging (every _LOG_EVERY_N optimizer steps) ──
+                if _wb is not None and global_step % _LOG_EVERY_N == 0:
+                    _lr_now = optimizer.param_groups[0]['lr']
+                    _step_log = {
+                        'step/ce_loss':       _batch_ce,
+                        'step/coverage_loss': _batch_cov,
+                        'step/css_loss':      _batch_css,
+                        'step/grad_norm':     grad_norm.item(),
+                        'step/lr':            _lr_now,
+                    }
+                    if rl_loss is not None:
+                        _step_log['step/rl_loss'] = rl_loss.item()
+                        if _scst_stats is not None:
+                            _step_log.update({k.replace('scst/', 'step/'): v
+                                              for k, v in _scst_stats.items()})
+                    if finetune_cnn and len(optimizer.param_groups) > 1:
+                        _step_log['step/lr_backbone'] = optimizer.param_groups[1]['lr']
+                    _wb.log(_step_log, step=global_step)
+
+            total_loss += loss.item() * accum_steps   # undo the /accum_steps for logging
+            if rl_loss is not None:
+                total_loss += scst_lambda * rl_loss.item() * accum_steps
 
         avg_train_loss = total_loss / len(train_loader)
 
@@ -826,7 +884,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
         avg_val_loss = val_loss / len(val_loader)
         current_lr   = optimizer.param_groups[0]['lr']
         if scheduled_sampling:
-            eps = ss_k / (ss_k + math.exp(epoch / ss_k))
+            eps = ss_k / (ss_k + math.exp((epoch - start_epoch) / ss_k))
             print(f"Epoch {epoch+1}/{start_epoch + epochs} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | LR: {current_lr:.2e} | SS ϵ: {eps:.3f}")
         else:
             print(f"Epoch {epoch+1}/{start_epoch + epochs} | Train: {avg_train_loss:.4f} | Val: {avg_val_loss:.4f} | LR: {current_lr:.2e}")
@@ -845,15 +903,50 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
         # ── W&B logging ───────────────────────────────────────────
         if _wb is not None:
+            _n = max(_ep_opt_steps, 1)
             log_dict = {
-                'epoch':      epoch + 1,
-                'train/loss': avg_train_loss,
-                'val/loss':   avg_val_loss,
-                'lr':         current_lr,
+                'train/loss':         avg_train_loss,
+                'val/loss':           avg_val_loss,
+                # Per-component epoch averages
+                'train/ce_loss':      _ep_ce  / _n,
+                'train/coverage_loss':_ep_cov / _n,
+                'train/css_loss':     _ep_css / _n,
+                # Gradient stats
+                'train/grad_norm':    _ep_grad_norm / _n,
+                # Learning rates
+                'lr/decoder':         current_lr,
+                # Early stopping state
+                'train/patience':     es_counter,
+                'train/best_val_loss':best_val_loss,
             }
+            # Backbone LR (only when CNN is being fine-tuned)
+            if finetune_cnn and len(optimizer.param_groups) > 1:
+                log_dict['lr/backbone'] = optimizer.param_groups[1]['lr']
+            # Scheduled Sampling epsilon
             if scheduled_sampling:
-                log_dict['train/ss_epsilon'] = ss_k / (ss_k + math.exp(epoch / ss_k))
-            _wb.log(log_dict, step=epoch + 1)
+                log_dict['train/ss_epsilon'] = ss_k / (ss_k + math.exp((epoch - start_epoch) / ss_k))
+            # SCST epoch averages
+            if use_scst and _ep_scst['n'] > 0:
+                _ns = _ep_scst['n']
+                log_dict.update({
+                    'train/rl_loss':          _ep_rl  / _n,
+                    'scst/reward_greedy':     _ep_scst['reward_greedy']  / _ns,
+                    'scst/reward_sample':     _ep_scst['reward_sample']  / _ns,
+                    'scst/advantage_mean':    _ep_scst['advantage_mean'] / _ns,
+                    'scst/advantage_std':     _ep_scst['advantage_std']  / _ns,
+                    'scst/reward_delta':      (_ep_scst['reward_sample'] - _ep_scst['reward_greedy']) / _ns,
+                })
+            # Curriculum stage (1-4: binary → +color/count → +what/where → full)
+            if curriculum_sampler is not None:
+                _prog = curriculum_sampler.epoch / max(getattr(curriculum_sampler, 'total_epochs', epochs) - 1, 1)
+                _stage = 1 if _prog < 0.25 else 2 if _prog < 0.50 else 3 if _prog < 0.75 else 4
+                log_dict['data/curriculum_stage'] = _stage
+            # GPU memory
+            if torch.cuda.is_available():
+                log_dict['gpu/memory_allocated_gb'] = torch.cuda.memory_allocated() / 1e9
+                log_dict['gpu/memory_reserved_gb']  = torch.cuda.memory_reserved()  / 1e9
+            log_dict['epoch'] = epoch + 1   # keep epoch number as a field (not x-axis)
+            _wb.log(log_dict, step=global_step)
 
         # ── Checkpoint saving (storage-efficient) ─────────────────
         # comparison_epochs: epochs where we run compare.py (end of each phase)
@@ -879,14 +972,28 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
         # Save per-epoch checkpoint ONLY at comparison milestones
         if current_epoch in comparison_epochs:
-            torch.save(clean_sd, f"checkpoints/model_{model_type.lower()}_epoch{current_epoch}.pth")
+            milestone_ckpt = {
+                'epoch':            current_epoch,
+                'model_state_dict': clean_sd,
+                'val_loss':         avg_val_loss,
+                'best_val_loss':    best_val_loss,
+                'history':          history,
+            }
+            torch.save(milestone_ckpt, f"checkpoints/model_{model_type.lower()}_epoch{current_epoch}.pth")
             print(f"  Saved milestone checkpoint: epoch {current_epoch}")
 
         # Save best checkpoint separately (overwritten — 1 file per model)
         if avg_val_loss < best_val_loss:
             best_val_loss = avg_val_loss
             es_counter = 0
-            torch.save(clean_sd, f"checkpoints/model_{model_type.lower()}_best.pth")
+            best_ckpt = {
+                'epoch':            current_epoch,
+                'model_state_dict': clean_sd,
+                'val_loss':         avg_val_loss,
+                'best_val_loss':    best_val_loss,
+                'history':          history,
+            }
+            torch.save(best_ckpt, f"checkpoints/model_{model_type.lower()}_best.pth")
             print(f"  -> New best val loss: {best_val_loss:.4f}. Saved best checkpoint.")
         else:
             # BUG FIX: Don't count early stopping during warmup epochs.
@@ -918,7 +1025,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a VQA model.")
-    parser.add_argument('--model',      type=str,   default='A', choices=['A', 'B', 'C', 'D', 'E', 'F'],
+    parser.add_argument('--model',      type=str,   default='A', choices=['A', 'B', 'C', 'D', 'E', 'F', 'G'],
                         help='Model architecture (default: A)')
     parser.add_argument('--epochs',     type=int,   default=10,
                         help='Number of training epochs (default: 10)')
@@ -1021,6 +1128,9 @@ if __name__ == "__main__":
                         help='Tier D2: Mix VQA v2.0 + VQA-E in Phase 1 to prevent length bias')
     parser.add_argument('--mix_vqa_fraction', type=float, default=0.7,
                         help='Fraction of each batch from VQA v2.0 when --mix_vqa (default 0.7)')
+    parser.add_argument('--reset_best_val_loss', action='store_true',
+                        help='Reset best_val_loss to inf on resume — use when starting a new phase '
+                             'so early stopping does not inherit the previous phase threshold')
     # Tier D4: Curriculum Learning
     parser.add_argument('--curriculum', action='store_true',
                         help='Tier D4: Question-type curriculum — binary→color/count→what/where→why/how')
@@ -1031,8 +1141,46 @@ if __name__ == "__main__":
                         help='Focal loss gamma (focusing parameter, default 2.0)')
     parser.add_argument('--butd_feat_dir', type=str, default=None,
                         help='Tier 3B: directory of pre-extracted BUTD .pt feature files (--model F only)')
+    # ── Model G flags (G1–G5) ─────────────────────────────────────────────────
+    parser.add_argument('--geo7', action='store_true',
+                        help='G1: 7-dim spatial geometry in BUTD encoder (adds w/W, h/H to 2048+5→2055)')
+    parser.add_argument('--pgn3', action='store_true',
+                        help='G2: Three-way Pointer-Generator Network (vocab + question copy + visual copy)')
+    parser.add_argument('--infonce', action='store_true',
+                        help='G3: InfoNCE image-text contrastive alignment (training only)')
+    parser.add_argument('--infonce_beta', type=float, default=0.1,
+                        help='G3: Weight for InfoNCE loss term (default: 0.1)')
+    parser.add_argument('--infonce_tau', type=float, default=0.07,
+                        help='G3: InfoNCE temperature tau (default: 0.07)')
+    parser.add_argument('--infonce_z_dim', type=int, default=256,
+                        help='G3: Projection head output dimension (default: 256)')
+    parser.add_argument('--ohp', action='store_true',
+                        help='G4: Object Hallucination Penalty in SCST reward')
+    parser.add_argument('--ohp_weight', type=float, default=0.3,
+                        help='G4: Weight for OHP term in SCST reward (default: 0.3)')
+    parser.add_argument('--ohp_threshold', type=float, default=0.5,
+                        help='G4: GloVe cosine sim threshold for hallucination (default: 0.5)')
+    parser.add_argument('--len_cond', action='store_true',
+                        help='G5: Length conditioning — append length bin embedding to LSTM input')
+    # ── Model G data paths ────────────────────────────────────────────────────
+    parser.add_argument('--merged_json', type=str,
+                        default='data/processed/merged_train_filtered.json',
+                        help='Path to merged dataset JSON (G training, default: data/processed/merged_train_filtered.json)')
+    parser.add_argument('--vocab_q_path', type=str,
+                        default='data/processed/vocab_questions.json',
+                        help='Path to question vocabulary JSON for Model G')
+    parser.add_argument('--vocab_a_path', type=str,
+                        default='data/processed/vocab_answers.json',
+                        help='Path to answer vocabulary JSON for Model G')
     args = parser.parse_args()
     _tags = [t.strip() for t in args.wandb_tags.split(',')] if args.wandb_tags else []
+
+    # ── Model G dispatch ──────────────────────────────────────────────────────
+    if args.model == 'G':
+        from training.train_g import train_model_g
+        train_model_g(args)
+        sys.exit(0)
+
     train(model_type=args.model, epochs=args.epochs, lr=args.lr,
           batch_size=args.batch_size, resume=args.resume,
           scheduled_sampling=args.scheduled_sampling, ss_k=args.ss_k,
@@ -1058,6 +1206,7 @@ if __name__ == "__main__":
           use_curriculum=args.curriculum,
           use_focal_loss=args.focal, focal_gamma=args.focal_gamma,
           mix_vqa=args.mix_vqa, mix_vqa_fraction=args.mix_vqa_fraction,
+          reset_best_val_loss=args.reset_best_val_loss,
           butd_feat_dir=args.butd_feat_dir)
         
         

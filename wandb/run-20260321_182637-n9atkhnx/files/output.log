@@ -1,0 +1,33 @@
+W&B active: https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-model-h/runs/n9atkhnx
+Loading features from data/vg_features ...
+Loading data from data/processed/merged_train_filtered.json ...
+Dynamically inferred feature shapes: region=1029, grid=256
+Loading FastText...
+[INFO] Loading FastText model from data/embeddings/cc.en.300.bin (this takes ~10 seconds)...
+Warning : `load_model` does not return WordVectorModel or SupervisedModel any more, but a `FastText` object which is very similar.
+[INFO] FastText Built: Covered 9937/9937 words (100% effectively).
+[INFO] Exact FastText Vocab Hits: 9628/9937 (96.89%)
+[INFO] OOV Handled via Sub-word n-grams: 308
+[INFO] Loading FastText model from data/embeddings/cc.en.300.bin (this takes ~10 seconds)...
+Warning : `load_model` does not return WordVectorModel or SupervisedModel any more, but a `FastText` object which is very similar.
+[INFO] FastText Built: Covered 11271/11271 words (100% effectively).
+[INFO] Exact FastText Vocab Hits: 10982/11271 (97.44%)
+[INFO] OOV Handled via Sub-word n-grams: 288
+FastText locked and loaded!
+Model H (MAC) parameters: 51,654,485
+torch.compile: ON
+Traceback (most recent call last):
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train_h.py", line 368, in <module>
+    train_h(parse_args())
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train_h.py", line 276, in train_h
+    scaler.step(optimizer)
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/amp/grad_scaler.py", line 463, in step
+    retval = self._maybe_opt_step(optimizer, optimizer_state, *args, **kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/amp/grad_scaler.py", line 356, in _maybe_opt_step
+    if not sum(v.item() for v in optimizer_state["found_inf_per_device"].values()):
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/anakonkai-5070ti/miniconda3/envs/d2l/lib/python3.11/site-packages/torch/amp/grad_scaler.py", line 356, in <genexpr>
+    if not sum(v.item() for v in optimizer_state["found_inf_per_device"].values()):
+               ^^^^^^^^
+KeyboardInterrupt

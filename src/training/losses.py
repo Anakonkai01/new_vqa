@@ -96,3 +96,131 @@ class SequenceFocalLoss(nn.Module):
         mask = (targets != self.pad_idx).float()               # (N,)
 
         return (focal_loss * mask).sum() / mask.sum().clamp(min=1.0)
+
+
+# ---------------------------------------------------------------------------
+# FocalSequenceLoss — per-sample T-normalization (Model G, Eq 43-44)
+# ---------------------------------------------------------------------------
+
+class FocalSequenceLoss(nn.Module):
+    """
+    Per-token normalized Focal loss with label smoothing. (Model G training)
+
+    Key difference from SequenceFocalLoss:
+      - Accepts (B, T, V) directly (no pre-flattening)
+      - Per-SAMPLE T normalization (not global batch normalization):
+            L_sample = sum_t(focal_t) / T_valid
+            L_batch  = mean(L_sample)
+        This ensures a VQA v2.0 sample (T=3) and a VQA-E sample (T=25)
+        contribute equal gradient magnitude.
+      - Auto-detects log-probs input (from ThreeWayPGNHead.blend_3way)
+
+    Args:
+        gamma          : Focal exponent (default 2.0 per spec)
+        label_smoothing: eps (default 0.1 per spec)
+        ignore_index   : Pad token (default 0 = <pad>)
+    """
+
+    def __init__(
+        self,
+        gamma: float = 2.0,
+        label_smoothing: float = 0.1,
+        ignore_index: int = 0,
+    ):
+        super().__init__()
+        self.gamma           = gamma
+        self.label_smoothing = label_smoothing
+        self.ignore_index    = ignore_index
+
+    def forward(
+        self,
+        logits: torch.Tensor,
+        targets: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Args:
+            logits  : (B, T, V) — raw logits OR log-probs (auto-detected)
+            targets : (B, T) — token indices; ignore_index = pad
+
+        Returns:
+            scalar loss
+        """
+        B, T, V = logits.shape
+
+        # Auto-detect: log-probs have max ≤ 0
+        if logits.max().item() <= 0.01:
+            log_p = logits
+        else:
+            log_p = F.log_softmax(logits, dim=-1)   # (B, T, V)
+
+        # Gather log p_t for ground-truth token
+        tgt_clamp = targets.clamp(min=0)   # (B, T)
+        log_p_t   = log_p.gather(2, tgt_clamp.unsqueeze(2)).squeeze(2)  # (B, T)
+        p_t       = log_p_t.exp()                                        # (B, T)
+
+        # Label smoothing: smoothed loss = -(1-eps)*log_p_t - (eps/V)*sum_w log_p_w
+        if self.label_smoothing > 0.0:
+            smooth_loss = -(
+                (1.0 - self.label_smoothing) * log_p_t
+                + (self.label_smoothing / V) * log_p.sum(dim=-1)
+            )   # (B, T)
+            p_t_focal = (
+                (1.0 - self.label_smoothing) * p_t
+                + self.label_smoothing / V
+            ).detach()
+        else:
+            smooth_loss = -log_p_t                 # (B, T)
+            p_t_focal   = p_t.detach()
+
+        # Focal weight
+        focal_weight = (1.0 - p_t_focal) ** self.gamma   # (B, T)
+        token_loss   = focal_weight * smooth_loss         # (B, T)
+
+        # Padding mask
+        mask  = (targets != self.ignore_index).float()    # (B, T)
+        token_loss = token_loss * mask
+
+        # Per-sample T normalization → batch mean
+        counts      = mask.sum(dim=1).clamp(min=1.0)     # (B,)
+        sample_loss = token_loss.sum(dim=1) / counts     # (B,)
+        return sample_loss.mean()
+
+
+def build_criterion(
+    gamma: float = 2.0,
+    label_smoothing: float = 0.1,
+    use_focal: bool = True,
+    ignore_index: int = 0,
+) -> nn.Module:
+    """
+    Factory for Model G sequence loss criterion.
+
+    Phase 1-3: use_focal=True  (FocalSequenceLoss, gamma=2.0, eps=0.1)
+    Phase 4:   use_focal=False (plain NLL with label smoothing, per spec)
+
+    Returns callable (B,T,V), (B,T) → scalar.
+    """
+    if use_focal:
+        return FocalSequenceLoss(
+            gamma=gamma,
+            label_smoothing=label_smoothing,
+            ignore_index=ignore_index,
+        )
+    # Phase 4: plain CE with label smoothing
+    # nn.CrossEntropyLoss expects (B,V,T) target convention — wrap in adapter
+    return _PlainCEWrapper(label_smoothing=label_smoothing, ignore_index=ignore_index)
+
+
+class _PlainCEWrapper(nn.Module):
+    """Adapter: accept (B,T,V),(B,T) → (B,V,T) for nn.CrossEntropyLoss."""
+
+    def __init__(self, label_smoothing: float = 0.0, ignore_index: int = 0):
+        super().__init__()
+        self.ce = nn.CrossEntropyLoss(
+            label_smoothing=label_smoothing,
+            ignore_index=ignore_index,
+        )
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        # logits: (B,T,V) → permute to (B,V,T) for CrossEntropyLoss
+        return self.ce(logits.permute(0, 2, 1), targets)

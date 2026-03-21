@@ -1,0 +1,28 @@
+W&B active: https://wandb.ai/nguyentranhoangnhan18-ton-duc-thang-university/vqa-model-h/runs/j6bnort2
+Loading features from data/vg_features ...
+Loading data from data/processed/merged_train_filtered.json ...
+Dynamically inferred feature shapes: region=1029, grid=256
+Loading FastText...
+[INFO] Loading FastText model from data/embeddings/cc.en.300.bin (this takes ~10 seconds)...
+Warning : `load_model` does not return WordVectorModel or SupervisedModel any more, but a `FastText` object which is very similar.
+[INFO] FastText Built: Covered 9937/9937 words (100% effectively).
+[INFO] Exact FastText Vocab Hits: 9628/9937 (96.89%)
+[INFO] OOV Handled via Sub-word n-grams: 308
+[INFO] Loading FastText model from data/embeddings/cc.en.300.bin (this takes ~10 seconds)...
+Warning : `load_model` does not return WordVectorModel or SupervisedModel any more, but a `FastText` object which is very similar.
+[INFO] FastText Built: Covered 11271/11271 words (100% effectively).
+[INFO] Exact FastText Vocab Hits: 10982/11271 (97.44%)
+[INFO] OOV Handled via Sub-word n-grams: 288
+FastText locked and loaded!
+Model H (MAC) parameters: 51,654,485
+torch.compile: ON
+Loaded weights from Phase 1 to start fresh Phase 2. Metrics & Optimizer reset.
+Epoch 1/50 [Train]: 100%|█████████████████████████████████████████████████████████████████████████████████████████████████████████| 1373/1373 [02:57<00:00,  7.75it/s, loss=1.596, acc=62.3%, gnorm=0.56, vram=10.7G]
+Traceback (most recent call last):                                                                                                                                                                                   
+Epoch 1 | Trn_Loss: 1.6353 | Val_Loss: 2.1880 | Trn_Acc: 62.7% | Val_Acc: 55.7% | GNorm: 0.46 | LR: 1.00e-04
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train_h.py", line 428, in <module>
+    train_h(parse_args())
+  File "/home/anakonkai-5070ti/workspace/vqa-final/new_vqa/src/train_h.py", line 400, in train_h
+    'warmup_sched_state_dict': warmup_sched.state_dict(),
+                               ^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'state_dict'

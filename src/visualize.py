@@ -31,10 +31,10 @@ from inference import get_model, load_model_from_checkpoint, greedy_decode, stri
 
 # ── Config ───────────────────────────────────────────────────────
 DEVICE          = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-IMAGE_DIR       = "data/raw/images/train2014"
-VQA_E_JSON      = "data/raw/vqa_e_json/VQA-E_train_set.json"
-VOCAB_Q_PATH    = "data/processed/vocab_questions.json"
-VOCAB_A_PATH    = "data/processed/vocab_answers.json"
+IMAGE_DIR       = "data/images/train2014"
+VQA_E_JSON      = "data/annotations/vqa_e/VQA-E_train_set.json"
+VOCAB_JOINT_PATH    = "data/processed/vocabuestions.json"
+VOCAB_A_PATH    = "data/processed/vocabnswers.json"
 
 
 def get_transform():
@@ -54,7 +54,7 @@ def denormalize(tensor):
 
 
 def decode_with_attention_steps(model, image_tensor, question_tensor,
-                                vocab_a, max_len=20, device='cpu'):
+                                vocab, max_len=20, device='cpu'):
     """
     Run greedy decode step by step, collecting alpha (attention weights) at each step.
     Returns:
@@ -76,8 +76,8 @@ def decode_with_attention_steps(model, image_tensor, question_tensor,
         c_0 = torch.zeros_like(h_0)
         hidden = (h_0, c_0)
 
-        start_idx = vocab_a.word2idx['<start>']
-        end_idx   = vocab_a.word2idx['<end>']
+        start_idx = vocab.word2idx['<start>']
+        end_idx   = vocab.word2idx['<end>']
         token     = torch.tensor([[start_idx]], dtype=torch.long).to(device)
 
         tokens = []
@@ -91,7 +91,7 @@ def decode_with_attention_steps(model, image_tensor, question_tensor,
             if pred == end_idx:
                 break
 
-            word = vocab_a.idx2word.get(pred, '<unk>')
+            word = vocab.idx2word.get(pred, '<unk>')
             tokens.append(word)
             alphas.append(alpha.squeeze(0).cpu().numpy())   # (49,)
             token = torch.tensor([[pred]], dtype=torch.long).to(device)
@@ -100,12 +100,12 @@ def decode_with_attention_steps(model, image_tensor, question_tensor,
 
 
 def visualize_attention(model, image_tensor, original_image, question_text,
-                        question_tensor, vocab_a, output_path, device='cpu'):
+                        question_tensor, vocab, output_path, device='cpu'):
     """
     Draw the original image + per-token attention heatmaps.
     """
     tokens, alphas = decode_with_attention_steps(
-        model, image_tensor, question_tensor, vocab_a, device=device
+        model, image_tensor, question_tensor, vocab, device=device
     )
 
     # fallback: if model has no attention (A/B), skip visualization
@@ -149,7 +149,7 @@ def visualize_attention(model, image_tensor, original_image, question_text,
 
 
 # ── wrapper to pass question_tensor into decode_with_attention_steps ─────────
-def _decode_wrapper(model, image_tensor, question_tensor, vocab_a, device='cpu'):
+def _decode_wrapper(model, image_tensor, question_tensor, vocab, device='cpu'):
     """Wrapper matching the signature expected by visualize_attention."""
     with torch.no_grad():
         img      = image_tensor.unsqueeze(0).to(device)
@@ -166,8 +166,8 @@ def _decode_wrapper(model, image_tensor, question_tensor, vocab_a, device='cpu')
         c_0 = torch.zeros_like(h_0)
         hidden = (h_0, c_0)
 
-        start_idx = vocab_a.word2idx['<start>']
-        end_idx   = vocab_a.word2idx['<end>']
+        start_idx = vocab.word2idx['<start>']
+        end_idx   = vocab.word2idx['<end>']
         token     = torch.tensor([[start_idx]], dtype=torch.long).to(device)
 
         tokens = []
@@ -179,7 +179,7 @@ def _decode_wrapper(model, image_tensor, question_tensor, vocab_a, device='cpu')
             pred = logit.argmax(dim=-1).item()
             if pred == end_idx:
                 break
-            word = vocab_a.idx2word.get(pred, '<unk>')
+            word = vocab.idx2word.get(pred, '<unk>')
             tokens.append(word)
             alphas.append(alpha.squeeze(0).cpu().numpy())
             token = torch.tensor([[pred]], dtype=torch.long).to(device)
@@ -208,13 +208,13 @@ if __name__ == "__main__":
         sys.exit(1)
 
     # load vocab
-    vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
-    vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
+    vocab = Vocabulary(); vocab.load(VOCAB_JOINT_PATH)
+    vocab = Vocabulary(); vocab.load(VOCAB_A_PATH)
 
     # load model
     from inference import load_model_from_checkpoint
     model = load_model_from_checkpoint(
-        args.model_type, checkpoint, len(vocab_q), len(vocab_a), device=DEVICE
+        args.model_type, checkpoint, len(vocab), device=DEVICE
     )
 
     # load sample (VQA-E format: list of dicts with 'question', 'img_id', etc.)
@@ -229,9 +229,9 @@ if __name__ == "__main__":
     transform     = get_transform()
     original_img  = Image.open(img_path).convert("RGB")
     img_tensor    = transform(original_img)
-    q_tensor      = torch.tensor(vocab_q.numericalize(q_text), dtype=torch.long)
+    q_tensor      = torch.tensor(vocab.numericalize(q_text), dtype=torch.long)
 
-    tokens, alphas = _decode_wrapper(model, img_tensor, q_tensor, vocab_a, device=DEVICE)
+    tokens, alphas = _decode_wrapper(model, img_tensor, q_tensor, vocab, device=DEVICE)
 
     if not alphas:
         print("No tokens were decoded.")

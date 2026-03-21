@@ -90,7 +90,7 @@ class PointerGeneratorHead(nn.Module):
         p_copy = vocab_logits.new_zeros(B, vocab_size)  # (B, V)
         # Clamp to valid range just in case
         ids = q_token_ids.clamp(0, vocab_size - 1)      # (B, q_len)
-        p_copy.scatter_add_(1, ids, q_alpha)             # (B, V)
+        p_copy.scatter_add_(1, ids, q_alpha.to(p_copy.dtype))  # (B, V) — cast for AMP dtype safety
 
         # Blend: p_gen * P_vocab + (1 - p_gen) * P_copy
         p_gen_2d = p_gen.unsqueeze(1)                    # (B, 1)
@@ -99,6 +99,112 @@ class PointerGeneratorHead(nn.Module):
         # Clamp to avoid log(0) — tiny epsilon for numerical stability
         final = final.clamp(min=1e-10)
         return torch.log(final)  # (B, V) — log-probabilities
+
+
+# ---------------------------------------------------------------------------
+# ThreeWayPGNHead — G2: copy from vocab + question + visual object labels
+# ---------------------------------------------------------------------------
+
+class ThreeWayPGNHead(nn.Module):
+    """
+    Three-way Pointer-Generator head (G2).
+
+    Blends three token sources at each decode step:
+      Source 1 — Vocabulary: P_vocab from decoder FC output
+      Source 2 — Question copy: scatter q_alpha onto question token positions
+      Source 3 — Visual label copy: scatter img_alpha / |tokens| onto label token positions
+
+    Blending weights (Eq 32):
+      [p_g, p_cQ, p_cV] = Softmax(W_ptr [c_img; h_t; x_t])
+      W_ptr ∈ R^{3 × input_dim}   input_dim = c_img(H) + h_t(H) + x_t(E+2H+len)
+
+    Final distribution (Eq 33):
+      P(w) = p_g * P_vocab(w) + p_cQ * P_copy_Q(w) + p_cV * P_copy_V(w)
+
+    Args:
+        input_dim : c_img_dim + hidden_dim + lstm_input_dim
+                    Default: 1024 + 1024 + 2624 = 4672 (Model G full config)
+    """
+
+    def __init__(self, input_dim: int = 4672):
+        super().__init__()
+        self.W_ptr = nn.Linear(input_dim, 3)
+
+    def forward(self, c_img: torch.Tensor,
+                h_t: torch.Tensor,
+                x_t: torch.Tensor):
+        """
+        c_img : (B, H)    — image attention context
+        h_t   : (B, H)    — LSTM top-layer hidden state
+        x_t   : (B, E+2H+len) — full LSTM input (embed + img_ctx + q_ctx + len_emb)
+
+        Returns p_g, p_cQ, p_cV each (B,) — three Softmax weights.
+        """
+        pgn_input = torch.cat([c_img, h_t, x_t], dim=-1)   # (B, input_dim)
+        weights = F.softmax(self.W_ptr(pgn_input), dim=-1)  # (B, 3)
+        return weights[:, 0], weights[:, 1], weights[:, 2]
+
+    @staticmethod
+    def blend_3way(
+        p_g: torch.Tensor,
+        p_cQ: torch.Tensor,
+        p_cV: torch.Tensor,
+        vocab_logits: torch.Tensor,
+        q_alpha: torch.Tensor,
+        q_token_ids: torch.Tensor,
+        img_alpha: torch.Tensor,
+        label_tokens,        # (B, k, max_t) int64 or None
+        vocab_size: int,
+    ) -> torch.Tensor:
+        """
+        Mix three distributions into log-probabilities.
+
+        p_g, p_cQ, p_cV  : (B,)
+        vocab_logits      : (B, V)
+        q_alpha           : (B, q_len) — attention over question tokens
+        q_token_ids       : (B, q_len) — vocabulary indices of question tokens
+        img_alpha         : (B, k)     — attention over image regions
+        label_tokens      : (B, k, max_t) int64 — vocab indices for BUTD label names;
+                            0 = padding (ignored). None → P_copy_V = 0.
+        vocab_size        : int
+
+        Returns: (B, V) log-probabilities (ready for NLLLoss).
+        """
+        B = p_g.size(0)
+
+        # Source 1: vocabulary distribution
+        p_vocab = F.softmax(vocab_logits, dim=-1)   # (B, V)
+
+        # Source 2: question copy — scatter q_alpha onto vocab positions
+        p_copy_q = vocab_logits.new_zeros(B, vocab_size)
+        if q_token_ids is not None and q_alpha is not None:
+            ids_q = q_token_ids.clamp(0, vocab_size - 1)   # (B, q_len)
+            p_copy_q.scatter_add_(1, ids_q, q_alpha.to(p_copy_q.dtype))
+
+        # Source 3: visual label copy — distribute img_alpha / |tokens_i| per region (Eq 31)
+        p_copy_v = vocab_logits.new_zeros(B, vocab_size)
+        if label_tokens is not None:
+            k      = label_tokens.size(1)
+            max_t  = label_tokens.size(2)
+            # Number of valid (non-zero) tokens per region: (B, k)
+            counts = (label_tokens > 0).sum(dim=-1).float().clamp(min=1.0)
+            # Per-token weight = alpha_i / count_i → (B, k)
+            per_tok = img_alpha.to(counts.dtype) / counts
+            # Expand to (B, k, max_t) then flatten to (B, k*max_t)
+            per_tok = per_tok.unsqueeze(-1).expand(-1, -1, max_t)
+            flat_ids     = label_tokens.view(B, -1).clamp(0, vocab_size - 1)
+            flat_weights = per_tok.contiguous().view(B, -1)
+            # Zero out padding entries (label_token == 0 means padding)
+            flat_mask    = (label_tokens.view(B, -1) > 0).float()
+            flat_weights = flat_weights * flat_mask
+            p_copy_v.scatter_add_(1, flat_ids, flat_weights.to(p_copy_v.dtype))
+
+        # Blend: p_g * P_vocab + p_cQ * P_copy_Q + p_cV * P_copy_V
+        out = (p_g.unsqueeze(1)  * p_vocab
+             + p_cQ.unsqueeze(1) * p_copy_q
+             + p_cV.unsqueeze(1) * p_copy_v)
+        out = out.clamp(min=1e-10)
+        return out.log()   # (B, V) log-probabilities
 
 
 if __name__ == "__main__":

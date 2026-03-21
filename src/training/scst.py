@@ -40,7 +40,7 @@ Usage in train.py
     from training.scst import scst_step
 
     loss = scst_step(
-        model, model_type, imgs, questions, target_texts, vocab_a,
+        model, model_type, imgs, questions, target_texts, vocab,
         device=DEVICE,
         bleu_weight=0.5, meteor_weight=0.5, length_bonus_weight=0.0,
     )
@@ -48,7 +48,8 @@ Usage in train.py
 
 import torch
 import torch.nn.functional as F
-from typing import List, Tuple
+import numpy as np
+from typing import List, Optional, Tuple
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
 
@@ -170,7 +171,119 @@ def compute_length_bonus(
     return torch.tensor(rewards, dtype=torch.float32)
 
 
+# ── G4: Object Hallucination Penalty ───────────────────────────────────────────
+
+_OHP_STOPWORDS = frozenset({
+    'the', 'a', 'an', 'is', 'are', 'was', 'were', 'be', 'been', 'being',
+    'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would', 'could',
+    'should', 'may', 'might', 'shall', 'can', 'to', 'of', 'in', 'on',
+    'at', 'by', 'for', 'with', 'about', 'from', 'into', 'through',
+    'it', 'its', 'this', 'that', 'and', 'or', 'but', 'not', 'no', 'so',
+    'yet', 'both', 'he', 'she', 'they', 'we', 'you', 'i', 'me', 'him',
+    'her', 'them', 'us', 'my', 'your', 'his', 'their', 'our', 'which',
+    'who', 'what', 'there', 'here', 'because', 'since', 'as',
+})
+
+
+def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
+    """Cosine similarity between two numpy vectors."""
+    denom = (np.linalg.norm(a) * np.linalg.norm(b))
+    if denom < 1e-10:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+
+def compute_ohp_reward(
+    hyp_tokens: List[str],
+    visual_labels: List[str],
+    glove_embed: dict,
+    threshold: float = 0.5,
+) -> float:
+    """
+    Object Hallucination Penalty for a single sample (G4, Eq 37-38).
+
+    For each content word w in hypothesis:
+        max_sim(w) = max over all label tokens l: cosine(glove[w], glove[l])
+        penalty(w) = max(0, delta - max_sim(w))
+    OHP = mean(penalty) over content words that appear in GloVe.
+
+    A content word with max_sim >= delta gets 0 penalty (it matches a visible object).
+    A content word absent from labels gets penalty = delta (maximum hallucination).
+
+    Args:
+        hyp_tokens    : list[str] — decoded tokens (already split)
+        visual_labels : list[str] — BUTD label names (e.g. ["cat", "fire hydrant"])
+        glove_embed   : dict[str, np.ndarray] — GloVe word vectors
+        threshold     : delta in Eq 37 (default 0.5 per spec)
+
+    Returns:
+        OHP ∈ [0, delta] — higher = more hallucination
+    """
+    # Tokenize label names and build lookup set of label vecs
+    label_vecs = []
+    for label in visual_labels:
+        for tok in label.lower().split():
+            if tok in glove_embed:
+                label_vecs.append(glove_embed[tok])
+
+    content_words = [
+        w for w in hyp_tokens
+        if w not in _OHP_STOPWORDS
+        and w not in ('<start>', '<end>', '<pad>', '<unk>')
+        and w in glove_embed
+    ]
+
+    if not content_words:
+        return 0.0
+
+    penalties = []
+    for word in content_words:
+        w_vec = glove_embed[word]
+        if label_vecs:
+            max_sim = max(_cosine_sim(w_vec, lv) for lv in label_vecs)
+        else:
+            max_sim = 0.0
+        penalties.append(max(0.0, threshold - max_sim))
+
+    return sum(penalties) / len(penalties)
+
+
+def compute_ohp_rewards(
+    hypotheses: List[str],
+    visual_labels_batch: List[List[str]],
+    glove_embed: dict,
+    threshold: float = 0.5,
+) -> torch.Tensor:
+    """
+    Batch OHP reward computation.
+
+    Args:
+        hypotheses          : list[str] — decoded texts (space-tokenized)
+        visual_labels_batch : list[list[str]] — BUTD label names per sample
+        glove_embed         : dict[str, np.ndarray]
+        threshold           : delta (default 0.5)
+
+    Returns:
+        (B,) float tensor — OHP per sample ∈ [0, threshold]
+    """
+    rewards = [
+        compute_ohp_reward(h.split(), labels, glove_embed, threshold)
+        for h, labels in zip(hypotheses, visual_labels_batch)
+    ]
+    return torch.tensor(rewards, dtype=torch.float32)
+
+
 # ── Composite reward ────────────────────────────────────────────────────────────
+
+def compute_exact_match(hypotheses: List[str], references: List[str]) -> torch.Tensor:
+    """Exact string match metric for generative VQA."""
+    r = []
+    for h, ref in zip(hypotheses, references):
+        # normalize and compare
+        h_norm = " ".join(h.strip().split())
+        r_norm = " ".join(ref.strip().split())
+        r.append(1.0 if h_norm == r_norm else 0.0)
+    return torch.tensor(r, dtype=torch.float32)
 
 def compute_rewards(
     hypotheses: List[str],
@@ -178,12 +291,19 @@ def compute_rewards(
     bleu_weight: float = 0.5,
     meteor_weight: float = 0.5,
     length_bonus_weight: float = 0.0,
+    ohp_weight: float = 0.0,
+    ohp_tensor: Optional[torch.Tensor] = None,
+    cider_weight: float = 0.0,
+    exact_match_weight: float = 0.0,
 ) -> torch.Tensor:
     """
-    Composite reward: bleu_w*BLEU4 + meteor_w*METEOR + len_w*LengthBonus.
+    Composite reward: bleu_w*BLEU4 + meteor_w*METEOR + len_w*LengthBonus - ohp_w*OHP.
 
     Weights do not need to sum to 1.0 — the advantage (r_sample - r_greedy)
     is what drives the gradient, not the absolute scale.
+
+    G4: OHP is subtracted (penalty): R -= ohp_weight * OHP.
+        Pass pre-computed ohp_tensor (B,) to avoid recomputing GloVe lookups.
 
     Args:
         hypotheses           : decoded texts (space-tokenized)
@@ -191,7 +311,8 @@ def compute_rewards(
         bleu_weight          : BLEU-4 coefficient (default 0.5)
         meteor_weight        : METEOR coefficient (default 0.5)
         length_bonus_weight  : LengthBonus coefficient (default 0.0)
-                               Use ≤0.05; higher values cause verbose drift.
+        ohp_weight           : G4 OHP coefficient (default 0.0 = disabled)
+        ohp_tensor           : pre-computed (B,) OHP per sample; required when ohp_weight>0
 
     Returns:
         (B,) float tensor
@@ -206,17 +327,34 @@ def compute_rewards(
 
     if length_bonus_weight > 0.0:
         r = r + length_bonus_weight * compute_length_bonus(hypotheses)
+        
+    if exact_match_weight > 0.0:
+        r = r + exact_match_weight * compute_exact_match(hypotheses, references)
+
+    if cider_weight > 0.0:
+        try:
+            from .cider import compute_cider
+            res = {str(i): [h] for i, h in enumerate(hypotheses)}
+            gts = {str(i): [r] for i, r in enumerate(references)}
+            _, scores = compute_cider(gts, res)
+            r = r + cider_weight * torch.tensor(scores, dtype=torch.float32)
+        except Exception as e:
+            print(f"  [WARN] CIDEr calculation failed: {e}")
+
+    if ohp_weight > 0.0 and ohp_tensor is not None:
+        r = r - ohp_weight * ohp_tensor   # penalty: subtract
 
     return r
 
 
 # ── Greedy decode helper ────────────────────────────────────────────────────────
 
-def _greedy_decode(model, model_type, imgs, questions, vocab_a,
-                   max_len: int, device) -> List[str]:
+def _greedy_decode(model, model_type, imgs, questions, vocab,
+                   max_len: int, device, q_token_ids=None) -> List[str]:
     """
     Greedy decode — used to produce the SCST baseline.
     Delegates to model's existing decode infrastructure.
+    q_token_ids: pass questions tensor so PGN activates symmetrically with _sampling_decode.
     """
     import sys, os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
@@ -224,13 +362,105 @@ def _greedy_decode(model, model_type, imgs, questions, vocab_a,
 
     model.eval()
     with torch.no_grad():
-        if model_type in ('C', 'D', 'E'):
+        if model_type == 'G':
+            # VQAModel API — feats = imgs (BUTD features for Model G)
+            B         = imgs.size(0)
+            end_idx   = vocab.word2idx.get('<end>', 2)
+            start_idx = vocab.word2idx.get('<start>', 1)
+
+            V, q_feat, Q_H = model.encode(imgs, questions)
+            h, c = model._fuse_and_init(V, q_feat, img_mask=None)
+            # G5: always LONG bin (2) at inference
+            length_bin = torch.full((B,), 2, dtype=torch.long, device=device)
+
+            current_token = torch.full((B,), start_idx, dtype=torch.long, device=device)
+            done          = torch.zeros(B, dtype=torch.bool, device=device)
+            decoded_ids   = [[] for _ in range(B)]
+            coverage      = None
+
+            for _ in range(max_len):
+                tok = current_token.unsqueeze(1)
+                logit, h, c, _, coverage = model.decode_step(
+                    tok, h, c, V, Q_H,
+                    coverage=coverage,
+                    q_token_ids=questions,
+                    length_bin=length_bin,
+                )
+                pred = logit.argmax(dim=-1)   # (B,)
+                for b in range(B):
+                    if not done[b]:
+                        decoded_ids[b].append(pred[b].item())
+                done = done | (pred == end_idx)
+                current_token = pred
+                if done.all():
+                    break
+
+            texts = []
+            for ids in decoded_ids:
+                words = []
+                for i in ids:
+                    if i == end_idx:
+                        break
+                    w = vocab.idx2word.get(i, '<unk>') if hasattr(vocab, 'idx2word') \
+                        else vocab.idx_to_word.get(i, '<unk>')
+                    if w not in ('<pad>', '<start>'):
+                        words.append(w)
+                texts.append(' '.join(words))
+
+        elif model_type == 'H':
+            B         = imgs.size(0)
+            end_idx   = vocab.word2idx.get('<end>', 2)
+            start_idx = vocab.word2idx.get('<start>', 1)
+
+            memory, Q_H, _, V = model.encode(questions, imgs, grid_feats=None, img_mask=None)
+            h = memory.unsqueeze(0).repeat(model.decoder.num_layers, 1, 1)
+            c = torch.zeros_like(h)
+            
+            length_bin = torch.full((B,), 2, dtype=torch.long, device=device)
+
+            current_token = torch.full((B,), start_idx, dtype=torch.long, device=device)
+            done          = torch.zeros(B, dtype=torch.bool, device=device)
+            decoded_ids   = [[] for _ in range(B)]
+            coverage      = None
+
+            for _ in range(max_len):
+                tok = current_token.unsqueeze(1)
+                logit, h, c, _, coverage = model.decode_step(
+                    tok, h, c, V, Q_H,
+                    coverage=coverage,
+                    q_token_ids=questions,
+                    length_bin=length_bin,
+                )
+                pred = logit.argmax(dim=-1)
+                for b in range(B):
+                    if not done[b]:
+                        decoded_ids[b].append(pred[b].item())
+                done = done | (pred == end_idx)
+                current_token = pred
+                if done.all():
+                    break
+
+            texts = []
+            for ids in decoded_ids:
+                words = []
+                for i in ids:
+                    if i == end_idx:
+                        break
+                    w = vocab.idx2word.get(i, '<unk>') if hasattr(vocab, 'idx2word') \
+                        else vocab.idx_to_word.get(i, '<unk>')
+                    if w not in ('<pad>', '<start>'):
+                        words.append(w)
+                texts.append(' '.join(words))
+
+        elif model_type in ('C', 'D', 'E', 'F'):
             texts = batch_greedy_decode_with_attention(
-                model, imgs, questions, vocab_a,
+                model, imgs, questions, vocab,
                 max_len=max_len, device=device)
+            # PGN symmetry: q_token_ids is already passed inside
+            # batch_greedy_decode_with_attention via its qs variable
         else:
             texts = batch_greedy_decode(
-                model, imgs, questions, vocab_a,
+                model, imgs, questions, vocab,
                 max_len=max_len, device=device)
     model.train()
     return texts
@@ -238,7 +468,7 @@ def _greedy_decode(model, model_type, imgs, questions, vocab_a,
 
 # ── Sampling decode ─────────────────────────────────────────────────────────────
 
-def _sampling_decode(model, model_type, imgs, questions, vocab_a,
+def _sampling_decode(model, model_type, imgs, questions, vocab,
                      max_len: int, device, temperature: float = 1.0
                      ) -> Tuple[List[str], torch.Tensor]:
     """
@@ -250,11 +480,109 @@ def _sampling_decode(model, model_type, imgs, questions, vocab_a,
       log_probs : (B,) — sum of log P(a_t) over all non-pad steps
     """
     model.train()
-    end_idx   = vocab_a.word2idx.get('<end>', 2)
-    start_idx = vocab_a.word2idx.get('<start>', 1)
+    end_idx   = vocab.word2idx.get('<end>', 2)
+    start_idx = vocab.word2idx.get('<start>', 1)
     B = imgs.size(0)
 
-    # ── Encode image + question ────────────────────────────────────────────
+    if model_type == 'G':
+        # ── VQAModel API (Model G) ─────────────────────────────────────────
+        with torch.no_grad():
+            V, q_feat, Q_H = model.encode(imgs, questions)
+            h, c = model._fuse_and_init(V, q_feat, img_mask=None)
+        # G5: always LONG bin at inference
+        length_bin    = torch.full((B,), 2, dtype=torch.long, device=device)
+        current_token = torch.full((B,), start_idx, dtype=torch.long, device=device)
+        done          = torch.zeros(B, dtype=torch.bool, device=device)
+        log_prob_sums = torch.zeros(B, device=device)
+        decoded_ids   = [[] for _ in range(B)]
+        coverage      = None
+
+        for _ in range(max_len):
+            tok = current_token.unsqueeze(1)
+            logit, h, c, _, coverage = model.decode_step(
+                tok, h, c, V, Q_H,
+                coverage=coverage,
+                q_token_ids=questions,
+                length_bin=length_bin,
+            )
+            if temperature != 1.0:
+                logit = logit / temperature
+            probs   = F.softmax(logit, dim=-1)
+            sampled = torch.multinomial(probs, num_samples=1).squeeze(1)
+            log_p   = F.log_softmax(logit, dim=-1)
+            step_lp = log_p.gather(1, sampled.unsqueeze(1)).squeeze(1)
+            log_prob_sums = log_prob_sums + step_lp * (~done).float()
+            for b in range(B):
+                if not done[b]:
+                    decoded_ids[b].append(sampled[b].item())
+            done = done | (sampled == end_idx)
+            current_token = sampled
+            if done.all():
+                break
+
+        texts = []
+        for ids in decoded_ids:
+            words = []
+            for i in ids:
+                if i == end_idx:
+                    break
+                w = vocab.idx2word.get(i, '<unk>') if hasattr(vocab, 'idx2word') \
+                    else vocab.idx_to_word.get(i, '<unk>')
+                if w not in ('<pad>', '<start>'):
+                    words.append(w)
+            texts.append(' '.join(words))
+        return texts, log_prob_sums
+
+    elif model_type == 'H':
+        with torch.no_grad():
+            memory, Q_H, _, V = model.encode(questions, imgs, grid_feats=None, img_mask=None)
+            h = memory.unsqueeze(0).repeat(model.decoder.num_layers, 1, 1)
+            c = torch.zeros_like(h)
+
+        length_bin    = torch.full((B,), 2, dtype=torch.long, device=device)
+        current_token = torch.full((B,), start_idx, dtype=torch.long, device=device)
+        done          = torch.zeros(B, dtype=torch.bool, device=device)
+        log_prob_sums = torch.zeros(B, device=device)
+        decoded_ids   = [[] for _ in range(B)]
+        coverage      = None
+
+        for _ in range(max_len):
+            tok = current_token.unsqueeze(1)
+            logit, h, c, _, coverage = model.decode_step(
+                tok, h, c, V, Q_H,
+                coverage=coverage,
+                q_token_ids=questions,
+                length_bin=length_bin,
+            )
+            if temperature != 1.0:
+                logit = logit / temperature
+            probs   = F.softmax(logit, dim=-1)
+            sampled = torch.multinomial(probs, num_samples=1).squeeze(1)
+            log_p   = F.log_softmax(logit, dim=-1)
+            step_lp = log_p.gather(1, sampled.unsqueeze(1)).squeeze(1)
+            log_prob_sums = log_prob_sums + step_lp * (~done).float()
+            for b in range(B):
+                if not done[b]:
+                    decoded_ids[b].append(sampled[b].item())
+            done = done | (sampled == end_idx)
+            current_token = sampled
+            if done.all():
+                break
+
+        texts = []
+        for ids in decoded_ids:
+            words = []
+            for i in ids:
+                if i == end_idx:
+                    break
+                w = vocab.idx2word.get(i, '<unk>') if hasattr(vocab, 'idx2word') \
+                    else vocab.idx_to_word.get(i, '<unk>')
+                if w not in ('<pad>', '<start>'):
+                    words.append(w)
+            texts.append(' '.join(words))
+        return texts, log_prob_sums
+
+    # ── Encode image + question (models A–F) ──────────────────────────────
     with torch.no_grad():
         if model_type in ('C', 'D', 'E'):
             img_features = F.normalize(model.i_encoder(imgs), p=2, dim=-1)  # (B,N,H)
@@ -319,8 +647,8 @@ def _sampling_decode(model, model_type, imgs, questions, vocab_a,
         for i in ids:
             if i == end_idx:
                 break
-            w = vocab_a.idx2word.get(i, '<unk>') if hasattr(vocab_a, 'idx2word') else \
-                vocab_a.idx_to_word.get(i, '<unk>')
+            w = vocab.idx2word.get(i, '<unk>') if hasattr(vocab, 'idx2word') else \
+                vocab.idx_to_word.get(i, '<unk>')
             if w not in ('<pad>', '<start>'):
                 words.append(w)
         texts.append(' '.join(words))
@@ -331,47 +659,66 @@ def _sampling_decode(model, model_type, imgs, questions, vocab_a,
 # ── Main SCST step ──────────────────────────────────────────────────────────────
 
 def scst_step(model, model_type: str, imgs: torch.Tensor, questions: torch.Tensor,
-              target_texts: List[str], vocab_a,
+              target_texts: List[str], vocab,
               max_len: int = 50, device='cpu',
               temperature: float = 1.0,
               bleu_weight: float = 0.5,
               meteor_weight: float = 0.5,
               length_bonus_weight: float = 0.0,
+              ohp_weight: float = 0.0,
+              cider_weight: float = 0.0,
+              visual_labels_batch: Optional[List[List[str]]] = None,
+              glove_embed: Optional[dict] = None,
+              ohp_threshold: float = 0.5,
+              return_stats: bool = False,
               ) -> torch.Tensor:
     """
     Compute SCST policy-gradient loss for one batch.
 
     Args:
         model                : VQA model
-        model_type           : 'A'/'B'/'C'/'D'/'E'/'F'
-        imgs                 : (B, 3, H, W) or (B, k, feat_dim) for Model F
+        model_type           : 'A'/'B'/'C'/'D'/'E'/'F'/'G'
+        imgs                 : (B, 3, H, W) or (B, k, feat_dim) for Model F/G
         questions            : (B, q_len)
         target_texts         : list[str] ground-truth answer texts
-        vocab_a              : answer Vocabulary
+        vocab                : answer Vocabulary
         max_len              : max decode length
         device               : torch device
         temperature          : sampling temperature (1.0 = unbiased)
         bleu_weight          : BLEU-4 reward coefficient (default 0.5)
         meteor_weight        : METEOR reward coefficient (default 0.5)
         length_bonus_weight  : LengthBonus coefficient (default 0.0)
+        ohp_weight           : G4 OHP penalty coefficient (default 0.0 = disabled)
+        visual_labels_batch  : G4 list[list[str]] — BUTD label names per sample
+        glove_embed          : G4 dict[str, np.ndarray] — GloVe vectors for OHP
+        ohp_threshold        : G4 delta for max(0, delta - cos_sim) (default 0.5)
 
     Returns:
         loss : scalar — REINFORCE loss (to be .backward()-ed)
     """
-    # 1. Greedy baseline (no gradient)
+    # 1. Greedy baseline (no gradient) — pass questions so PGN activates symmetrically
     greedy_texts = _greedy_decode(model, model_type, imgs, questions,
-                                  vocab_a, max_len, device)
+                                  vocab, max_len, device, q_token_ids=questions)
 
     # 2. Sampling decode (with gradient)
     sample_texts, log_prob_sums = _sampling_decode(
-        model, model_type, imgs, questions, vocab_a, max_len, device, temperature)
+        model, model_type, imgs, questions, vocab, max_len, device, temperature)
 
-    # 3. Composite rewards
+    # 3. G4: pre-compute OHP for sample (greedy OHP not needed — same visual labels)
+    ohp_sample = None
+    if ohp_weight > 0.0 and visual_labels_batch is not None and glove_embed is not None:
+        ohp_sample = compute_ohp_rewards(
+            sample_texts, visual_labels_batch, glove_embed, ohp_threshold).to(device)
+
+    # 4. Composite rewards
     r_greedy = compute_rewards(
         greedy_texts, target_texts,
         bleu_weight=bleu_weight,
         meteor_weight=meteor_weight,
         length_bonus_weight=length_bonus_weight,
+        ohp_weight=ohp_weight,
+        ohp_tensor=None,
+        cider_weight=cider_weight,
     ).to(device)
 
     r_sample = compute_rewards(
@@ -379,12 +726,26 @@ def scst_step(model, model_type: str, imgs: torch.Tensor, questions: torch.Tenso
         bleu_weight=bleu_weight,
         meteor_weight=meteor_weight,
         length_bonus_weight=length_bonus_weight,
+        ohp_weight=ohp_weight,
+        ohp_tensor=ohp_sample,
+        cider_weight=cider_weight,
     ).to(device)
 
-    # 4. REINFORCE: L = -mean(advantage * log_prob_sum)
+    # 5. REINFORCE: L = -mean(advantage * log_prob_sum)
     advantage = (r_sample - r_greedy).detach()   # (B,) — no grad through reward
     loss = -(advantage * log_prob_sums).mean()
 
+    if return_stats:
+        stats = {
+            'scst/reward_greedy':   r_greedy.mean().item(),
+            'scst/reward_sample':   r_sample.mean().item(),
+            'scst/advantage_mean':  advantage.mean().item(),
+            'scst/advantage_std':   advantage.std().item(),
+            'scst/reward_delta':    (r_sample - r_greedy).mean().item(),
+        }
+        if ohp_sample is not None:
+            stats['scst/ohp_mean'] = ohp_sample.mean().item()
+        return loss, stats
     return loss
 
 

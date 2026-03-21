@@ -1,0 +1,1 @@
+{"train/gnorm":NaN,"val/loss":2.217464430691445,"_wandb":{"runtime":3848},"_runtime":3848,"epoch":21,"lr":0.00014511377456840442,"train/acc":0.646036476526309,"system/vram_gb":11.238050304,"train/loss":1.5083600170666167,"_step":20,"_timestamp":1.7740981443385532e+09,"val/acc":0.5556579436341377}

@@ -39,23 +39,23 @@ from inference import get_model, load_model_from_checkpoint, \
 
 # ── Config ─────────────────────────────────────────────────────────
 DEVICE         = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-VAL_IMAGE_DIR  = "data/raw/images/val2014"
-VAL_VQA_E_JSON = "data/raw/vqa_e_json/VQA-E_val_set.json"
-VOCAB_Q_PATH   = "data/processed/vocab_questions.json"
-VOCAB_A_PATH   = "data/processed/vocab_answers.json"
+VAL_IMAGE_DIR  = "data/images/val2014"
+VAL_VQA_E_JSON = "data/annotations/vqa_e/VQA-E_val_set.json"
+VOCAB_JOINT_PATH   = "data/processed/vocabuestions.json"
+VOCAB_A_PATH   = "data/processed/vocabnswers.json"
 
 
-def decode_tensor(a_tensor, vocab_a):
+def decode_tensor(a_tensor, vocab):
     special = {
-        vocab_a.word2idx['<pad>'],
-        vocab_a.word2idx['<start>'],
-        vocab_a.word2idx['<end>']
+        vocab.word2idx['<pad>'],
+        vocab.word2idx['<start>'],
+        vocab.word2idx['<end>']
     }
-    words = [vocab_a.idx2word[int(i)] for i in a_tensor if int(i) not in special]
+    words = [vocab.idx2word[int(i)] for i in a_tensor if int(i) not in special]
     return ' '.join(words)
 
 
-def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset, beam_width=1,
+def evaluate_one_model(model_type, epoch, vocab, vocab, val_dataset, beam_width=1,
                        no_repeat_ngram_size=3):
     checkpoint = f"checkpoints/model_{model_type.lower()}_epoch{epoch}.pth"
 
@@ -70,7 +70,7 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset, beam_wi
             return None
 
     model = load_model_from_checkpoint(
-        model_type, checkpoint, len(vocab_q), len(vocab_a), device=DEVICE
+        model_type, checkpoint, len(vocab), device=DEVICE
     )
 
     use_attention = model_type in ('C', 'D')
@@ -93,10 +93,10 @@ def evaluate_one_model(model_type, epoch, vocab_q, vocab_a, val_dataset, beam_wi
 
     with torch.no_grad():
         for imgs, questions, answers in tqdm.tqdm(val_loader, desc=f"Model {model_type}", leave=False):
-            preds = decode_fn(model, imgs, questions, vocab_a, device=DEVICE, **decode_kwargs)
+            preds = decode_fn(model, imgs, questions, vocab, device=DEVICE, **decode_kwargs)
             all_predictions.extend(preds)
             for a_tensor in answers:
-                all_gt_strings.append(decode_tensor(a_tensor, vocab_a))
+                all_gt_strings.append(decode_tensor(a_tensor, vocab))
 
     n             = len(all_predictions)
     exact_match   = 0
@@ -206,14 +206,14 @@ def main():
 
     model_types = [m.strip().upper() for m in args.models.split(',')]
 
-    vocab_q = Vocabulary(); vocab_q.load(VOCAB_Q_PATH)
-    vocab_a = Vocabulary(); vocab_a.load(VOCAB_A_PATH)
+    vocab = Vocabulary(); vocab.load(VOCAB_JOINT_PATH)
+    vocab = Vocabulary(); vocab.load(VOCAB_A_PATH)
 
     val_dataset = VQAEDataset(
         image_dir=VAL_IMAGE_DIR,
         vqa_e_json_path=VAL_VQA_E_JSON,
-        vocab_q=vocab_q,
-        vocab_a=vocab_a,
+        vocab=vocab,
+        vocab=vocab,
         split='val2014',
         max_samples=args.num_samples
     )
@@ -224,7 +224,7 @@ def main():
     results = {}
     for model_type in model_types:
         results[model_type] = evaluate_one_model(
-            model_type, args.epoch, vocab_q, vocab_a, val_dataset,
+            model_type, args.epoch, vocab, vocab, val_dataset,
             beam_width=args.beam_width,
             no_repeat_ngram_size=args.no_repeat_ngram
         )
