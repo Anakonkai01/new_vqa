@@ -68,6 +68,7 @@ class LSTMDecoderG(nn.Module):
         use_dropconnect: bool = False,
         num_heads: int = 4,
         len_embed_dim: int = 64,
+        use_mac_in_decoder: bool = False,
     ):
         super().__init__()
 
@@ -76,6 +77,7 @@ class LSTMDecoderG(nn.Module):
         self.use_coverage  = use_coverage
         self.vocab_size    = vocab_size
         self.len_embed_dim = len_embed_dim
+        self.use_mac_in_decoder = use_mac_in_decoder
 
         # ── G5: Length embedding ───────────────────────────────────────────
         self.len_embedding = nn.Embedding(3, len_embed_dim)   # 3 bins × 64-dim
@@ -97,8 +99,14 @@ class LSTMDecoderG(nn.Module):
         self.q_mhca   = MultiHeadCrossAttention(
             hidden_size, num_heads=num_heads, use_coverage=False)
 
-        # ── LSTM (input size = embed + 2*H + len_embed_dim) ───────────────
-        lstm_input_size = embed_size + hidden_size * 2 + len_embed_dim  # 2624
+        # ── LSTM (embed + 2*H + len_emb [+ H MAC ctx for Model H]) ─────────
+        base_lstm_in = embed_size + hidden_size * 2 + len_embed_dim  # 2624
+        if use_mac_in_decoder:
+            self.mac_ctx_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+            lstm_input_size = base_lstm_in + hidden_size
+        else:
+            self.mac_ctx_proj = None
+            lstm_input_size = base_lstm_in
         if use_layer_norm:
             self.lstm = LayerNormLSTMStack(
                 input_size=lstm_input_size, hidden_size=hidden_size,
@@ -131,7 +139,7 @@ class LSTMDecoderG(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
         # ── G2: Three-way PGN ──────────────────────────────────────────────
-        # Input: [c_img(H); h_t(H); x_t(embed + 2H + len_emb)] = 1024+1024+2624 = 4672
+        # Input: [c_img(H); h_t(H); x_t(lstm_input)] — lstm_input includes optional MAC ctx
         pgn_input_dim = hidden_size + hidden_size + lstm_input_size
         self.pgn = ThreeWayPGNHead(pgn_input_dim)
 
@@ -147,6 +155,7 @@ class LSTMDecoderG(nn.Module):
         img_mask: Optional[torch.Tensor] = None,
         length_bin: Optional[torch.Tensor] = None,
         label_tokens: Optional[torch.Tensor] = None,
+        mac_memory: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """
         Training mode — Teacher Forcing with dual MHCA + G2 + G5.
@@ -160,6 +169,7 @@ class LSTMDecoderG(nn.Module):
             img_mask        : (B, k) bool  — True=valid region (BUTD padding mask)
             length_bin      : (B,) int64 in {0,1,2} — G5; defaults to LONG if None
             label_tokens    : (B, k, max_t) int64 — G2 visual label indices; None→skip
+            mac_memory      : (B, H) final MAC memory — Model H only; concatenated each step
 
         Returns:
             logits        : (B, T, V) log-probabilities (from ThreeWayPGNHead)
@@ -176,6 +186,13 @@ class LSTMDecoderG(nn.Module):
         if length_bin is None:
             length_bin = target_seq.new_full((batch,), 2)   # LONG
         len_emb = self.len_embedding(length_bin)             # (B, 64)
+
+        if mac_memory is not None:
+            if not self.use_mac_in_decoder:
+                raise ValueError("mac_memory set but decoder was built with use_mac_in_decoder=False")
+            mac_ctx = self.mac_ctx_proj(mac_memory)
+        else:
+            mac_ctx = None
 
         hidden      = encoder_hidden
         num_regions = img_features.size(1)
@@ -201,8 +218,11 @@ class LSTMDecoderG(nn.Module):
                 cov_loss = cov_loss + torch.min(img_alpha, coverage).sum(dim=1).mean()
                 coverage = coverage + img_alpha
 
-            # G5: LSTM input includes length embedding
-            lstm_input = torch.cat([embed_t, img_context, q_context, len_emb], dim=1)
+            # G5 (+ optional MAC context for Model H)
+            if mac_ctx is not None:
+                lstm_input = torch.cat([embed_t, img_context, q_context, len_emb, mac_ctx], dim=1)
+            else:
+                lstm_input = torch.cat([embed_t, img_context, q_context, len_emb], dim=1)
 
             output, hidden = self.lstm(lstm_input.unsqueeze(1), hidden)
             vocab_logit = self.fc(self.out_proj(output.squeeze(1)))  # (B, V)
@@ -233,6 +253,7 @@ class LSTMDecoderG(nn.Module):
         img_mask: Optional[torch.Tensor] = None,
         length_bin: Optional[torch.Tensor] = None,
         label_tokens: Optional[torch.Tensor] = None,
+        mac_memory: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, Tuple, torch.Tensor, Optional[torch.Tensor]]:
         """
         Single autoregressive decode step for beam search.
@@ -247,6 +268,7 @@ class LSTMDecoderG(nn.Module):
             img_mask    : (B, k) bool or None
             length_bin  : (B,) int64 — G5; defaults to LONG (2) if None
             label_tokens: (B, k, max_t) int64 or None — G2
+            mac_memory  : (B, H) final MAC memory — Model H only
 
         Returns:
             logit      : (B, V) log-probabilities
@@ -265,6 +287,13 @@ class LSTMDecoderG(nn.Module):
             length_bin = token.new_full((token.size(0),), 2)
         len_emb = self.len_embedding(length_bin)       # (B, 64)
 
+        if mac_memory is not None:
+            if not self.use_mac_in_decoder:
+                raise ValueError("mac_memory set but decoder was built with use_mac_in_decoder=False")
+            mac_ctx = self.mac_ctx_proj(mac_memory)
+        else:
+            mac_ctx = None
+
         img_context, img_alpha = self.img_mhca(
             h_top, img_features, coverage, mask=img_mask)
         q_context, q_alpha = self.q_mhca(h_top, q_hidden_states)
@@ -274,7 +303,10 @@ class LSTMDecoderG(nn.Module):
                 coverage = torch.zeros_like(img_alpha)
             coverage = coverage + img_alpha
 
-        lstm_input = torch.cat([embed_1d, img_context, q_context, len_emb], dim=1)
+        if mac_ctx is not None:
+            lstm_input = torch.cat([embed_1d, img_context, q_context, len_emb, mac_ctx], dim=1)
+        else:
+            lstm_input = torch.cat([embed_1d, img_context, q_context, len_emb], dim=1)
         output, hidden = self.lstm(lstm_input.unsqueeze(1), hidden)
         vocab_logit = self.fc(self.out_proj(output.squeeze(1)))  # (B, V)
 

@@ -20,7 +20,7 @@ They compose: use CurriculumSampler per-source then build_mixed_sampler across s
 from __future__ import annotations
 
 import random
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 from torch.utils.data import ConcatDataset, Dataset, Subset, WeightedRandomSampler
@@ -125,6 +125,44 @@ def build_replay_sampler(
         fractions=[expl_fraction, replay_fraction],
         num_samples=num_samples or len(explanation_dataset),
     )
+
+
+# ---------------------------------------------------------------------------
+# build_subset_weighted_sampler  (C2: source + quality upweighting)
+# ---------------------------------------------------------------------------
+
+def build_subset_weighted_sampler(
+    subset: Subset,
+    source_weights: Dict[str, float],
+    quality_gamma: float = 0.5,
+    num_samples: Optional[int] = None,
+) -> Tuple[Subset, WeightedRandomSampler]:
+    """
+    WeightedRandomSampler over a Subset of VQAGenerativeDataset (merged JSON).
+
+    Per-index weight = source_weights[source] * (quality_score/5)**quality_gamma.
+    """
+    base = subset.dataset
+    if not hasattr(base, "annotations"):
+        raise ValueError("build_subset_weighted_sampler requires dataset.annotations (VQAGenerativeDataset)")
+
+    weights: List[float] = []
+    for idx in subset.indices:
+        ann = base.annotations[idx]
+        s = ann.get("source", "unknown")
+        w = float(source_weights.get(s, 1.0))
+        qs = float(ann.get("quality_score", 3))
+        qs = max(1.0, min(5.0, qs))
+        w *= (qs / 5.0) ** quality_gamma
+        weights.append(w)
+
+    n = num_samples or len(subset)
+    sampler = WeightedRandomSampler(
+        weights=weights,
+        num_samples=n,
+        replacement=True,
+    )
+    return subset, sampler
 
 
 # ---------------------------------------------------------------------------

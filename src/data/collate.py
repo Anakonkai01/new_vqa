@@ -46,6 +46,7 @@ class VQABatch:
       length_bins (B,) int64        — 0/1/2 for G5 length conditioning; None if not used
       label_tokens (B, max_k, max_toks) int64 — G2 visual label indices; None if absent
       sources     List[str]         — per-sample source tag (for curriculum / logging)
+      label_names per-sample BUTD label strings (SCST OHP); None for image batches
     """
     feats: Tensor
     questions: Tensor
@@ -55,6 +56,7 @@ class VQABatch:
     label_tokens: Optional[Tensor] = None
     grid_feats: Optional[Tensor] = None
     sources: Optional[List[str]] = None
+    label_names: Optional[List[Optional[List[str]]]] = None
 
     # -----------------------------------------------------------------------
     # Convenience
@@ -82,6 +84,7 @@ class VQABatch:
             label_tokens=_maybe(self.label_tokens),
             grid_feats=_maybe(self.grid_feats),
             sources=self.sources,
+            label_names=self.label_names,
         )
 
 
@@ -178,6 +181,7 @@ def image_collate_fn(batch, a_vocab=None):
         label_tokens=label_tokens,
         grid_feats=None,
         sources=list(sources),
+        label_names=None,
     )
 
 
@@ -226,6 +230,7 @@ def butd_collate_fn(batch, a_vocab=None):
         label_tokens=label_tokens,
         grid_feats=grid_feats,
         sources=list(sources),
+        label_names=list(label_names_list),
     )
 
 

@@ -248,8 +248,8 @@ def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label
 
     # Encode once with Model H signature
     memory, q_hidden, _, v_proj, _ = model.encode(q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask)
-    h = memory.unsqueeze(0).repeat(model.decoder.num_layers, 1, 1)
-    c = torch.zeros_like(h)
+    h, c = model.init_decoder_hidden(memory)
+    mm = None if getattr(model.args, 'no_mac_decoder', False) else memory
     coverage = None
     length_bin = torch.full((B,), 2, dtype=torch.long, device=device)  # LONG bin at inference
 
@@ -261,6 +261,7 @@ def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label
             q_token_ids=q_ids,
             length_bin=length_bin,
             label_tokens=label_tokens,
+            mac_memory=mm,
         )
         next_tok = logit.argmax(dim=-1)              # (B,)
         for b in range(B):
@@ -336,9 +337,8 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_n
         g_b = grid_feat[b:b+1] if grid_feat is not None else None
         lbl_b = label_tokens_batch[b:b+1] if label_tokens_batch is not None else None
 
-        # Initialize hidden states 
-        h0 = m_b.unsqueeze(0).repeat(model.decoder.num_layers, 1, 1)  # (L, 1, H)
-        c0 = torch.zeros_like(h0)
+        # Initialize hidden states (match training init_h1..c2)
+        h0, c0 = model.init_decoder_hidden(m_b)
         len_bin = torch.full((1,), 2, dtype=torch.long, device=device)
 
         # Beam search for this sample
@@ -372,6 +372,8 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_n
             if lbl_b is not None:
                 lbl_rep = lbl_b.expand(k_active, lbl_b.size(1), lbl_b.size(2))
 
+            mac_rep = None if getattr(model.args, 'no_mac_decoder', False) else m_b.expand(k_active, -1)
+
             cov_list = [hyp[4] for hyp in active]
             if all(c is None for c in cov_list):
                 cov_in = None
@@ -386,6 +388,7 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_n
                 q_token_ids=q_ids_rep,
                 length_bin=len_bin_rep,
                 label_tokens=lbl_rep,
+                mac_memory=mac_rep,
             )
 
             if logit.dim() == 3:
@@ -645,17 +648,36 @@ def evaluate_h(args):
         v_dim, grid_dim = 2055, 2048
     print(f"Visual dims: region={v_dim}, grid={grid_dim}")
 
-    # 4. Build model
+    # 4. Load checkpoint first (hyperparameters for matching architecture)
+    if not os.path.exists(args.checkpoint):
+        raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
+
+    ckpt = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+    saved = ckpt.get('args')
+    if isinstance(saved, dict):
+        sd = saved
+    elif saved is None:
+        sd = {}
+    else:
+        sd = vars(saved)
+
+    no_mac = getattr(args, 'no_mac_decoder', False) or sd.get('no_mac_decoder', False)
+    num_mac_hops = args.num_mac_hops if getattr(args, 'num_mac_hops', None) is not None else sd.get('num_mac_hops', 3)
+
+    # 5. Build model
     model_args = argparse.Namespace(
         v_dim=v_dim, grid_dim=grid_dim,
-        dropout=0.5,
+        dropout=sd.get('dropout', 0.5),
         use_fasttext=args.use_fasttext,
-        infonce=False, scst=False,
+        infonce=sd.get('infonce', False),
+        scst=False,
         exact_match_lambda=1.0,
         ohp_lambda=0.0,
         scheduled_sampling=False,
         ss_k=5.0,
-        phase=1,
+        phase=sd.get('phase', 1),
+        no_mac_decoder=no_mac,
+        num_mac_hops=num_mac_hops,
     )
     model = ModelH(len(q_vocab), len(a_vocab), model_args).to(DEVICE)
 
@@ -667,11 +689,6 @@ def evaluate_h(args):
         model.decoder.fc.weight = model.decoder.embedding.weight
         print("FastText embeddings loaded.")
 
-    # 5. Load checkpoint
-    if not os.path.exists(args.checkpoint):
-        raise FileNotFoundError(f"Checkpoint not found: {args.checkpoint}")
-
-    ckpt = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
     state = ckpt.get('model_state_dict', ckpt)
 
     # Strip torch.compile prefix if present
@@ -852,6 +869,10 @@ def parse_args():
                         help='Load FastText embeddings into model')
     parser.add_argument('--save_predictions', action='store_true',
                         help='Save 200 sample predictions to JSON for qualitative analysis')
+    parser.add_argument('--no_mac_decoder', action='store_true',
+                        help='Match checkpoint trained without MAC-in-decoder (ablation)')
+    parser.add_argument('--num_mac_hops', type=int, default=None,
+                        help='Override MAC hops (default: from checkpoint or 3)')
     return parser.parse_args()
 
 

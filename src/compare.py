@@ -41,8 +41,8 @@ from inference import get_model, load_model_from_checkpoint, \
 DEVICE         = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 VAL_IMAGE_DIR  = "data/images/val2014"
 VAL_VQA_E_JSON = "data/annotations/vqa_e/VQA-E_val_set.json"
-VOCAB_JOINT_PATH   = "data/processed/vocabuestions.json"
-VOCAB_A_PATH   = "data/processed/vocabnswers.json"
+VOCAB_JOINT_PATH = "data/processed/vocab_joint.json"
+VOCAB_A_PATH = "data/processed/vocab_answers.json"
 
 
 def decode_tensor(a_tensor, vocab):
@@ -55,7 +55,7 @@ def decode_tensor(a_tensor, vocab):
     return ' '.join(words)
 
 
-def evaluate_one_model(model_type, epoch, vocab, vocab, val_dataset, beam_width=1,
+def evaluate_one_model(model_type, epoch, vocab, val_dataset, beam_width=1,
                        no_repeat_ngram_size=3):
     checkpoint = f"checkpoints/model_{model_type.lower()}_epoch{epoch}.pth"
 
@@ -206,13 +206,15 @@ def main():
 
     model_types = [m.strip().upper() for m in args.models.split(',')]
 
-    vocab = Vocabulary(); vocab.load(VOCAB_JOINT_PATH)
-    vocab = Vocabulary(); vocab.load(VOCAB_A_PATH)
+    vocab = Vocabulary()
+    if os.path.exists(VOCAB_JOINT_PATH):
+        vocab.load(VOCAB_JOINT_PATH)
+    else:
+        vocab.load(VOCAB_A_PATH)
 
     val_dataset = VQAEDataset(
         image_dir=VAL_IMAGE_DIR,
         vqa_e_json_path=VAL_VQA_E_JSON,
-        vocab=vocab,
         vocab=vocab,
         split='val2014',
         max_samples=args.num_samples
@@ -224,7 +226,7 @@ def main():
     results = {}
     for model_type in model_types:
         results[model_type] = evaluate_one_model(
-            model_type, args.epoch, vocab, vocab, val_dataset,
+            model_type, args.epoch, vocab, val_dataset,
             beam_width=args.beam_width,
             no_repeat_ngram_size=args.no_repeat_ngram
         )

@@ -3,7 +3,7 @@ Interactive VQA testing: pick a random image, ask a question, get answers from a
 
 Usage in notebook:
     from interactive import InteractiveVQA
-    ivqa = InteractiveVQA(loaded_models, vocab, vocab, VAL_IMAGE_DIR, device=DEVICE)
+    ivqa = InteractiveVQA(loaded_models, q_vocab, a_vocab, VAL_IMAGE_DIR, device=DEVICE)
     ivqa.pick_image()           # display a random image
     ivqa.ask("What color is the cat?")  # all 4 models answer
 """
@@ -41,21 +41,21 @@ TRANSFORM = transforms.Compose([
 class InteractiveVQA:
     """Interactive VQA session: random image + user question -> 4 model answers."""
 
-    def __init__(self, models, vocab, vocab, image_dir,
+    def __init__(self, models, q_vocab, a_vocab, image_dir,
                  device='cpu', beam_width=3, no_repeat_ngram=3):
         """
         Args:
             models: dict {model_type: model} e.g. {'A': modelA, 'B': modelB, ...}
-            vocab: Vocabulary for questions
-            vocab: Vocabulary for answers
+            q_vocab: Vocabulary for questions
+            a_vocab: Vocabulary for answers (decoder output)
             image_dir: path to val2014 image directory
             device: torch device
             beam_width: beam search width
             no_repeat_ngram: n-gram blocking size for beam search
         """
         self.models = models
-        self.vocab = vocab
-        self.vocab = vocab
+        self.q_vocab = q_vocab
+        self.a_vocab = a_vocab
         self.image_dir = image_dir
         self.device = device
         self.beam_width = beam_width
@@ -115,12 +115,12 @@ class InteractiveVQA:
         # Preprocess
         img_tensor = TRANSFORM(self.current_img_pil)
         q_tensor = torch.tensor(
-            self.vocab.numericalize(question), dtype=torch.long
+            self.q_vocab.numericalize(question), dtype=torch.long
         )
 
         print(f"Image   : {os.path.basename(self.current_img_path)}")
         print(f"Question: {question}")
-        print(f"Tokens  : {self.vocab.tokenize(question)}")
+        print(f"Tokens  : {self.q_vocab.tokenize(question)}")
         print()
 
         # Run inference
@@ -133,20 +133,20 @@ class InteractiveVQA:
                 # Greedy
                 if use_attn:
                     g = greedy_decode_with_attention(
-                        model, img_tensor, q_tensor, self.vocab, device=self.device)
+                        model, img_tensor, q_tensor, self.a_vocab, device=self.device)
                 else:
                     g = greedy_decode(
-                        model, img_tensor, q_tensor, self.vocab, device=self.device)
+                        model, img_tensor, q_tensor, self.a_vocab, device=self.device)
 
                 # Beam search
                 if use_attn:
                     b = beam_search_decode_with_attention(
-                        model, img_tensor, q_tensor, self.vocab,
+                        model, img_tensor, q_tensor, self.a_vocab,
                         device=self.device, beam_width=self.beam_width,
                         no_repeat_ngram_size=self.no_repeat_ngram)
                 else:
                     b = beam_search_decode(
-                        model, img_tensor, q_tensor, self.vocab,
+                        model, img_tensor, q_tensor, self.a_vocab,
                         device=self.device, beam_width=self.beam_width,
                         no_repeat_ngram_size=self.no_repeat_ngram)
 

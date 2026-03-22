@@ -81,7 +81,9 @@ class MACNetwork(nn.Module):
         self.cell = MACCell(dim, max_seq_len)
         self.control_init = nn.Parameter(torch.randn(1, dim))
         self.memory_init = nn.Parameter(torch.randn(1, dim))
-        self.memory_norm = nn.LayerNorm(dim) # RESIDUAL NORM
+        self.memory_norm = nn.LayerNorm(dim)
+        # Gated hop update (Phase B): blend new vs old memory instead of fixed residual add
+        self.hop_gate = nn.Linear(dim * 2, dim)
 
     def forward(self, context, question, kb, kb_mask=None, q_mask=None):
         B = question.size(0)
@@ -90,7 +92,8 @@ class MACNetwork(nn.Module):
         all_attn_weights = []
         for step in range(self.num_hops):
             control, new_memory, attn_weights = self.cell(step, context, question, kb, control, memory, kb_mask, q_mask)
-            memory = self.memory_norm(memory + new_memory) # RESIDUAL CONNECTION
+            g = torch.sigmoid(self.hop_gate(torch.cat([memory, new_memory], dim=-1)))
+            memory = self.memory_norm(g * new_memory + (1.0 - g) * memory)
             all_attn_weights.append(attn_weights)
         return memory, torch.stack(all_attn_weights, dim=1)
 
@@ -122,19 +125,23 @@ class ModelH(nn.Module):
             nn.Dropout(args.dropout)
         )
         
-        # CỔNG GATED FUSION
-        self.gate_linear = nn.Linear(self.dim, self.dim)
+        # Query-conditioned region gating (Phase B): depends on q_feat + global grid
+        self.gate_v = nn.Linear(self.dim, self.dim)
+        self.gate_q = nn.Linear(self.dim, self.dim, bias=False)
         self.fusion_norm = nn.LayerNorm(self.dim)
-        
-        self.mac = MACNetwork(dim=self.dim, num_hops=3)
+
+        num_mac_hops = getattr(args, 'num_mac_hops', 3)
+        self.mac = MACNetwork(dim=self.dim, num_hops=num_mac_hops)
         
         if args.infonce:
             self.v_head = nn.Linear(self.dim, 128)
             self.q_head = nn.Linear(self.dim, 128)
             
+        use_mac_dec = not getattr(args, 'no_mac_decoder', False)
         self.decoder = LSTMDecoderG(
             vocab_size=vocab_a_size, embed_size=embed_dim, hidden_size=self.dim,
-            num_layers=getattr(args, 'num_layers', 2), dropout=getattr(args, 'dropout', 0.5)
+            num_layers=getattr(args, 'num_layers', 2), dropout=getattr(args, 'dropout', 0.5),
+            use_mac_in_decoder=use_mac_dec,
         )
         
         # KHỞI TẠO ĐỘC LẬP CHO LSTM DECODER (Phá vỡ đối xứng)
@@ -142,6 +149,16 @@ class ModelH(nn.Module):
         self.init_c1 = nn.Linear(self.dim, self.dim)
         self.init_h2 = nn.Linear(self.dim, self.dim)
         self.init_c2 = nn.Linear(self.dim, self.dim)
+
+    def init_decoder_hidden(self, memory: torch.Tensor):
+        """Match teacher-forcing init in forward_with_cov (eval / SCST must use this)."""
+        h1 = torch.tanh(self.init_h1(memory))
+        c1 = torch.tanh(self.init_c1(memory))
+        h2 = torch.tanh(self.init_h2(memory))
+        c2 = torch.tanh(self.init_c2(memory))
+        h_0 = torch.stack([h1, h2], dim=0)
+        c_0 = torch.stack([c1, c2], dim=0)
+        return h_0, c_0
         
     def encode(self, q_seq, v_feats, grid_feats=None, img_mask=None):
         B = q_seq.size(0)
@@ -154,8 +171,8 @@ class ModelH(nn.Module):
         g_proj = self.grid_proj(grid_feats) if grid_feats is not None else None  # (B, 1024)
 
         if g_proj is not None:
-            gate = torch.sigmoid(self.gate_linear(g_proj))  # (B, 1024)
-            kb = v_proj * gate.unsqueeze(1)  # Gated Context Modulation
+            gate = torch.sigmoid(self.gate_v(g_proj) + self.gate_q(q_feat))
+            kb = v_proj * gate.unsqueeze(1)
             kb = self.fusion_norm(kb)
         else:
             kb = v_proj
@@ -171,26 +188,29 @@ class ModelH(nn.Module):
     def forward_with_cov(self, q_seq, v_feats, a_seq, 
                          img_mask=None, length_bin=None, label_tokens=None, grid_feats=None):
         memory, context, q_feat, v_proj, mac_attn = self.encode(q_seq, v_feats, grid_feats, img_mask)
+        h_0, c_0 = self.init_decoder_hidden(memory)
         
-        h1 = torch.tanh(self.init_h1(memory))
-        c1 = torch.tanh(self.init_c1(memory))
-        h2 = torch.tanh(self.init_h2(memory))
-        c2 = torch.tanh(self.init_c2(memory))
-        h_0 = torch.stack([h1, h2], dim=0)
-        c_0 = torch.stack([c1, c2], dim=0)
-        
+        mac_in = memory if not getattr(self.args, 'no_mac_decoder', False) else None
         logits, cov_loss = self.decoder(
             (h_0, c_0), v_proj, context, a_seq,
-            q_token_ids=q_seq, img_mask=img_mask, length_bin=length_bin, label_tokens=label_tokens
+            q_token_ids=q_seq, img_mask=img_mask, length_bin=length_bin, label_tokens=label_tokens,
+            mac_memory=mac_in,
         )
         output = VQAOutput(logits=logits)
         output.mac_attn = mac_attn
         return output, cov_loss
 
-    def decode_step(self, token, h, c, V, Q_H=None, coverage=None, img_mask=None, q_token_ids=None, length_bin=None, label_tokens=None):
+    def decode_step(self, token, h, c, V, Q_H=None, coverage=None, img_mask=None, q_token_ids=None, length_bin=None, label_tokens=None, mac_memory=None):
+        if getattr(self.args, 'no_mac_decoder', False):
+            mm = None
+        else:
+            if mac_memory is None:
+                raise ValueError("mac_memory is required when MAC-in-decoder is enabled (Model H)")
+            mm = mac_memory
         logit, (h_new, c_new), img_alpha, coverage_new = self.decoder.decode_step(
             token, (h, c), V, Q_H, coverage=coverage, q_token_ids=q_token_ids,
-            img_mask=img_mask, length_bin=length_bin, label_tokens=label_tokens
+            img_mask=img_mask, length_bin=length_bin, label_tokens=label_tokens,
+            mac_memory=mm,
         )
         return logit, h_new, c_new, img_alpha, coverage_new
 

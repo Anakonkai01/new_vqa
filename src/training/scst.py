@@ -342,7 +342,8 @@ def compute_rewards(
             print(f"  [WARN] CIDEr calculation failed: {e}")
 
     if ohp_weight > 0.0 and ohp_tensor is not None:
-        r = r - ohp_weight * ohp_tensor   # penalty: subtract
+        # r may be CPU (BLEU/METEOR/CIDEr); ohp_tensor is often CUDA from training
+        r = r.to(device=ohp_tensor.device, dtype=torch.float32) - ohp_weight * ohp_tensor.float()
 
     return r
 
@@ -350,7 +351,10 @@ def compute_rewards(
 # ── Greedy decode helper ────────────────────────────────────────────────────────
 
 def _greedy_decode(model, model_type, imgs, questions, vocab,
-                   max_len: int, device, q_token_ids=None) -> List[str]:
+                   max_len: int, device, q_token_ids=None,
+                   grid_feats: Optional[torch.Tensor] = None,
+                   img_mask: Optional[torch.Tensor] = None,
+                   label_tokens: Optional[torch.Tensor] = None) -> List[str]:
     """
     Greedy decode — used to produce the SCST baseline.
     Delegates to model's existing decode infrastructure.
@@ -412,11 +416,12 @@ def _greedy_decode(model, model_type, imgs, questions, vocab,
             end_idx   = vocab.word2idx.get('<end>', 2)
             start_idx = vocab.word2idx.get('<start>', 1)
 
-            memory, Q_H, _, V, _ = model.encode(questions, imgs, grid_feats=None, img_mask=None)
-            h = memory.unsqueeze(0).repeat(model.decoder.num_layers, 1, 1)
-            c = torch.zeros_like(h)
-            
-            length_bin = torch.full((B,), 2, dtype=torch.long, device=device)
+            memory, Q_H, _, V, _ = model.encode(
+                questions, imgs, grid_feats=grid_feats, img_mask=img_mask)
+            h, c = model.init_decoder_hidden(memory)
+            mm = None if getattr(model.args, 'no_mac_decoder', False) else memory
+
+            length_bin = torch.full((B,), 2, dtype=torch.long, device=questions.device)
 
             current_token = torch.full((B,), start_idx, dtype=torch.long, device=device)
             done          = torch.zeros(B, dtype=torch.bool, device=device)
@@ -430,6 +435,9 @@ def _greedy_decode(model, model_type, imgs, questions, vocab,
                     coverage=coverage,
                     q_token_ids=questions,
                     length_bin=length_bin,
+                    label_tokens=label_tokens,
+                    img_mask=img_mask,
+                    mac_memory=mm,
                 )
                 pred = logit.argmax(dim=-1)
                 for b in range(B):
@@ -469,7 +477,10 @@ def _greedy_decode(model, model_type, imgs, questions, vocab,
 # ── Sampling decode ─────────────────────────────────────────────────────────────
 
 def _sampling_decode(model, model_type, imgs, questions, vocab,
-                     max_len: int, device, temperature: float = 1.0
+                     max_len: int, device, temperature: float = 1.0,
+                     grid_feats: Optional[torch.Tensor] = None,
+                     img_mask: Optional[torch.Tensor] = None,
+                     label_tokens: Optional[torch.Tensor] = None,
                      ) -> Tuple[List[str], torch.Tensor]:
     """
     Temperature-sampling decode.  Records per-step log-probabilities so we can
@@ -534,12 +545,12 @@ def _sampling_decode(model, model_type, imgs, questions, vocab,
         return texts, log_prob_sums
 
     elif model_type == 'H':
-        with torch.no_grad():
-            memory, Q_H, _, V, _ = model.encode(questions, imgs, grid_feats=None, img_mask=None)
-            h = memory.unsqueeze(0).repeat(model.decoder.num_layers, 1, 1)
-            c = torch.zeros_like(h)
+        memory, Q_H, _, V, _ = model.encode(
+            questions, imgs, grid_feats=grid_feats, img_mask=img_mask)
+        h, c = model.init_decoder_hidden(memory)
+        mm = None if getattr(model.args, 'no_mac_decoder', False) else memory
 
-        length_bin    = torch.full((B,), 2, dtype=torch.long, device=device)
+        length_bin    = torch.full((B,), 2, dtype=torch.long, device=questions.device)
         current_token = torch.full((B,), start_idx, dtype=torch.long, device=device)
         done          = torch.zeros(B, dtype=torch.bool, device=device)
         log_prob_sums = torch.zeros(B, device=device)
@@ -553,6 +564,9 @@ def _sampling_decode(model, model_type, imgs, questions, vocab,
                 coverage=coverage,
                 q_token_ids=questions,
                 length_bin=length_bin,
+                label_tokens=label_tokens,
+                img_mask=img_mask,
+                mac_memory=mm,
             )
             if temperature != 1.0:
                 logit = logit / temperature
@@ -667,10 +681,14 @@ def scst_step(model, model_type: str, imgs: torch.Tensor, questions: torch.Tenso
               length_bonus_weight: float = 0.0,
               ohp_weight: float = 0.0,
               cider_weight: float = 0.0,
+              exact_match_weight: float = 0.0,
               visual_labels_batch: Optional[List[List[str]]] = None,
               glove_embed: Optional[dict] = None,
               ohp_threshold: float = 0.5,
               return_stats: bool = False,
+              grid_feats: Optional[torch.Tensor] = None,
+              img_mask: Optional[torch.Tensor] = None,
+              label_tokens: Optional[torch.Tensor] = None,
               ) -> torch.Tensor:
     """
     Compute SCST policy-gradient loss for one batch.
@@ -697,12 +715,17 @@ def scst_step(model, model_type: str, imgs: torch.Tensor, questions: torch.Tenso
         loss : scalar — REINFORCE loss (to be .backward()-ed)
     """
     # 1. Greedy baseline (no gradient) — pass questions so PGN activates symmetrically
-    greedy_texts = _greedy_decode(model, model_type, imgs, questions,
-                                  vocab, max_len, device, q_token_ids=questions)
+    greedy_texts = _greedy_decode(
+        model, model_type, imgs, questions,
+        vocab, max_len, device, q_token_ids=questions,
+        grid_feats=grid_feats, img_mask=img_mask, label_tokens=label_tokens,
+    )
 
     # 2. Sampling decode (with gradient)
     sample_texts, log_prob_sums = _sampling_decode(
-        model, model_type, imgs, questions, vocab, max_len, device, temperature)
+        model, model_type, imgs, questions, vocab, max_len, device, temperature,
+        grid_feats=grid_feats, img_mask=img_mask, label_tokens=label_tokens,
+    )
 
     # 3. G4: pre-compute OHP for sample (greedy OHP not needed — same visual labels)
     ohp_sample = None
@@ -719,6 +742,7 @@ def scst_step(model, model_type: str, imgs: torch.Tensor, questions: torch.Tenso
         ohp_weight=ohp_weight,
         ohp_tensor=None,
         cider_weight=cider_weight,
+        exact_match_weight=exact_match_weight,
     ).to(device)
 
     r_sample = compute_rewards(
@@ -729,6 +753,7 @@ def scst_step(model, model_type: str, imgs: torch.Tensor, questions: torch.Tenso
         ohp_weight=ohp_weight,
         ohp_tensor=ohp_sample,
         cider_weight=cider_weight,
+        exact_match_weight=exact_match_weight,
     ).to(device)
 
     # 5. REINFORCE: L = -mean(advantage * log_prob_sum)

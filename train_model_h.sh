@@ -2,7 +2,7 @@
 # ==============================================================================
 # Script: run_master_pipeline_h.sh
 # Trạng thái: PRODUCTION-READY (Auto-Convergence Pipeline)
-# Cấu trúc Curriculum: Phase 1 -> Eval -> Phase 2 -> Eval -> Phase 4 -> Eval
+# Cấu trúc Curriculum: Phase 1 -> Eval -> Phase 2 -> Eval -> Phase 3 (SS) -> Eval -> Phase 4 -> Eval
 # Phần cứng mục tiêu: NVIDIA RTX 5070 Ti (16GB VRAM)
 # ==============================================================================
 
@@ -12,6 +12,8 @@ set -e
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 export CUDA_VISIBLE_DEVICES=0
 export TORCH_CUDNN_V8_API_ENABLED=1
+# torch.compile + long backward kernels can trigger cudaErrorLaunchTimeout on some setups (esp. GPU shared with display).
+# --no_compile below avoids that; re-enable compile only if you train headless and never see timeouts.
 
 # --- CẤU HÌNH ĐƯỜNG DẪN ---
 VG_FEAT_DIR="data/vg_features/"
@@ -53,7 +55,8 @@ python src/train_h.py \
     --wandb \
     --wandb_project "vqa-model-h" \
     --wandb_run_name "model_h_phase1_auto" \
-    --save_legacy_alias
+    --save_legacy_alias \
+    --no_compile
 
 echo ">>> [EVAL 1] ĐÁNH GIÁ PHASE 1..."
 python src/evaluate_h.py \
@@ -89,11 +92,52 @@ python src/train_h.py \
     --wandb \
     --wandb_project "vqa-model-h" \
     --wandb_run_name "model_h_phase2_auto" \
-    --save_legacy_alias
+    --save_legacy_alias \
+    --no_compile
 
 echo ">>> [EVAL 2] ĐÁNH GIÁ PHASE 2..."
 python src/evaluate_h.py \
     --checkpoint checkpoints/h/model_h_phase2_best.pth \
+    --vg_feat_dir ${VG_FEAT_DIR} \
+    --vocab_q_path ${VOCAB_Q} \
+    --vocab_a_path ${VOCAB_A} \
+    --datasets vqa_e vqa_x aokvqa \
+    --use_fasttext \
+    --beam_width 5 \
+    --batch_size ${EVAL_BATCH} \
+    --num_workers ${WORKERS} \
+
+# ==============================================================================
+# PHASE 3: SCHEDULED SAMPLING (BRIDGE TO RL)
+# ==============================================================================
+echo -e "\n\n>>> [PHASE 3] BẮT ĐẦU SCHEDULED SAMPLING..."
+python src/train_h.py \
+    --phase 3 \
+    --epochs 5 \
+    --patience ${PATIENCE} \
+    --lr 2e-4 \
+    --warmup_epochs 0 \
+    --batch_size ${BASE_BATCH} \
+    --dropout ${DROPOUT} \
+    --num_workers ${WORKERS} \
+    --vg_feat_dir ${VG_FEAT_DIR} \
+    --merged_json ${MERGED_JSON} \
+    --vocab_q_path ${VOCAB_Q} \
+    --vocab_a_path ${VOCAB_A} \
+    --infonce \
+    --use_fasttext \
+    --scheduled_sampling \
+    --ss_k 5 \
+    --resume checkpoints/h/model_h_phase2_best.pth \
+    --wandb \
+    --wandb_project "vqa-model-h" \
+    --wandb_run_name "model_h_phase3_ss_auto" \
+    --save_legacy_alias \
+    --no_compile
+
+echo ">>> [EVAL 3] ĐÁNH GIÁ PHASE 3..."
+python src/evaluate_h.py \
+    --checkpoint checkpoints/h/model_h_phase3_best.pth \
     --vg_feat_dir ${VG_FEAT_DIR} \
     --vocab_q_path ${VOCAB_Q} \
     --vocab_a_path ${VOCAB_A} \
@@ -123,11 +167,12 @@ python src/train_h.py \
     --use_fasttext \
     --scst \
     --ohp_lambda 0.1 \
-    --resume checkpoints/h/model_h_phase2_best.pth \
+    --resume checkpoints/h/model_h_phase3_best.pth \
     --wandb \
     --wandb_project "vqa-model-h" \
     --wandb_run_name "model_h_phase4_scst_auto" \
-    --save_legacy_alias
+    --save_legacy_alias \
+    --no_compile
 
 echo ">>> [EVAL 4] ĐÁNH GIÁ PHASE 4 (FINAL)..."
 python src/evaluate_h.py \

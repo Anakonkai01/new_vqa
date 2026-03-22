@@ -233,23 +233,41 @@ class VQAGenerativeDataset(Dataset):
         answer = ann.get("multiple_choice_answer", "")
         source = ann.get("source", "unknown")
 
-        # Pick explanation — randomly sample from list (A-OKVQA has 3 rationales)
-        exp_list = ann.get("explanation", [])
-        valid_exps = [e for e in exp_list if isinstance(e, str) and e.strip()]
-        explanation = random.choice(valid_exps) if valid_exps else ""
-
-        # Build target text
-        a_text = f"{answer} because {explanation}" if explanation else answer
-
-        # Numericalize
-        q_tensor = torch.tensor(self.q_vocab.numericalize(q_text), dtype=torch.long)
-        a_tensor = torch.tensor(self.a_vocab.numericalize(a_text), dtype=torch.long)
-
-        # Length bin (G5) — computed from FULL sequence, not explanation-only
-        if self.always_long:
-            length_bin = LENGTH_BIN_LONG
+        # VQA v2.0: target is a short answer only (pool = list of annotator strings in explanation)
+        if source == "vqa_v2":
+            pool = ann.get("explanation", [])
+            if isinstance(pool, list) and pool:
+                picked = random.choice(
+                    [str(e).strip().lower() for e in pool if isinstance(e, str) and str(e).strip()]
+                )
+            else:
+                picked = (answer or "").strip().lower()
+            a_text = picked
+            explanation = ""
+            q_tensor = torch.tensor(self.q_vocab.numericalize(q_text), dtype=torch.long)
+            a_tensor = torch.tensor(self.a_vocab.numericalize(a_text), dtype=torch.long)
+            if self.always_long:
+                length_bin = LENGTH_BIN_LONG
+            else:
+                length_bin = _full_seq_length_bin(picked, "")
         else:
-            length_bin = _full_seq_length_bin(answer, explanation)
+            # Pick explanation — randomly sample from list (A-OKVQA has 3 rationales)
+            exp_list = ann.get("explanation", [])
+            valid_exps = [e for e in exp_list if isinstance(e, str) and e.strip()]
+            explanation = random.choice(valid_exps) if valid_exps else ""
+
+            # Build target text
+            a_text = f"{answer} because {explanation}" if explanation else answer
+
+            # Numericalize
+            q_tensor = torch.tensor(self.q_vocab.numericalize(q_text), dtype=torch.long)
+            a_tensor = torch.tensor(self.a_vocab.numericalize(a_text), dtype=torch.long)
+
+            # Length bin (G5) — computed from FULL sequence, not explanation-only
+            if self.always_long:
+                length_bin = LENGTH_BIN_LONG
+            else:
+                length_bin = _full_seq_length_bin(answer, explanation)
 
         # Load visual features
         label_names = None
