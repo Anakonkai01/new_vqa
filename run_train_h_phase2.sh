@@ -1,36 +1,32 @@
 #!/bin/bash
-# ====================================================================
-# Model H: Phase 2 Training Script (Teacher Forcing + Replay Buffer)
-# ====================================================================
-# PREREQUISITE: Phase 1 must be completed first. This script resumes
-# from the best Phase 1 checkpoint: checkpoints/h/model_h_phase1_best.pth
-#
-# Key changes vs Phase 1:
-#   - Lower LR (1e-4): brain is already warmed up, don't disrupt it
-#   - Replay Sampler: 80% explanation + 20% VQA v2.0 to prevent catastrophic forgetting
-#   - Higher patience (7): Phase 2 val loss fluctuates more due to distribution shift
-#   - Warmup disabled: resume from stable weights, warmup not needed
-# ====================================================================
+# Phase 2 — cần checkpoints/h/model_h_phase1_best.pth (sau Phase 1).
+set -e
+cd "$(dirname "$0")"
+export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 
-eval "$(conda shell.bash hook)"
-conda activate d2l
-
-echo "=========================================================="
-echo "    MODEL H: PHASE 2 TRAINING STARTING...                "
-echo "    Replay Buffer: 80% Explanation + 20% VQA v2.0        "
-echo "    Resume from: checkpoints/h/model_h_phase1_best.pth   "
-echo "=========================================================="
-echo ""
+VG="data/vg_features/"
+MERGED="data/processed/merged_train_filtered.json"
+VQ="data/processed/vocab_questions.json"
+VA="data/processed/vocab_answers.json"
 
 python src/train_h.py \
     --phase 2 \
     --epochs 50 \
-    --patience 10 \
-    --batch_size 128 \
+    --patience 15 \
     --lr 1e-4 \
-    --warmup_epochs 0 \
-    --resume checkpoints/h/model_h_phase1_best.pth \
-    --vg_feat_dir data/vg_features \
+    --warmup_epochs 1 \
+    --batch_size 128 \
+    --dropout 0.5 \
+    --num_workers 8 \
+    --vg_feat_dir "${VG}" \
+    --merged_json "${MERGED}" \
+    --vocab_q_path "${VQ}" \
+    --vocab_a_path "${VA}" \
+    --infonce \
     --use_fasttext \
+    --resume checkpoints/h/model_h_phase1_best.pth \
+    --wandb \
+    --wandb_project "vqa-model-h" \
+    --wandb_run_name "model_h_phase2" \
     --save_legacy_alias \
-    --wandb
+    --no_compile

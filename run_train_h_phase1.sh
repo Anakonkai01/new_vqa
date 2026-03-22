@@ -1,29 +1,31 @@
 #!/bin/bash
-# ====================================================================
-# Model H: Phase 1 Training Script (Cross-Entropy Warmup)
-# ====================================================================
+# Phase 1 only — đồng bộ với train_model_h.sh (train từ đầu, không --resume).
+set -e
+cd "$(dirname "$0")"
+export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 
-eval "$(conda shell.bash hook)"
-conda activate d2l
-
-echo "=========================================================="
-echo "    MODEl H: PHASE 1 TRAINING STARTING...                 "
-echo "=========================================================="
-echo "Loading pre-extracted ResNeXt-101 features from data/vg_features..."
-echo "Initializing FastText cc.en.300.bin embeddings for vocabulary..."
-echo "=========================================================="
-echo ""
-
-# Note: Batch size 128 is highly optimal for your 16GB VRAM,
-# resulting in smoother mathematical convergence and 50% faster Epoch times.
+VG="data/vg_features/"
+MERGED="data/processed/merged_train_filtered.json"
+VQ="data/processed/vocab_questions.json"
+VA="data/processed/vocab_answers.json"
 
 python src/train_h.py \
     --phase 1 \
-    --epochs 30 \
-    --patience 5 \
+    --epochs 50 \
+    --patience 15 \
+    --lr 1e-3 \
+    --warmup_epochs 2 \
     --batch_size 128 \
-    --lr 5e-4 \
-    --vg_feat_dir data/vg_features \
+    --dropout 0.5 \
+    --num_workers 8 \
+    --vg_feat_dir "${VG}" \
+    --merged_json "${MERGED}" \
+    --vocab_q_path "${VQ}" \
+    --vocab_a_path "${VA}" \
+    --infonce \
     --use_fasttext \
+    --wandb \
+    --wandb_project "vqa-model-h" \
+    --wandb_run_name "model_h_phase1" \
     --save_legacy_alias \
-    --wandb
+    --no_compile

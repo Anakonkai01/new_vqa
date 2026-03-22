@@ -150,16 +150,12 @@ class MultiHeadCrossAttention(nn.Module):
             # coverage: (B, S) → (B, 1, 1, S) to broadcast over heads and query dim
             scores = scores + self.cov_scale * coverage.unsqueeze(1).unsqueeze(2)
 
-        # Mask padding regions before softmax.
-        # Without this, softmax treats zero-padded positions as valid and assigns
-        # them non-zero probability, leaking attention into garbage vectors.
         if mask is not None:
-            # mask: (B, S) bool → (B, 1, 1, S) to broadcast over heads and query dim
-            # ~mask marks padding positions (False → True after invert) → set to -inf
             mask_expanded = mask.unsqueeze(1).unsqueeze(2)                # (B, 1, 1, S)
             scores = scores.masked_fill(~mask_expanded, float('-inf'))
 
         alpha = F.softmax(scores, dim=-1)                                 # (B, nh, 1, S)
+        alpha = torch.nan_to_num(alpha, nan=0.0)
 
         # Weighted sum of values
         context = torch.matmul(alpha, v)                                  # (B, nh, 1, d)

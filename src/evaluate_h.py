@@ -248,7 +248,7 @@ def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label
     outputs   = [[] for _ in range(B)]
 
     # Encode once with Model H signature
-    memory, q_hidden, _, v_proj, _ = model.encode(q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask)
+    memory, q_hidden, _, kb, _v_proj_raw, _ = model.encode(q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask)
     h, c = model.init_decoder_hidden(memory)
     mm = None if getattr(model.args, 'no_mac_decoder', False) else memory
     coverage = None
@@ -256,7 +256,7 @@ def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label
 
     for _ in range(max_len):
         logit, h, c, _, coverage = model.decode_step(
-            dec_input[:, -1:].contiguous(), h, c, v_proj, q_hidden,
+            dec_input[:, -1:].contiguous(), h, c, kb, q_hidden,
             coverage=coverage,
             img_mask=region_mask,
             q_token_ids=q_ids,
@@ -333,8 +333,8 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_n
 
     # ─ Encode all B samples at once (batched on GPU) ╔════════════════════════
     # This is the key optimization: single forward pass for all B samples
-    memory, q_hidden, _, v_proj, _ = model.encode(q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask)
-    # memory: (B, H), q_hidden: (B, H), v_proj: (B, R, H)
+    memory, q_hidden, _, kb, _v_proj_raw, _ = model.encode(q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask)
+    # memory: (B, H), q_hidden: (B, H), kb: (B, R, H)
     
     alpha = 0.7  # length-penalty exponent
     results_ids = []
@@ -344,7 +344,7 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_n
         # Extract per-sample encoder state (no re-encode needed!)
         m_b = memory[b:b+1]  # (1, H)
         q_h_b = q_hidden[b:b+1]  # (1, H)
-        v_p_b = v_proj[b:b+1]  # (1, R, H)
+        v_p_b = kb[b:b+1]  # (1, R, H)
         m_mask_b = region_mask[b:b+1]  # (1, R)
         q_ids_b = q_ids[b:b+1]  # (1, Q)
         g_b = grid_feat[b:b+1] if grid_feat is not None else None
@@ -879,7 +879,7 @@ def parse_args():
                         help='Block repeated n-grams (0=disabled)')
     parser.add_argument('--max_len',     type=int, default=30,
                         help='Maximum explanation generation length')
-    parser.add_argument('--min_decode_len', type=int, default=3,
+    parser.add_argument('--min_decode_len', type=int, default=8,
                         help='Minimum content tokens before allowing <end> (greedy/beam)')
     parser.add_argument('--batch_size',  type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=8)

@@ -1,28 +1,34 @@
 #!/bin/bash
-# =============================
-# Model H: Phase 4 Training
-# =============================
-# Only use explanation data (VQA-E, VQA-X, A-OKVQA), no VQA2.0
-# SCST Reinforcement Learning (Self-Critical Sequence Training)
-# Assumes you have already run Phase 3 and have a best checkpoint
-
+# Phase 4 — SCST. Cần checkpoints/h/model_h_phase3_best.pth. Batch nhỏ hơn để tránh OOM.
 set -e
+cd "$(dirname "$0")"
+export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 
-PHASE=4
-EPOCHS=5
-BATCH_SIZE=128
-LR=1e-4
-PATIENCE=2
+VG="data/vg_features/"
+MERGED="data/processed/merged_train_filtered.json"
+VQ="data/processed/vocab_questions.json"
+VA="data/processed/vocab_answers.json"
 
 python src/train_h.py \
-    --phase $PHASE \
-    --epochs $EPOCHS \
-    --batch_size $BATCH_SIZE \
-    --lr $LR \
-    --patience $PATIENCE \
-    --resume checkpoints/h/model_h_phase3_best.pth \
-    --vg_feat_dir data/vg_features \
+    --phase 4 \
+    --epochs 50 \
+    --patience 15 \
+    --lr 1e-5 \
+    --warmup_epochs 0 \
+    --batch_size 64 \
+    --dropout 0.5 \
+    --num_workers 8 \
+    --vg_feat_dir "${VG}" \
+    --merged_json "${MERGED}" \
+    --vocab_q_path "${VQ}" \
+    --vocab_a_path "${VA}" \
     --use_fasttext \
+    --infonce \
     --scst \
+    --ohp_lambda 0.1 \
+    --resume checkpoints/h/model_h_phase3_best.pth \
+    --wandb \
+    --wandb_project "vqa-model-h" \
+    --wandb_run_name "model_h_phase4" \
     --save_legacy_alias \
-    --wandb
+    --no_compile

@@ -50,19 +50,6 @@ def _model_state_dict_for_save(model):
     return sd
 
 
-def _apply_lr_from_saved_optimizer(optimizer, saved_opt_sd):
-    """If load_state_dict fails, copy per-group lr/weight_decay when group counts match."""
-    sg = saved_opt_sd.get('param_groups', [])
-    cg = optimizer.param_groups
-    if len(sg) != len(cg):
-        return False
-    for i in range(len(sg)):
-        cg[i]['lr'] = sg[i]['lr']
-        if 'weight_decay' in sg[i]:
-            cg[i]['weight_decay'] = sg[i]['weight_decay']
-    return True
-
-
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--phase', type=int, default=1)
@@ -110,9 +97,6 @@ def parse_args():
     # D: entropy + SCST composite
     parser.add_argument('--entropy_mac_coef', type=float, default=0.05,
                         help='Weight for MAC attention entropy penalty')
-    parser.add_argument('--decoder_embed_low_lr', action='store_true',
-                        help='Put decoder.embedding in the low-LR group with q_emb. '
-                             'Disable for resume from checkpoints saved without this layout.')
     parser.add_argument('--scst_bleu', type=float, default=0.3)
     parser.add_argument('--scst_meteor', type=float, default=0.3)
     parser.add_argument('--scst_exact_match', type=float, default=0.0)
@@ -125,7 +109,7 @@ def _ss_forward_h(model, questions, feats, dec_input, epsilon,
     """Scheduled sampling for Model H (token-level). Matches train.py / train_g pattern."""
     B = feats.size(0)
     max_len = dec_input.size(1)
-    memory, context, _qfeat, v_proj, _ = model.encode(
+    memory, context, _qfeat, kb, _v_proj_raw, _ = model.encode(
         questions, feats, grid_feats=grid_feats, img_mask=img_mask)
     h, c = model.init_decoder_hidden(memory)
     if length_bin is None:
@@ -137,7 +121,7 @@ def _ss_forward_h(model, questions, feats, dec_input, epsilon,
     for t in range(max_len):
         tok = current_tok.unsqueeze(1)
         logit, h, c, _, coverage = model.decode_step(
-            tok, h, c, v_proj, context,
+            tok, h, c, kb, context,
             coverage=coverage,
             img_mask=img_mask,
             q_token_ids=questions,
@@ -235,24 +219,14 @@ def train_h(args):
     else: args.v_dim, args.grid_dim = 2055, 2048
         
     model = ModelH(len(q_vocab), len(a_vocab), args).to(DEVICE)
-    
-    if args.use_fasttext:
-        q_mat, _ = build_fasttext_matrix(q_vocab.word2idx)
-        model.q_emb.weight.data.copy_(q_mat)
-        a_mat, _ = build_fasttext_matrix(a_vocab.word2idx)
-        model.decoder.embedding.weight.data.copy_(a_mat)
-        model.decoder.fc.weight = model.decoder.embedding.weight
-        
+
     if torch.cuda.is_available() and hasattr(torch, 'compile') and not getattr(args, 'no_compile', False):
         try:
             model = torch.compile(model, mode='default', dynamic=True)
         except Exception:
             pass
 
-    # Phân tầng LR: q_emb luôn LR thấp; decoder.embedding chỉ khi --decoder_embed_low_lr (không khớp checkpoint cũ)
-    embed_params = list(model.q_emb.parameters())
-    if getattr(args, 'decoder_embed_low_lr', False):
-        embed_params = embed_params + list(model.decoder.embedding.parameters())
+    embed_params = list(model.q_emb.parameters()) + list(model.decoder.embedding.parameters())
     emb_ids = {id(p) for p in embed_params}
     base_params = [p for n, p in model.named_parameters() if id(p) not in emb_ids]
     optimizer = optim.AdamW([
@@ -281,6 +255,7 @@ def train_h(args):
     start_epoch, best_val_loss, epochs_no_improve = 0, float('inf'), 0
     history = {'train_loss': [], 'val_loss': [], 'lr': []}
 
+    ckpt = None
     if args.resume and os.path.exists(args.resume):
         ckpt = torch.load(args.resume, map_location='cpu', weights_only=False)
         _sd = _normalize_ckpt_state_dict(ckpt['model_state_dict'], model)
@@ -299,10 +274,6 @@ def train_h(args):
                 optimizer_loaded = True
             except Exception as e:
                 print(f"[resume] optimizer load skipped: {e}")
-                if _apply_lr_from_saved_optimizer(optimizer, ckpt['optimizer_state_dict']):
-                    print("[resume] copied per-group lr/weight_decay from checkpoint optimizer")
-                else:
-                    print("[resume] could not align optimizer LRs from checkpoint; using freshly initialized LRs")
             # Scheduler state is tied to optimizer step; only restore if optimizer matched
             if optimizer_loaded:
                 if ckpt.get('cosine_sched_state_dict') is not None:
@@ -318,6 +289,16 @@ def train_h(args):
             else:
                 print("[resume] schedulers not loaded (optimizer state incompatible); cosine/warmup restart from current build")
 
+    # FastText after resume so Phase 2 is not overwritten by Phase-1 CE weights when prev run had no FastText.
+    if args.use_fasttext:
+        prev_ft = ckpt.get('args', {}).get('use_fasttext', False) if ckpt is not None else False
+        if ckpt is None or not prev_ft:
+            q_mat, _ = build_fasttext_matrix(q_vocab.word2idx)
+            model.q_emb.weight.data.copy_(q_mat)
+            a_mat, _ = build_fasttext_matrix(a_vocab.word2idx)
+            model.decoder.embedding.weight.data.copy_(a_mat)
+            model.decoder.fc.weight = model.decoder.embedding.weight
+
     glove_embed = None
     if args.scst and args.phase == 4 and args.ohp_lambda > 0:
         glove_embed = {w: model.decoder.embedding.weight[i].detach().cpu().numpy() for w, i in a_vocab.word2idx.items()}
@@ -329,11 +310,13 @@ def train_h(args):
         except Exception as e:
             print(f"[SCST] WARNING: CIDEr not available — install pycocoevalcap. ({e})")
 
+    MAX_CONSEC_NAN = 50
     global_step = start_epoch * max(1, len(train_loader))
     for epoch in range(start_epoch, start_epoch + args.epochs):
         model.train()
         ep_loss, ep_acc, ep_gnorm = 0.0, 0.0, 0.0
         ep_entropy = 0.0
+        consec_nan = 0
 
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]")
         for step_idx, batch in enumerate(train_pbar):
@@ -364,6 +347,20 @@ def train_h(args):
                         questions, feats, dec_in, img_mask=img_mask, length_bin=length_bin,
                         label_tokens=label_tokens, grid_feats=grid_feats,
                     )
+                    if not torch.isfinite(out.logits).all():
+                        loss = out.logits.new_tensor(float('nan'))
+                        consec_nan += 1
+                        if consec_nan <= 3 or consec_nan % 20 == 0:
+                            print(f"[WARN] NaN in model output at epoch {epoch+1} step {step_idx} (consec={consec_nan})")
+                        optimizer.zero_grad(set_to_none=True)
+                        if use_scaler:
+                            scaler.update()
+                        if consec_nan % 10 == 0:
+                            torch.cuda.empty_cache()
+                        if consec_nan >= MAX_CONSEC_NAN:
+                            print(f"[CRITICAL] {MAX_CONSEC_NAN} consecutive NaN outputs — aborting epoch {epoch+1}")
+                            break
+                        continue
                     ce_loss = criterion(out.logits, dec_tgt)
                     mac_attn = getattr(out, 'mac_attn', None)
                     entropy_loss = attention_entropy_penalty(mac_attn, eps=1e-7, reference_device=DEVICE)
@@ -416,9 +413,19 @@ def train_h(args):
                         loss = loss * 0.5 + rl_loss * 0.5
 
             if not torch.isfinite(loss).item():
-                print(f"[WARN] non-finite loss at epoch {epoch+1} step {step_idx} — skipping step")
+                consec_nan += 1
+                if consec_nan <= 3 or consec_nan % 20 == 0:
+                    print(f"[WARN] non-finite loss at epoch {epoch+1} step {step_idx} — skipping step (consec={consec_nan})")
                 optimizer.zero_grad(set_to_none=True)
+                if use_scaler:
+                    scaler.update()
+                if consec_nan % 10 == 0:
+                    torch.cuda.empty_cache()
+                if consec_nan >= MAX_CONSEC_NAN:
+                    print(f"[CRITICAL] {MAX_CONSEC_NAN} consecutive NaN steps — aborting epoch {epoch+1}")
+                    break
                 continue
+            consec_nan = 0
 
             if use_scaler:
                 scaler.scale(loss).backward()

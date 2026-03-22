@@ -225,7 +225,9 @@ class LSTMDecoderG(nn.Module):
                 lstm_input = torch.cat([embed_t, img_context, q_context, len_emb], dim=1)
 
             output, hidden = self.lstm(lstm_input.unsqueeze(1), hidden)
-            vocab_logit = self.fc(self.out_proj(output.squeeze(1)))  # (B, V)
+            out_vec = output.squeeze(1)
+            with torch.amp.autocast(device_type=out_vec.device.type, enabled=False):
+                vocab_logit = self.fc(self.out_proj(out_vec.float()))
 
             # G2: three-way PGN
             p_g, p_cQ, p_cV = self.pgn(img_context, h_top, lstm_input)
@@ -308,7 +310,9 @@ class LSTMDecoderG(nn.Module):
         else:
             lstm_input = torch.cat([embed_1d, img_context, q_context, len_emb], dim=1)
         output, hidden = self.lstm(lstm_input.unsqueeze(1), hidden)
-        vocab_logit = self.fc(self.out_proj(output.squeeze(1)))  # (B, V)
+        out_vec = output.squeeze(1)
+        with torch.amp.autocast(device_type=out_vec.device.type, enabled=False):
+            vocab_logit = self.fc(self.out_proj(out_vec.float()))
 
         # G2: three-way blend
         p_g, p_cQ, p_cV = self.pgn(img_context, h_top, lstm_input)

@@ -1,31 +1,34 @@
 #!/bin/bash
-# =============================
-# Model H: Phase 3 Training
-# =============================
-# Only use explanation data (VQA-E, VQA-X, A-OKVQA), no VQA2.0
-# Scheduled sampling enabled
-# Assumes you have already run Phase 2 and have a best checkpoint
-
+# Phase 3 — scheduled sampling. Cần checkpoints/h/model_h_phase2_best.pth.
 set -e
+cd "$(dirname "$0")"
+export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 
-PHASE=3
-EPOCHS=30
-BATCH_SIZE=128
-LR=2e-4
-PATIENCE=5
-SS_K=5
+VG="data/vg_features/"
+MERGED="data/processed/merged_train_filtered.json"
+VQ="data/processed/vocab_questions.json"
+VA="data/processed/vocab_answers.json"
 
 python src/train_h.py \
-    --phase $PHASE \
-    --epochs $EPOCHS \
-    --batch_size $BATCH_SIZE \
-    --lr $LR \
-    --patience $PATIENCE \
+    --phase 3 \
+    --epochs 30 \
+    --patience 15 \
+    --lr 2e-4 \
     --warmup_epochs 0 \
-    --resume checkpoints/h/model_h_phase2_best.pth \
-    --vg_feat_dir data/vg_features \
+    --batch_size 128 \
+    --dropout 0.5 \
+    --num_workers 8 \
+    --vg_feat_dir "${VG}" \
+    --merged_json "${MERGED}" \
+    --vocab_q_path "${VQ}" \
+    --vocab_a_path "${VA}" \
+    --infonce \
     --use_fasttext \
     --scheduled_sampling \
-    --ss_k $SS_K \
+    --ss_k 5 \
+    --resume checkpoints/h/model_h_phase2_best.pth \
+    --wandb \
+    --wandb_project "vqa-model-h" \
+    --wandb_run_name "model_h_phase3" \
     --save_legacy_alias \
-    --wandb
+    --no_compile

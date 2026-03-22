@@ -14,15 +14,23 @@ from models.decoders.attention import LSTMDecoderG
 from models.base import VQAOutput
 
 class ControlUnit(nn.Module):
-    def __init__(self, dim, max_seq_len):
+    def __init__(self, dim, max_seq_len, num_hops=3):
         super().__init__()
         self.dim = dim
         self.control_question_proj = nn.Linear(dim * 2, dim)
+        self.step_emb = nn.Embedding(num_hops, dim)
+        nn.init.normal_(self.step_emb.weight, std=0.01)
+        self.step_proj = nn.Linear(dim, dim, bias=False)
+        nn.init.zeros_(self.step_proj.weight)
         self.attn_proj = nn.Linear(dim, 1)
 
     def forward(self, step, context, question, control_state, q_mask=None):
+        B = control_state.size(0)
         cq = torch.cat([control_state, question], dim=1) # (B, 2D)
-        cq_proj = self.control_question_proj(cq).unsqueeze(1) # (B, 1, D)
+        cq_proj = self.control_question_proj(cq) # (B, D)
+        step_t = torch.full((B,), step, dtype=torch.long, device=control_state.device)
+        cq_proj = cq_proj + self.step_proj(self.step_emb(step_t)) # additive step bias
+        cq_proj = cq_proj.unsqueeze(1) # (B, 1, D)
         interaction = cq_proj * context # (B, L, D)
         attn_logits = self.attn_proj(interaction).squeeze(-1) # (B, L)
         if q_mask is not None:
@@ -64,9 +72,9 @@ class WriteUnit(nn.Module):
         return self.proj(concat)
 
 class MACCell(nn.Module):
-    def __init__(self, dim, max_seq_len):
+    def __init__(self, dim, max_seq_len, num_hops=3):
         super().__init__()
-        self.control = ControlUnit(dim, max_seq_len)
+        self.control = ControlUnit(dim, max_seq_len, num_hops=num_hops)
         self.read = ReadUnit(dim)
         self.write = WriteUnit(dim)
 
@@ -80,7 +88,7 @@ class MACNetwork(nn.Module):
     def __init__(self, dim, num_hops=3, max_seq_len=20):
         super().__init__()
         self.num_hops = num_hops
-        self.cell = MACCell(dim, max_seq_len)
+        self.cell = MACCell(dim, max_seq_len, num_hops=num_hops)
         # Small init avoids saturating LayerNorm/tanh in early hops (randn ~ N(0,1) → ||·|| ~ O(√D))
         self.control_init = nn.Parameter(torch.zeros(1, dim))
         self.memory_init = nn.Parameter(torch.zeros(1, dim))
@@ -185,24 +193,23 @@ class ModelH(nn.Module):
 
         memory, mac_attn = self.mac(context, q_feat, kb, kb_mask, q_mask)
 
-        # TRẢ VỀ 5 BIẾN (Chú ý: scst.py và evaluate.py sẽ bị lỗi nếu không update)
-        return memory, context, q_feat, v_proj, mac_attn
+        return memory, context, q_feat, kb, v_proj, mac_attn
         
     def forward_with_cov(self, q_seq, v_feats, a_seq, 
                          img_mask=None, length_bin=None, label_tokens=None, grid_feats=None):
-        memory, context, q_feat, v_proj, mac_attn = self.encode(q_seq, v_feats, grid_feats, img_mask)
+        memory, context, q_feat, kb, v_proj_raw, mac_attn = self.encode(q_seq, v_feats, grid_feats, img_mask)
         h_0, c_0 = self.init_decoder_hidden(memory)
-        
+
         mac_in = memory if not getattr(self.args, 'no_mac_decoder', False) else None
         logits, cov_loss = self.decoder(
-            (h_0, c_0), v_proj, context, a_seq,
+            (h_0, c_0), kb, context, a_seq,
             q_token_ids=q_seq, img_mask=img_mask, length_bin=length_bin, label_tokens=label_tokens,
             mac_memory=mac_in,
         )
         output = VQAOutput(logits=logits)
         output.mac_attn = mac_attn
         if getattr(self.args, 'infonce', False) and hasattr(self, 'v_head'):
-            output.infonce_loss = self._infonce_loss_symmetric(v_proj, q_feat, img_mask)
+            output.infonce_loss = self._infonce_loss_symmetric(v_proj_raw, q_feat, img_mask)
         else:
             output.infonce_loss = None
         return output, cov_loss
@@ -226,13 +233,13 @@ class ModelH(nn.Module):
             B = z_q.size(0)
             if B < 2:
                 return v_proj.new_zeros(())
-            logits_qv = torch.mm(z_q, z_v.t()) / 0.07
-            logits_vq = torch.mm(z_v, z_q.t()) / 0.07
+            logits_qv = (torch.mm(z_q, z_v.t()) / 0.07).clamp(-100, 100)
+            logits_vq = (torch.mm(z_v, z_q.t()) / 0.07).clamp(-100, 100)
             labels = torch.arange(B, device=dev)
             loss = (
                 F.cross_entropy(logits_qv, labels) + F.cross_entropy(logits_vq, labels)
             ) * 0.5
-        return loss.to(v_proj.dtype)
+        return loss
 
     def decode_step(self, token, h, c, V, Q_H=None, coverage=None, img_mask=None, q_token_ids=None, length_bin=None, label_tokens=None, mac_memory=None):
         if getattr(self.args, 'no_mac_decoder', False):
@@ -252,5 +259,5 @@ class ModelH(nn.Module):
         """Legacy path (extra encode). Prefer infonce_loss from forward_with_cov in training."""
         if not hasattr(self, 'v_head'):
             return torch.zeros((), device=q_seq.device, dtype=torch.float32)
-        _, _, q_feat, v_proj, _ = self.encode(q_seq, v_feats, grid_feats, img_mask)
-        return self._infonce_loss_symmetric(v_proj, q_feat, img_mask)
+        _, _, q_feat, _kb, v_proj_raw, _ = self.encode(q_seq, v_feats, grid_feats, img_mask)
+        return self._infonce_loss_symmetric(v_proj_raw, q_feat, img_mask)

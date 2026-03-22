@@ -416,8 +416,9 @@ def _greedy_decode(model, model_type, imgs, questions, vocab,
             end_idx   = vocab.word2idx.get('<end>', 2)
             start_idx = vocab.word2idx.get('<start>', 1)
 
-            memory, Q_H, _, V, _ = model.encode(
+            memory, Q_H, _, kb, _v_raw, _ = model.encode(
                 questions, imgs, grid_feats=grid_feats, img_mask=img_mask)
+            V = kb
             h, c = model.init_decoder_hidden(memory)
             mm = None if getattr(model.args, 'no_mac_decoder', False) else memory
 
@@ -545,8 +546,9 @@ def _sampling_decode(model, model_type, imgs, questions, vocab,
         return texts, log_prob_sums
 
     elif model_type == 'H':
-        memory, Q_H, _, V, _ = model.encode(
+        memory, Q_H, _, kb, _v_raw, _ = model.encode(
             questions, imgs, grid_feats=grid_feats, img_mask=img_mask)
+        V = kb
         h, c = model.init_decoder_hidden(memory)
         mm = None if getattr(model.args, 'no_mac_decoder', False) else memory
 

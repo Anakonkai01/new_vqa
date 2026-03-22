@@ -1,13 +1,12 @@
 #!/bin/bash
 # ==============================================================================
-# Script: run_master_pipeline_h.sh
-# Trạng thái: PRODUCTION-READY (Auto-Convergence Pipeline)
-# Cấu trúc Curriculum: Phase 1 -> Eval -> Phase 2 -> Eval -> Phase 3 (SS) -> Eval -> Phase 4 -> Eval
-# Phần cứng mục tiêu: NVIDIA RTX 5070 Ti (16GB VRAM)
+# Model H — full curriculum (Phase 1→4 + eval). Chạy từ thư mục gốc repo:
+#   cd /path/to/new_vqa && bash train_model_h.sh
 # ==============================================================================
 
-# Dừng script ngay lập tức nếu có bất kỳ lệnh nào trả về mã lỗi (non-zero exit code)
 set -e
+
+cd "$(dirname "$0")"
 
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 export CUDA_VISIBLE_DEVICES=0
@@ -52,6 +51,7 @@ python src/train_h.py \
     --vocab_q_path ${VOCAB_Q} \
     --vocab_a_path ${VOCAB_A} \
     --infonce \
+    --use_fasttext \
     --wandb \
     --wandb_project "vqa-model-h" \
     --wandb_run_name "model_h_phase1_auto" \
@@ -68,6 +68,7 @@ python src/evaluate_h.py \
     --beam_width 5 \
     --batch_size ${EVAL_BATCH} \
     --num_workers ${WORKERS} \
+    --use_fasttext \
 
 # ==============================================================================
 # PHASE 2: MASTERY & FASTTEXT INTEGRATION
@@ -113,7 +114,7 @@ python src/evaluate_h.py \
 echo -e "\n\n>>> [PHASE 3] BẮT ĐẦU SCHEDULED SAMPLING..."
 python src/train_h.py \
     --phase 3 \
-    --epochs 5 \
+    --epochs 30 \
     --patience ${PATIENCE} \
     --lr 2e-4 \
     --warmup_epochs 0 \
@@ -165,6 +166,7 @@ python src/train_h.py \
     --vocab_q_path ${VOCAB_Q} \
     --vocab_a_path ${VOCAB_A} \
     --use_fasttext \
+    --infonce \
     --scst \
     --ohp_lambda 0.1 \
     --resume checkpoints/h/model_h_phase3_best.pth \

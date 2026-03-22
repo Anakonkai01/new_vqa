@@ -170,41 +170,46 @@ class ThreeWayPGNHead(nn.Module):
 
         Returns: (B, V) log-probabilities (ready for NLLLoss).
         """
+        dev = vocab_logits.device
+        orig_dtype = vocab_logits.dtype
         B = p_g.size(0)
 
-        # Source 1: vocabulary distribution
-        p_vocab = F.softmax(vocab_logits, dim=-1)   # (B, V)
+        with torch.amp.autocast(device_type=dev.type, enabled=False):
+            vl = vocab_logits.float().clamp(-50, 50)
+            pg  = p_g.float()
+            pcq = p_cQ.float()
+            pcv = p_cV.float()
 
-        # Source 2: question copy — scatter q_alpha onto vocab positions
-        p_copy_q = vocab_logits.new_zeros(B, vocab_size)
-        if q_token_ids is not None and q_alpha is not None:
-            ids_q = q_token_ids.clamp(0, vocab_size - 1)   # (B, q_len)
-            p_copy_q.scatter_add_(1, ids_q, q_alpha.to(p_copy_q.dtype))
+            # Source 1: vocabulary distribution
+            p_vocab = F.softmax(vl, dim=-1)   # (B, V)
 
-        # Source 3: visual label copy — distribute img_alpha / |tokens_i| per region (Eq 31)
-        p_copy_v = vocab_logits.new_zeros(B, vocab_size)
-        if label_tokens is not None:
-            k      = label_tokens.size(1)
-            max_t  = label_tokens.size(2)
-            # Number of valid (non-zero) tokens per region: (B, k)
-            counts = (label_tokens > 0).sum(dim=-1).float().clamp(min=1.0)
-            # Per-token weight = alpha_i / count_i → (B, k)
-            per_tok = img_alpha.to(counts.dtype) / counts
-            # Expand to (B, k, max_t) then flatten to (B, k*max_t)
-            per_tok = per_tok.unsqueeze(-1).expand(-1, -1, max_t)
-            flat_ids     = label_tokens.view(B, -1).clamp(0, vocab_size - 1)
-            flat_weights = per_tok.contiguous().view(B, -1)
-            # Zero out padding entries (label_token == 0 means padding)
-            flat_mask    = (label_tokens.view(B, -1) > 0).float()
-            flat_weights = flat_weights * flat_mask
-            p_copy_v.scatter_add_(1, flat_ids, flat_weights.to(p_copy_v.dtype))
+            # Source 2: question copy — scatter q_alpha onto vocab positions
+            p_copy_q = vl.new_zeros(B, vocab_size)
+            if q_token_ids is not None and q_alpha is not None:
+                ids_q = q_token_ids.clamp(0, vocab_size - 1)
+                p_copy_q.scatter_add_(1, ids_q, q_alpha.float())
 
-        # Blend: p_g * P_vocab + p_cQ * P_copy_Q + p_cV * P_copy_V
-        out = (p_g.unsqueeze(1)  * p_vocab
-             + p_cQ.unsqueeze(1) * p_copy_q
-             + p_cV.unsqueeze(1) * p_copy_v)
-        out = out.clamp(min=1e-10)
-        return out.log()   # (B, V) log-probabilities
+            # Source 3: visual label copy — distribute img_alpha / |tokens_i| per region (Eq 31)
+            p_copy_v = vl.new_zeros(B, vocab_size)
+            if label_tokens is not None:
+                k      = label_tokens.size(1)
+                max_t  = label_tokens.size(2)
+                counts = (label_tokens > 0).sum(dim=-1).float().clamp(min=1.0)
+                per_tok = img_alpha.float() / counts
+                per_tok = per_tok.unsqueeze(-1).expand(-1, -1, max_t)
+                flat_ids     = label_tokens.view(B, -1).clamp(0, vocab_size - 1)
+                flat_weights = per_tok.contiguous().view(B, -1)
+                flat_mask    = (label_tokens.view(B, -1) > 0).float()
+                flat_weights = flat_weights * flat_mask
+                p_copy_v.scatter_add_(1, flat_ids, flat_weights)
+
+            # Blend: p_g * P_vocab + p_cQ * P_copy_Q + p_cV * P_copy_V
+            out = (pg.unsqueeze(1)  * p_vocab
+                 + pcq.unsqueeze(1) * p_copy_q
+                 + pcv.unsqueeze(1) * p_copy_v)
+            out = out.clamp(min=1e-10)
+            out = out / out.sum(dim=-1, keepdim=True).clamp(min=1e-10)
+            return out.log().to(orig_dtype)
 
 
 if __name__ == "__main__":
