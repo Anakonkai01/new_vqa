@@ -5,6 +5,8 @@ _SRC = os.path.dirname(os.path.dirname(__file__))
 if _SRC not in sys.path:
     sys.path.insert(0, _SRC)
 
+from typing import Optional
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -200,24 +202,37 @@ class ModelH(nn.Module):
         output = VQAOutput(logits=logits)
         output.mac_attn = mac_attn
         if getattr(self.args, 'infonce', False) and hasattr(self, 'v_head'):
-            output.infonce_loss = self._infonce_loss_symmetric(memory, q_feat)
+            output.infonce_loss = self._infonce_loss_symmetric(v_proj, q_feat, img_mask)
         else:
             output.infonce_loss = None
         return output, cov_loss
 
-    def _infonce_loss_symmetric(self, memory: torch.Tensor, q_feat: torch.Tensor) -> torch.Tensor:
-        """Contrastive align MAC memory (reasoned visual) ↔ question; single encode, symmetric CE."""
-        z_v = F.normalize(self.v_head(memory), dim=1)
-        z_q = F.normalize(self.q_head(q_feat), dim=1)
-        B = z_q.size(0)
-        if B < 2:
-            return memory.new_zeros(())
-        logits_qv = torch.mm(z_q, z_v.t()) / 0.07
-        logits_vq = torch.mm(z_v, z_q.t()) / 0.07
-        labels = torch.arange(B, device=z_q.device)
-        return (
-            F.cross_entropy(logits_qv, labels) + F.cross_entropy(logits_vq, labels)
-        ) * 0.5
+    def _infonce_loss_symmetric(
+        self, v_proj: torch.Tensor, q_feat: torch.Tensor, img_mask: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """Contrastive align visual regions (masked mean) ↔ question — avoids circular MAC-vs-Q alignment."""
+        dev = v_proj.device
+        with torch.amp.autocast(device_type=dev.type, enabled=False):
+            vp = v_proj.float()
+            q = q_feat.float()
+            if img_mask is not None:
+                m = img_mask.float().unsqueeze(-1)
+                cnt = m.sum(dim=1, keepdim=True).clamp(min=1.0)
+                v_bar = (vp * m).sum(dim=1) / cnt.squeeze(-1)
+            else:
+                v_bar = vp.mean(dim=1)
+            z_v = F.normalize(self.v_head(v_bar), dim=1)
+            z_q = F.normalize(self.q_head(q), dim=1)
+            B = z_q.size(0)
+            if B < 2:
+                return v_proj.new_zeros(())
+            logits_qv = torch.mm(z_q, z_v.t()) / 0.07
+            logits_vq = torch.mm(z_v, z_q.t()) / 0.07
+            labels = torch.arange(B, device=dev)
+            loss = (
+                F.cross_entropy(logits_qv, labels) + F.cross_entropy(logits_vq, labels)
+            ) * 0.5
+        return loss.to(v_proj.dtype)
 
     def decode_step(self, token, h, c, V, Q_H=None, coverage=None, img_mask=None, q_token_ids=None, length_bin=None, label_tokens=None, mac_memory=None):
         if getattr(self.args, 'no_mac_decoder', False):
@@ -237,5 +252,5 @@ class ModelH(nn.Module):
         """Legacy path (extra encode). Prefer infonce_loss from forward_with_cov in training."""
         if not hasattr(self, 'v_head'):
             return torch.zeros((), device=q_seq.device, dtype=torch.float32)
-        memory, _, q_feat, _, _ = self.encode(q_seq, v_feats, grid_feats, img_mask)
-        return self._infonce_loss_symmetric(memory, q_feat)
+        _, _, q_feat, v_proj, _ = self.encode(q_seq, v_feats, grid_feats, img_mask)
+        return self._infonce_loss_symmetric(v_proj, q_feat, img_mask)

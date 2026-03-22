@@ -146,12 +146,15 @@ class FocalSequenceLoss(nn.Module):
             scalar loss
         """
         B, T, V = logits.shape
+        lf = logits.float()
 
-        # Auto-detect: log-probs have max ≤ 0
-        if logits.max().item() <= 0.01:
-            log_p = logits
-        else:
-            log_p = F.log_softmax(logits, dim=-1)   # (B, T, V)
+        # Model H (PGN): blend_3way returns log-probabilities (logsumexp ≈ 0 per position).
+        # Model G / plain decoder: raw logits — need log_softmax.
+        # Detect without .item() (avoids GPU sync): true log-probs have logsumexp ≈ 0.
+        with torch.no_grad():
+            lse_peak = torch.logsumexp(lf, dim=-1).abs().max()
+        is_logprob = lse_peak < 0.5
+        log_p = torch.where(is_logprob, lf, F.log_softmax(lf, dim=-1))
 
         # Gather log p_t for ground-truth token
         tgt_clamp = targets.clamp(min=0)   # (B, T)
@@ -191,12 +194,14 @@ def build_criterion(
     label_smoothing: float = 0.1,
     use_focal: bool = True,
     ignore_index: int = 0,
+    decoder_emits_log_probs: bool = False,
 ) -> nn.Module:
     """
     Factory for Model G sequence loss criterion.
 
     Phase 1-3: use_focal=True  (FocalSequenceLoss, gamma=2.0, eps=0.1)
-    Phase 4:   use_focal=False (plain NLL with label smoothing, per spec)
+    Phase 4:   use_focal=False — use _NLLSequenceLoss if decoder outputs log-probs (PGN),
+               else _PlainCEWrapper for raw logits.
 
     Returns callable (B,T,V), (B,T) → scalar.
     """
@@ -206,13 +211,31 @@ def build_criterion(
             label_smoothing=label_smoothing,
             ignore_index=ignore_index,
         )
-    # Phase 4: plain CE with label smoothing
-    # nn.CrossEntropyLoss expects (B,V,T) target convention — wrap in adapter
+    if decoder_emits_log_probs:
+        # Model H / PGN: ThreeWayPGNHead.blend_3way returns log-probabilities.
+        # CrossEntropyLoss would apply log_softmax again → wrong loss (Bug: double softmax).
+        return _NLLSequenceLoss(ignore_index=ignore_index)
     return _PlainCEWrapper(label_smoothing=label_smoothing, ignore_index=ignore_index)
 
 
+class _NLLSequenceLoss(nn.Module):
+    """Negative log-likelihood when input is already log P(w | context) per row (PGN output)."""
+
+    def __init__(self, ignore_index: int = 0):
+        super().__init__()
+        self.ignore_index = ignore_index
+        self.nll = nn.NLLLoss(ignore_index=ignore_index, reduction='mean')
+
+    def forward(self, log_probs: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        B, T, V = log_probs.shape
+        return self.nll(
+            log_probs.reshape(-1, V),
+            targets.reshape(-1),
+        )
+
+
 class _PlainCEWrapper(nn.Module):
-    """Adapter: accept (B,T,V),(B,T) → (B,V,T) for nn.CrossEntropyLoss."""
+    """Adapter: accept (B,T,V),(B,T) → (B,V,T) for nn.CrossEntropyLoss (raw logits only)."""
 
     def __init__(self, label_smoothing: float = 0.0, ignore_index: int = 0):
         super().__init__()

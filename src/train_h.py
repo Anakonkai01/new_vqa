@@ -50,6 +50,19 @@ def _model_state_dict_for_save(model):
     return sd
 
 
+def _apply_lr_from_saved_optimizer(optimizer, saved_opt_sd):
+    """If load_state_dict fails, copy per-group lr/weight_decay when group counts match."""
+    sg = saved_opt_sd.get('param_groups', [])
+    cg = optimizer.param_groups
+    if len(sg) != len(cg):
+        return False
+    for i in range(len(sg)):
+        cg[i]['lr'] = sg[i]['lr']
+        if 'weight_decay' in sg[i]:
+            cg[i]['weight_decay'] = sg[i]['weight_decay']
+    return True
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--phase', type=int, default=1)
@@ -97,6 +110,9 @@ def parse_args():
     # D: entropy + SCST composite
     parser.add_argument('--entropy_mac_coef', type=float, default=0.05,
                         help='Weight for MAC attention entropy penalty')
+    parser.add_argument('--decoder_embed_low_lr', action='store_true',
+                        help='Put decoder.embedding in the low-LR group with q_emb. '
+                             'Disable for resume from checkpoints saved without this layout.')
     parser.add_argument('--scst_bleu', type=float, default=0.3)
     parser.add_argument('--scst_meteor', type=float, default=0.3)
     parser.add_argument('--scst_exact_match', type=float, default=0.0)
@@ -233,9 +249,12 @@ def train_h(args):
         except Exception:
             pass
 
-    # Phân tầng Learning Rate
+    # Phân tầng LR: q_emb luôn LR thấp; decoder.embedding chỉ khi --decoder_embed_low_lr (không khớp checkpoint cũ)
     embed_params = list(model.q_emb.parameters())
-    base_params = [p for n, p in model.named_parameters() if 'q_emb' not in n]
+    if getattr(args, 'decoder_embed_low_lr', False):
+        embed_params = embed_params + list(model.decoder.embedding.parameters())
+    emb_ids = {id(p) for p in embed_params}
+    base_params = [p for n, p in model.named_parameters() if id(p) not in emb_ids]
     optimizer = optim.AdamW([
         {'params': base_params, 'lr': args.lr, 'weight_decay': 1e-4},
         {'params': embed_params, 'lr': args.lr * 0.1, 'weight_decay': 0.0}
@@ -248,7 +267,13 @@ def train_h(args):
         warmup_sched = None
         cosine_sched = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(1, args.epochs), eta_min=args.lr * 0.01)
 
-    criterion = build_criterion(gamma=2.0, label_smoothing=0.1 if args.phase != 4 else 0.0, use_focal=(args.phase != 4), ignore_index=0)
+    criterion = build_criterion(
+        gamma=2.0,
+        label_smoothing=0.1 if args.phase != 4 else 0.0,
+        use_focal=(args.phase != 4),
+        ignore_index=0,
+        decoder_emits_log_probs=True,
+    )
     # FP16 benefits from loss scaling; BF16 does not
     use_scaler = torch.cuda.is_available() and amp_dtype == torch.float16
     scaler = GradScaler('cuda', enabled=use_scaler)
@@ -268,20 +293,30 @@ def train_h(args):
             start_epoch = ckpt.get('epoch', 0)
             best_val_loss = ckpt.get('best_val_loss', float('inf'))
             history = ckpt.get('history', history)
+            optimizer_loaded = False
             try:
                 optimizer.load_state_dict(ckpt['optimizer_state_dict'])
+                optimizer_loaded = True
             except Exception as e:
                 print(f"[resume] optimizer load skipped: {e}")
-            if ckpt.get('cosine_sched_state_dict') is not None:
-                try:
-                    cosine_sched.load_state_dict(ckpt['cosine_sched_state_dict'])
-                except Exception as e:
-                    print(f"[resume] cosine scheduler load skipped: {e}")
-            if warmup_sched is not None and ckpt.get('warmup_sched_state_dict') is not None:
-                try:
-                    warmup_sched.load_state_dict(ckpt['warmup_sched_state_dict'])
-                except Exception as e:
-                    print(f"[resume] warmup scheduler load skipped: {e}")
+                if _apply_lr_from_saved_optimizer(optimizer, ckpt['optimizer_state_dict']):
+                    print("[resume] copied per-group lr/weight_decay from checkpoint optimizer")
+                else:
+                    print("[resume] could not align optimizer LRs from checkpoint; using freshly initialized LRs")
+            # Scheduler state is tied to optimizer step; only restore if optimizer matched
+            if optimizer_loaded:
+                if ckpt.get('cosine_sched_state_dict') is not None:
+                    try:
+                        cosine_sched.load_state_dict(ckpt['cosine_sched_state_dict'])
+                    except Exception as e:
+                        print(f"[resume] cosine scheduler load skipped: {e}")
+                if warmup_sched is not None and ckpt.get('warmup_sched_state_dict') is not None:
+                    try:
+                        warmup_sched.load_state_dict(ckpt['warmup_sched_state_dict'])
+                    except Exception as e:
+                        print(f"[resume] warmup scheduler load skipped: {e}")
+            else:
+                print("[resume] schedulers not loaded (optimizer state incompatible); cosine/warmup restart from current build")
 
     glove_embed = None
     if args.scst and args.phase == 4 and args.ohp_lambda > 0:
@@ -379,6 +414,11 @@ def train_h(args):
                     )
                     if rl_loss is not None:
                         loss = loss * 0.5 + rl_loss * 0.5
+
+            if not torch.isfinite(loss).item():
+                print(f"[WARN] non-finite loss at epoch {epoch+1} step {step_idx} — skipping step")
+                optimizer.zero_grad(set_to_none=True)
+                continue
 
             if use_scaler:
                 scaler.scale(loss).backward()
