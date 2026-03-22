@@ -155,7 +155,7 @@ python src/train_h.py \
     --phase 4 \
     --epochs 50 \
     --patience ${PATIENCE} \
-    --lr 5e-6 \
+    --lr 1e-5 \
     --warmup_epochs 0 \
     --batch_size ${RL_BATCH} \
     --dropout ${DROPOUT} \

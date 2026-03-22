@@ -64,6 +64,8 @@ class VQAOutput:
 
     # InfoNCE projections (G3, training only)
     infonce_z: Optional[Tuple[Tensor, Tensor]] = None          # (z_img, z_text)
+    # Model H: symmetric InfoNCE computed inside forward_with_cov (single encode)
+    infonce_loss: Optional[Tensor] = None
 
     # -----------------------------------------------------------------------
     # Convenience

@@ -79,8 +79,9 @@ class MACNetwork(nn.Module):
         super().__init__()
         self.num_hops = num_hops
         self.cell = MACCell(dim, max_seq_len)
-        self.control_init = nn.Parameter(torch.randn(1, dim))
-        self.memory_init = nn.Parameter(torch.randn(1, dim))
+        # Small init avoids saturating LayerNorm/tanh in early hops (randn ~ N(0,1) → ||·|| ~ O(√D))
+        self.control_init = nn.Parameter(torch.zeros(1, dim))
+        self.memory_init = nn.Parameter(torch.zeros(1, dim))
         self.memory_norm = nn.LayerNorm(dim)
         # Gated hop update (Phase B): blend new vs old memory instead of fixed residual add
         self.hop_gate = nn.Linear(dim * 2, dim)
@@ -198,7 +199,25 @@ class ModelH(nn.Module):
         )
         output = VQAOutput(logits=logits)
         output.mac_attn = mac_attn
+        if getattr(self.args, 'infonce', False) and hasattr(self, 'v_head'):
+            output.infonce_loss = self._infonce_loss_symmetric(memory, q_feat)
+        else:
+            output.infonce_loss = None
         return output, cov_loss
+
+    def _infonce_loss_symmetric(self, memory: torch.Tensor, q_feat: torch.Tensor) -> torch.Tensor:
+        """Contrastive align MAC memory (reasoned visual) ↔ question; single encode, symmetric CE."""
+        z_v = F.normalize(self.v_head(memory), dim=1)
+        z_q = F.normalize(self.q_head(q_feat), dim=1)
+        B = z_q.size(0)
+        if B < 2:
+            return memory.new_zeros(())
+        logits_qv = torch.mm(z_q, z_v.t()) / 0.07
+        logits_vq = torch.mm(z_v, z_q.t()) / 0.07
+        labels = torch.arange(B, device=z_q.device)
+        return (
+            F.cross_entropy(logits_qv, labels) + F.cross_entropy(logits_vq, labels)
+        ) * 0.5
 
     def decode_step(self, token, h, c, V, Q_H=None, coverage=None, img_mask=None, q_token_ids=None, length_bin=None, label_tokens=None, mac_memory=None):
         if getattr(self.args, 'no_mac_decoder', False):
@@ -215,9 +234,8 @@ class ModelH(nn.Module):
         return logit, h_new, c_new, img_alpha, coverage_new
 
     def get_infonce_loss(self, q_seq, v_feats, grid_feats=None, img_mask=None):
-        if not hasattr(self, 'v_head'): return torch.tensor(0.0)
-        _, _, q_feat, v_proj, _ = self.encode(q_seq, v_feats, grid_feats, img_mask)
-        v_agg = v_proj.mean(dim=1)
-        z_v = F.normalize(self.v_head(v_agg), dim=1)
-        z_q = F.normalize(self.q_head(q_feat), dim=1)
-        return F.cross_entropy(torch.mm(z_q, z_v.t()) / 0.07, torch.arange(z_q.size(0), device=z_q.device))
+        """Legacy path (extra encode). Prefer infonce_loss from forward_with_cov in training."""
+        if not hasattr(self, 'v_head'):
+            return torch.zeros((), device=q_seq.device, dtype=torch.float32)
+        memory, _, q_feat, _, _ = self.encode(q_seq, v_feats, grid_feats, img_mask)
+        return self._infonce_loss_symmetric(memory, q_feat)

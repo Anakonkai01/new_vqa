@@ -229,7 +229,7 @@ class _PlainCEWrapper(nn.Module):
 
 
 
-def attention_entropy_penalty(mac_attn, eps=1e-9):
+def attention_entropy_penalty(mac_attn, eps=1e-9, reference_device=None):
     """
     Tính toán Entropy của phân bố Attention trong MAC Network.
     Mục tiêu là MINIMIZE giá trị này để ép attention sắc nét hơn.
@@ -237,11 +237,15 @@ def attention_entropy_penalty(mac_attn, eps=1e-9):
     Args:
         mac_attn: Tensor kích thước (B, num_hops, K) chứa attention weights.
         eps: Hằng số nhỏ để tránh log(0).
+        reference_device: nếu mac_attn None, đặt scalar 0 trên device này (tránh lệch CPU/GPU).
     Returns:
         entropy_loss: Giá trị scalar.
     """
     if mac_attn is None:
-        return torch.tensor(0.0, device='cuda' if torch.cuda.is_available() else 'cpu')
+        dev = reference_device
+        if dev is None:
+            dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        return torch.zeros((), device=dev, dtype=torch.float32)
         
     # Công thức Entropy: H(X) = - sum(p * log(p))
     # mac_attn đã đi qua softmax nên tổng theo chiều K (dim=-1) bằng 1.0

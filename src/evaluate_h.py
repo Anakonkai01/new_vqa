@@ -229,7 +229,8 @@ def _labels_to_token_tensor(label_names_batch, a_vocab, device):
 
 # ── Greedy / Beam decode on Model H ─────────────────────────────────────────
 @torch.no_grad()
-def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_names, a_vocab, device, max_len=30):
+def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_names, a_vocab, device, max_len=30,
+                        min_decode_len=3):
     """Greedy decode — single best token at each step."""
     B = region_feat.size(0)
     sos = a_vocab.word2idx.get('<start>', 1)
@@ -263,17 +264,26 @@ def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label
             label_tokens=label_tokens,
             mac_memory=mm,
         )
-        next_tok = logit.argmax(dim=-1)              # (B,)
+        next_ids = []
         for b in range(B):
-            if not finished[b]:
-                tok = int(next_tok[b])
-                if tok == eos:
-                    finished[b] = True
-                else:
-                    outputs[b].append(tok)
+            if finished[b]:
+                next_ids.append(eos)
+                continue
+            lp = logit[b]
+            if len(outputs[b]) < min_decode_len:
+                lp = lp.clone()
+                lp[eos] = float('-inf')
+            tok = int(lp.argmax())
+            if tok == eos:
+                finished[b] = True
+            else:
+                outputs[b].append(tok)
+            next_ids.append(tok)
         if finished.all():
             break
-        dec_input = torch.cat([dec_input, next_tok.unsqueeze(1)], dim=1)
+        dec_input = torch.cat(
+            [dec_input, torch.tensor(next_ids, device=device, dtype=torch.long).unsqueeze(1)], dim=1
+        )
 
     # Convert token ids → string
     special = {pad, sos, eos, a_vocab.word2idx.get('<unk>', 3)}
@@ -297,14 +307,17 @@ def _repeat_ngram(tokens, next_tok, n):
 
 @torch.no_grad()
 def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_names, a_vocab, device,
-                      beam_width=3, max_len=30, no_repeat_ngram=3):
+                      beam_width=3, max_len=30, no_repeat_ngram=3, min_decode_len=3):
     """
     Optimized beam search: encode ALL samples once (batched), then per-sample GPU-accelerated beam decode.
     Speedup: ~2-5x vs per-sample encoder loop (single encode pass).
     Falls back to greedy if beam_width == 1 for speed.
     """
     if beam_width == 1:
-        return greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_names, a_vocab, device, max_len)
+        return greedy_decode_batch(
+            model, region_feat, region_mask, q_ids, grid_feat, label_names, a_vocab, device, max_len,
+            min_decode_len=min_decode_len,
+        )
 
     B = region_feat.size(0)
     sos = a_vocab.word2idx.get('<start>', 1)
@@ -397,7 +410,10 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_n
                 log_probs_all = F.log_softmax(logit, dim=-1)
 
             for i, (score, toks, _, _, _, _) in enumerate(active):
-                log_probs = log_probs_all[i]
+                log_probs = log_probs_all[i].clone()
+                # Chặn <end> quá sớm (khớp LONG-bin / train distribution hơn)
+                if len(toks) - 1 < min_decode_len:
+                    log_probs[eos] = float('-inf')
                 topv, topi = torch.topk(log_probs, min(beam_width, V))
                 for lp_val, tok_val in zip(topv.tolist(), topi.tolist()):
                     tok_val = int(tok_val)
@@ -755,6 +771,7 @@ def evaluate_h(args):
                         beam_width=args.beam_width,
                         max_len=args.max_len,
                         no_repeat_ngram=args.no_repeat_ngram,
+                        min_decode_len=args.min_decode_len,
                     )
 
             all_preds.extend(preds)
@@ -799,6 +816,7 @@ def evaluate_h(args):
             'batch_size': args.batch_size,
             'num_workers': args.num_workers,
             'max_len': args.max_len,
+            'min_decode_len': args.min_decode_len,
             'no_repeat_ngram': args.no_repeat_ngram,
             'datasets': args.datasets,
             'use_fasttext': args.use_fasttext,
@@ -861,6 +879,8 @@ def parse_args():
                         help='Block repeated n-grams (0=disabled)')
     parser.add_argument('--max_len',     type=int, default=30,
                         help='Maximum explanation generation length')
+    parser.add_argument('--min_decode_len', type=int, default=3,
+                        help='Minimum content tokens before allowing <end> (greedy/beam)')
     parser.add_argument('--batch_size',  type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=8)
     parser.add_argument('--max_samples', type=int, default=None,

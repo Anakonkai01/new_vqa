@@ -30,12 +30,13 @@ def _normalize_ckpt_state_dict(ckpt_sd, model):
     torch.compile wraps the module as _orig_mod; checkpoints then have keys like
     '_orig_mod.q_emb.weight'. Loading into an eager ModelH (no compile) with strict=False
     silently skips them — weights stay random and loss explodes. Map prefixes both ways.
+    Strip _orig_mod. on every key (do not filter): some builds may mix prefixed and plain keys.
     """
     model_sd = model.state_dict()
-    ck_has = any(k.startswith("_orig_mod.") for k in ckpt_sd)
     m_has = any(k.startswith("_orig_mod.") for k in model_sd)
+    ck_has = any(k.startswith("_orig_mod.") for k in ckpt_sd)
     if ck_has and not m_has:
-        return {k[len("_orig_mod.") :]: v for k, v in ckpt_sd.items() if k.startswith("_orig_mod.")}
+        return {k.replace("_orig_mod.", "", 1): v for k, v in ckpt_sd.items()}
     if not ck_has and m_has:
         return {"_orig_mod." + k: v for k, v in ckpt_sd.items()}
     return ckpt_sd
@@ -45,7 +46,7 @@ def _model_state_dict_for_save(model):
     """Save without _orig_mod. so checkpoints are portable across compile on/off."""
     sd = model.state_dict()
     if any(k.startswith("_orig_mod.") for k in sd):
-        return {k.replace("_orig_mod.", "", 1): v for k, v in sd.items() if k.startswith("_orig_mod.")}
+        return {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
     return sd
 
 
@@ -286,6 +287,13 @@ def train_h(args):
     if args.scst and args.phase == 4 and args.ohp_lambda > 0:
         glove_embed = {w: model.decoder.embedding.weight[i].detach().cpu().numpy() for w, i in a_vocab.word2idx.items()}
 
+    if args.scst and args.phase == 4:
+        try:
+            from training.cider import compute_cider  # noqa: F401
+            print("[SCST] CIDEr module (training.cider) import OK")
+        except Exception as e:
+            print(f"[SCST] WARNING: CIDEr not available — install pycocoevalcap. ({e})")
+
     global_step = start_epoch * max(1, len(train_loader))
     for epoch in range(start_epoch, start_epoch + args.epochs):
         model.train()
@@ -315,7 +323,7 @@ def train_h(args):
                     )
                     ce_loss = criterion(logits, dec_tgt)
                     loss = ce_loss
-                    entropy_loss = torch.tensor(0.0, device=DEVICE)
+                    entropy_loss = torch.zeros((), device=DEVICE, dtype=torch.float32)
                 else:
                     out, cov_loss_scalar = model.forward_with_cov(
                         questions, feats, dec_in, img_mask=img_mask, length_bin=length_bin,
@@ -323,12 +331,13 @@ def train_h(args):
                     )
                     ce_loss = criterion(out.logits, dec_tgt)
                     mac_attn = getattr(out, 'mac_attn', None)
-                    entropy_loss = attention_entropy_penalty(mac_attn, eps=1e-7)
+                    entropy_loss = attention_entropy_penalty(mac_attn, eps=1e-7, reference_device=DEVICE)
                     loss = ce_loss + 0.5 * cov_loss_scalar + args.entropy_mac_coef * entropy_loss
 
-                if args.infonce and not ss_on and getattr(model, 'v_head', None) is not None:
-                    ifo = model.get_infonce_loss(questions, feats, grid_feats, img_mask)
-                    loss = loss + args.infonce_beta * ifo
+                if args.infonce and not ss_on:
+                    ifo = getattr(out, 'infonce_loss', None)
+                    if ifo is not None:
+                        loss = loss + args.infonce_beta * ifo
 
                 if ss_on:
                     with torch.no_grad():
