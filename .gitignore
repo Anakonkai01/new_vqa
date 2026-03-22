@@ -8,4 +8,8 @@ __pycache__/
 *.png
 *.jpg
 *.json
-wandb/
+/wandb/
+.vscode/
+.DS_Store
+.ipynb_checkpoints/
+.pytest_cache/
