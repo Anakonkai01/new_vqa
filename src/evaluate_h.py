@@ -49,6 +49,7 @@ from nltk.translate.bleu_score import sentence_bleu, corpus_bleu, SmoothingFunct
 from nltk.translate.meteor_score import meteor_score
 
 sys.path.append(os.path.dirname(__file__))
+from train_h import _remap_model_h_legacy_decoder_inits
 from vocab import Vocabulary
 from fasttext_utils import build_fasttext_matrix
 from models.vqa_model_h import ModelH
@@ -167,7 +168,7 @@ class ValDatasetH(Dataset):
 
 def collate_val(batch):
     """Custom collate: handles variable-length features and multiple GT explanations.
-    Returns: region_padded, region_mask, q_padded, grid_padded, label_names, gt_answers, gt_expls_list, img_ids, questions"""
+    Returns: region_padded, region_mask, q_padded, grid_padded, grid_valid, label_names, gt_answers, gt_expls_list, img_ids, questions"""
     feats, q_tensors, gt_answers, gt_expls_list, img_ids, questions = zip(*batch)
 
     # Pad questions to same length
@@ -186,16 +187,29 @@ def collate_val(batch):
         region_padded[i, :r.shape[0]] = r
         region_mask[i,   :r.shape[0]] = True
 
-    # Optional grid features
     grid_feats = [f.get('grid_feat', None) for f in feats]
-    if all(g is not None for g in grid_feats):
-        grid_padded = torch.stack(grid_feats, dim=0)
-    else:
-        grid_padded = None
+    grid_padded = None
+    grid_valid = None
+    if any(g is not None for g in grid_feats):
+        ref = next(g for g in grid_feats if g is not None)
+        D = ref.numel()
+        rows, flags = [], []
+        for g in grid_feats:
+            if g is None:
+                rows.append(torch.zeros(D, dtype=ref.dtype))
+                flags.append(False)
+            else:
+                rows.append(g)
+                flags.append(True)
+        grid_padded = torch.stack(rows, dim=0)
+        grid_valid = torch.tensor(flags, dtype=torch.bool)
 
     label_names = [f.get('label_names', None) for f in feats]
 
-    return region_padded, region_mask, q_padded, grid_padded, label_names, list(gt_answers), list(gt_expls_list), list(img_ids), list(questions)
+    return (
+        region_padded, region_mask, q_padded, grid_padded, grid_valid,
+        label_names, list(gt_answers), list(gt_expls_list), list(img_ids), list(questions),
+    )
 
 
 def _labels_to_token_tensor(label_names_batch, a_vocab, device):
@@ -229,7 +243,7 @@ def _labels_to_token_tensor(label_names_batch, a_vocab, device):
 
 # ── Greedy / Beam decode on Model H ─────────────────────────────────────────
 @torch.no_grad()
-def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_names, a_vocab, device, max_len=30,
+def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, grid_valid, label_names, a_vocab, device, max_len=30,
                         min_decode_len=8):
     """Greedy decode — single best token at each step."""
     B = region_feat.size(0)
@@ -241,6 +255,7 @@ def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label
     region_mask = region_mask.to(device)
     q_ids       = q_ids.to(device)
     grid_feat   = grid_feat.to(device) if grid_feat is not None else None
+    grid_valid_d = grid_valid.to(device) if grid_valid is not None else None
     label_tokens = _labels_to_token_tensor(label_names, a_vocab, device)
 
     dec_input = torch.full((B, 1), sos, dtype=torch.long, device=device)
@@ -248,7 +263,8 @@ def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label
     outputs   = [[] for _ in range(B)]
 
     # Encode once with Model H signature
-    memory, q_hidden, _, kb, _v_proj_raw, _ = model.encode(q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask)
+    memory, q_hidden, _, kb, _v_proj_raw, _ = model.encode(
+        q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask, grid_valid=grid_valid_d)
     h, c = model.init_decoder_hidden(memory)
     mm = None if getattr(model.args, 'no_mac_decoder', False) else memory
     coverage = None
@@ -306,7 +322,7 @@ def _repeat_ngram(tokens, next_tok, n):
 
 
 @torch.no_grad()
-def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_names, a_vocab, device,
+def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, grid_valid, label_names, a_vocab, device,
                       beam_width=3, max_len=30, no_repeat_ngram=3, min_decode_len=8):
     """
     Optimized beam search: encode ALL samples once (batched), then per-sample GPU-accelerated beam decode.
@@ -329,11 +345,13 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_n
     region_mask = region_mask.to(device)
     q_ids       = q_ids.to(device)
     grid_feat   = grid_feat.to(device) if grid_feat is not None else None
+    grid_valid_d = grid_valid.to(device) if grid_valid is not None else None
     label_tokens_batch = _labels_to_token_tensor(label_names, a_vocab, device)
 
     # ─ Encode all B samples at once (batched on GPU) ╔════════════════════════
     # This is the key optimization: single forward pass for all B samples
-    memory, q_hidden, _, kb, _v_proj_raw, _ = model.encode(q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask)
+    memory, q_hidden, _, kb, _v_proj_raw, _ = model.encode(
+        q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask, grid_valid=grid_valid_d)
     # memory: (B, H), q_hidden: (B, H), kb: (B, R, H)
     
     alpha = 0.7  # length-penalty exponent
@@ -572,9 +590,9 @@ def compute_metrics(preds, gt_expls_list, gt_answers, dataset_name=''):
     if HAS_BERTSCORE:
         try:
             print("  Computing BERTScore (may take a few minutes)...")
-            # Use best reference for each sample
-            best_refs = [refs[0] if refs else '' for refs in gt_expls_list]
-            _, _, F1 = _bertscore_fn(preds, best_refs, lang='en', verbose=False)
+            # bert_score: refs as list[list[str]] → per-candidate best F1 over references
+            multi_refs = [list(r) if r else [''] for r in gt_expls_list]
+            _, _, F1 = _bertscore_fn(preds, multi_refs, lang='en', verbose=False)
             bertscore_f1 = float(F1.mean())
         except Exception as e:
             print(f"[WARN] BERTScore failed: {e}")
@@ -694,6 +712,11 @@ def evaluate_h(args):
     num_mac_hops = args.num_mac_hops if getattr(args, 'num_mac_hops', None) is not None else sd.get('num_mac_hops', 3)
 
     # 5. Build model
+    no_dec_cov = getattr(args, 'no_decoder_coverage', False) or sd.get('no_decoder_coverage', False)
+    num_layers = getattr(args, 'num_layers', None)
+    if num_layers is None:
+        num_layers = sd.get('num_layers', 2)
+
     model_args = argparse.Namespace(
         v_dim=v_dim, grid_dim=grid_dim,
         dropout=sd.get('dropout', 0.5),
@@ -707,6 +730,8 @@ def evaluate_h(args):
         phase=sd.get('phase', 1),
         no_mac_decoder=no_mac,
         num_mac_hops=num_mac_hops,
+        num_layers=num_layers,
+        no_decoder_coverage=no_dec_cov,
     )
     model = ModelH(len(q_vocab), len(a_vocab), model_args).to(DEVICE)
 
@@ -722,6 +747,7 @@ def evaluate_h(args):
 
     # Strip torch.compile prefix if present
     state = {k.replace('_orig_mod.', ''): v for k, v in state.items()}
+    state = _remap_model_h_legacy_decoder_inits(state)
     model.load_state_dict(state, strict=False)
     print(f"Loaded checkpoint: {args.checkpoint}")
 
@@ -775,11 +801,11 @@ def evaluate_h(args):
         all_questions  = []
         all_img_ids    = []
 
-        for region_feat, region_mask, q_ids, grid_feat, label_names, gt_answers, gt_expls_list, img_ids, questions in tqdm(val_loader, desc=f"Decoding [{ds_name}]"):
+        for region_feat, region_mask, q_ids, grid_feat, grid_valid, label_names, gt_answers, gt_expls_list, img_ids, questions in tqdm(val_loader, desc=f"Decoding [{ds_name}]"):
             with torch.no_grad():
                 with torch.autocast(device_type=DEVICE.type, dtype=amp_dtype, enabled=(DEVICE.type == 'cuda')):
                     preds = beam_decode_batch(
-                        model, region_feat, region_mask, q_ids, grid_feat, label_names,
+                        model, region_feat, region_mask, q_ids, grid_feat, grid_valid, label_names,
                         a_vocab, DEVICE,
                         beam_width=args.beam_width,
                         max_len=args.max_len,
@@ -906,6 +932,10 @@ def parse_args():
                         help='Match checkpoint trained without MAC-in-decoder (ablation)')
     parser.add_argument('--num_mac_hops', type=int, default=None,
                         help='Override MAC hops (default: from checkpoint or 3)')
+    parser.add_argument('--num_layers', type=int, default=None,
+                        help='Decoder LSTM depth (default: from checkpoint or 2)')
+    parser.add_argument('--no_decoder_coverage', action='store_true',
+                        help='Match checkpoints trained without decoder MHCA coverage')
     return parser.parse_args()
 
 

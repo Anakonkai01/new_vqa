@@ -147,29 +147,29 @@ class ModelH(nn.Module):
             self.q_head = nn.Linear(self.dim, 128)
             
         use_mac_dec = not getattr(args, 'no_mac_decoder', False)
+        nl = getattr(args, 'num_layers', 2)
+        self.num_decoder_layers = nl
+        use_dec_cov = not getattr(args, 'no_decoder_coverage', False)
         self.decoder = LSTMDecoderG(
             vocab_size=vocab_a_size, embed_size=embed_dim, hidden_size=self.dim,
-            num_layers=getattr(args, 'num_layers', 2), dropout=getattr(args, 'dropout', 0.5),
+            num_layers=nl, dropout=getattr(args, 'dropout', 0.5),
             use_mac_in_decoder=use_mac_dec,
+            use_coverage=use_dec_cov,
         )
-        
-        # KHỞI TẠO ĐỘC LẬP CHO LSTM DECODER (Phá vỡ đối xứng)
-        self.init_h1 = nn.Linear(self.dim, self.dim)
-        self.init_c1 = nn.Linear(self.dim, self.dim)
-        self.init_h2 = nn.Linear(self.dim, self.dim)
-        self.init_c2 = nn.Linear(self.dim, self.dim)
+
+        # Independent per-layer LSTM init (must match self.decoder.num_layers)
+        self.init_h = nn.ModuleList(nn.Linear(self.dim, self.dim) for _ in range(nl))
+        self.init_c = nn.ModuleList(nn.Linear(self.dim, self.dim) for _ in range(nl))
 
     def init_decoder_hidden(self, memory: torch.Tensor):
         """Match teacher-forcing init in forward_with_cov (eval / SCST must use this)."""
-        h1 = torch.tanh(self.init_h1(memory))
-        c1 = torch.tanh(self.init_c1(memory))
-        h2 = torch.tanh(self.init_h2(memory))
-        c2 = torch.tanh(self.init_c2(memory))
-        h_0 = torch.stack([h1, h2], dim=0)
-        c_0 = torch.stack([c1, c2], dim=0)
+        h_list = [torch.tanh(layer(memory)) for layer in self.init_h]
+        c_list = [torch.tanh(layer(memory)) for layer in self.init_c]
+        h_0 = torch.stack(h_list, dim=0)
+        c_0 = torch.stack(c_list, dim=0)
         return h_0, c_0
         
-    def encode(self, q_seq, v_feats, grid_feats=None, img_mask=None):
+    def encode(self, q_seq, v_feats, grid_feats=None, img_mask=None, grid_valid=None):
         B = q_seq.size(0)
         q_embs = self.q_emb(q_seq) 
         lstm_out, (hn, cn) = self.lstm(q_embs)
@@ -181,8 +181,12 @@ class ModelH(nn.Module):
 
         if g_proj is not None:
             gate = torch.sigmoid(self.gate_v(g_proj) + self.gate_q(q_feat))
-            kb = v_proj * gate.unsqueeze(1)
-            kb = self.fusion_norm(kb)
+            kb_gated = self.fusion_norm(v_proj * gate.unsqueeze(1))
+            if grid_valid is not None:
+                gv = grid_valid.to(device=v_proj.device, dtype=v_proj.dtype).view(B, 1, 1)
+                kb = gv * kb_gated + (1.0 - gv) * v_proj
+            else:
+                kb = kb_gated
         else:
             kb = v_proj
 
@@ -194,8 +198,10 @@ class ModelH(nn.Module):
         return memory, context, q_feat, kb, v_proj, mac_attn
         
     def forward_with_cov(self, q_seq, v_feats, a_seq, 
-                         img_mask=None, length_bin=None, label_tokens=None, grid_feats=None):
-        memory, context, q_feat, kb, v_proj_raw, mac_attn = self.encode(q_seq, v_feats, grid_feats, img_mask)
+                         img_mask=None, length_bin=None, label_tokens=None, grid_feats=None,
+                         grid_valid=None):
+        memory, context, q_feat, kb, v_proj_raw, mac_attn = self.encode(
+            q_seq, v_feats, grid_feats, img_mask, grid_valid=grid_valid)
         h_0, c_0 = self.init_decoder_hidden(memory)
 
         mac_in = memory if not getattr(self.args, 'no_mac_decoder', False) else None
@@ -257,5 +263,6 @@ class ModelH(nn.Module):
         """Legacy path (extra encode). Prefer infonce_loss from forward_with_cov in training."""
         if not hasattr(self, 'v_head'):
             return torch.zeros((), device=q_seq.device, dtype=torch.float32)
-        _, _, q_feat, _kb, v_proj_raw, _ = self.encode(q_seq, v_feats, grid_feats, img_mask)
+        _, _, q_feat, _kb, v_proj_raw, _ = self.encode(
+            q_seq, v_feats, grid_feats, img_mask, grid_valid=None)
         return self._infonce_loss_symmetric(v_proj_raw, q_feat, img_mask)

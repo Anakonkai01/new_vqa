@@ -353,6 +353,7 @@ def compute_rewards(
 def _greedy_decode(model, model_type, imgs, questions, vocab,
                    max_len: int, device, q_token_ids=None,
                    grid_feats: Optional[torch.Tensor] = None,
+                   grid_valid: Optional[torch.Tensor] = None,
                    img_mask: Optional[torch.Tensor] = None,
                    label_tokens: Optional[torch.Tensor] = None) -> List[str]:
     """
@@ -417,7 +418,7 @@ def _greedy_decode(model, model_type, imgs, questions, vocab,
             start_idx = vocab.word2idx.get('<start>', 1)
 
             memory, Q_H, _, kb, _v_raw, _ = model.encode(
-                questions, imgs, grid_feats=grid_feats, img_mask=img_mask)
+                questions, imgs, grid_feats=grid_feats, img_mask=img_mask, grid_valid=grid_valid)
             V = kb
             h, c = model.init_decoder_hidden(memory)
             mm = None if getattr(model.args, 'no_mac_decoder', False) else memory
@@ -480,6 +481,7 @@ def _greedy_decode(model, model_type, imgs, questions, vocab,
 def _sampling_decode(model, model_type, imgs, questions, vocab,
                      max_len: int, device, temperature: float = 1.0,
                      grid_feats: Optional[torch.Tensor] = None,
+                     grid_valid: Optional[torch.Tensor] = None,
                      img_mask: Optional[torch.Tensor] = None,
                      label_tokens: Optional[torch.Tensor] = None,
                      ) -> Tuple[List[str], torch.Tensor]:
@@ -547,7 +549,7 @@ def _sampling_decode(model, model_type, imgs, questions, vocab,
 
     elif model_type == 'H':
         memory, Q_H, _, kb, _v_raw, _ = model.encode(
-            questions, imgs, grid_feats=grid_feats, img_mask=img_mask)
+            questions, imgs, grid_feats=grid_feats, img_mask=img_mask, grid_valid=grid_valid)
         V = kb
         h, c = model.init_decoder_hidden(memory)
         mm = None if getattr(model.args, 'no_mac_decoder', False) else memory
@@ -689,6 +691,7 @@ def scst_step(model, model_type: str, imgs: torch.Tensor, questions: torch.Tenso
               ohp_threshold: float = 0.5,
               return_stats: bool = False,
               grid_feats: Optional[torch.Tensor] = None,
+              grid_valid: Optional[torch.Tensor] = None,
               img_mask: Optional[torch.Tensor] = None,
               label_tokens: Optional[torch.Tensor] = None,
               ) -> torch.Tensor:
@@ -720,13 +723,13 @@ def scst_step(model, model_type: str, imgs: torch.Tensor, questions: torch.Tenso
     greedy_texts = _greedy_decode(
         model, model_type, imgs, questions,
         vocab, max_len, device, q_token_ids=questions,
-        grid_feats=grid_feats, img_mask=img_mask, label_tokens=label_tokens,
+        grid_feats=grid_feats, grid_valid=grid_valid, img_mask=img_mask, label_tokens=label_tokens,
     )
 
     # 2. Sampling decode (with gradient)
     sample_texts, log_prob_sums = _sampling_decode(
         model, model_type, imgs, questions, vocab, max_len, device, temperature,
-        grid_feats=grid_feats, img_mask=img_mask, label_tokens=label_tokens,
+        grid_feats=grid_feats, grid_valid=grid_valid, img_mask=img_mask, label_tokens=label_tokens,
     )
 
     # 3. G4: pre-compute OHP for sample (greedy OHP not needed — same visual labels)

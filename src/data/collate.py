@@ -55,6 +55,7 @@ class VQABatch:
     length_bins: Optional[Tensor] = None
     label_tokens: Optional[Tensor] = None
     grid_feats: Optional[Tensor] = None
+    grid_valid: Optional[Tensor] = None  # (B,) bool — False → encode ignores grid (uses v_proj only)
     sources: Optional[List[str]] = None
     label_names: Optional[List[Optional[List[str]]]] = None
 
@@ -83,6 +84,7 @@ class VQABatch:
             length_bins=_maybe(self.length_bins),
             label_tokens=_maybe(self.label_tokens),
             grid_feats=_maybe(self.grid_feats),
+            grid_valid=_maybe(self.grid_valid),
             sources=self.sources,
             label_names=self.label_names,
         )
@@ -206,12 +208,23 @@ def butd_collate_fn(batch, a_vocab=None):
     targets      = pad_sequence(answers,    batch_first=True)    # (B, max_t)
     length_bins  = torch.tensor(bins, dtype=torch.long)          # (B,)
 
-    # Handle optional grid features
-    valid_grids = [g for g in grids_list if g is not None]
-    if len(valid_grids) == len(grids_list):
-        grid_feats = torch.stack(grids_list, dim=0)
-    else:
-        grid_feats = None
+    # Grid: keep batch tensor even when some samples lack grid (zero-pad + grid_valid mask)
+    grid_feats = None
+    grid_valid = None
+    if any(g is not None for g in grids_list):
+        ref = next(g for g in grids_list if g is not None)
+        D = ref.numel()
+        rows = []
+        valid_flags = []
+        for g in grids_list:
+            if g is None:
+                rows.append(torch.zeros(D, dtype=ref.dtype))
+                valid_flags.append(False)
+            else:
+                rows.append(g)
+                valid_flags.append(True)
+        grid_feats = torch.stack(rows, dim=0)
+        grid_valid = torch.tensor(valid_flags, dtype=torch.bool)
 
     # Build img_mask: True = valid region (non-zero row), False = padding
     # abs().sum(-1) > 0 is robust to L2-normalised features
@@ -229,6 +242,7 @@ def butd_collate_fn(batch, a_vocab=None):
         length_bins=length_bins,
         label_tokens=label_tokens,
         grid_feats=grid_feats,
+        grid_valid=grid_valid,
         sources=list(sources),
         label_names=list(label_names_list),
     )

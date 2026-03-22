@@ -3,6 +3,7 @@ import argparse
 import math
 import os
 import random
+import re
 import json
 import torch
 import torch.nn as nn
@@ -25,6 +26,27 @@ from training.losses import build_criterion, attention_entropy_penalty
 from vocab import Vocabulary
 
 
+_LEGACY_INIT_RE = re.compile(r"^init_(h|c)(\d+)\.(.+)$")
+
+
+def _remap_model_h_legacy_decoder_inits(ckpt_sd: dict) -> dict:
+    """Map init_h1.weight → init_h.0.weight (old flat names → ModuleList)."""
+    has_new = any(k.startswith("init_h.") or k.startswith("init_c.") for k in ckpt_sd)
+    if has_new:
+        return ckpt_sd
+    out = {}
+    remapped_any = False
+    for k, v in ckpt_sd.items():
+        m = _LEGACY_INIT_RE.match(k)
+        if m:
+            remapped_any = True
+            kind, idx_s, rest = m.group(1), int(m.group(2)), m.group(3)
+            out[f"init_{kind}.{idx_s - 1}.{rest}"] = v
+        else:
+            out[k] = v
+    return out if remapped_any else ckpt_sd
+
+
 def _normalize_ckpt_state_dict(ckpt_sd, model):
     """
     torch.compile wraps the module as _orig_mod; checkpoints then have keys like
@@ -36,10 +58,14 @@ def _normalize_ckpt_state_dict(ckpt_sd, model):
     m_has = any(k.startswith("_orig_mod.") for k in model_sd)
     ck_has = any(k.startswith("_orig_mod.") for k in ckpt_sd)
     if ck_has and not m_has:
-        return {k.replace("_orig_mod.", "", 1): v for k, v in ckpt_sd.items()}
-    if not ck_has and m_has:
-        return {"_orig_mod." + k: v for k, v in ckpt_sd.items()}
-    return ckpt_sd
+        sd = {k.replace("_orig_mod.", "", 1): v for k, v in ckpt_sd.items()}
+    elif not ck_has and m_has:
+        sd = {"_orig_mod." + k: v for k, v in ckpt_sd.items()}
+    else:
+        sd = dict(ckpt_sd)
+    if hasattr(model, "init_h") and isinstance(getattr(model, "init_h", None), torch.nn.ModuleList):
+        sd = _remap_model_h_legacy_decoder_inits(sd)
+    return sd
 
 
 def _model_state_dict_for_save(model):
@@ -48,6 +74,16 @@ def _model_state_dict_for_save(model):
     if any(k.startswith("_orig_mod.") for k in sd):
         return {k.replace("_orig_mod.", "", 1): v for k, v in sd.items()}
     return sd
+
+
+def _model_params_all_finite(model) -> bool:
+    with torch.no_grad():
+        for p in model.parameters():
+            if p is None or p.numel() == 0:
+                continue
+            if not torch.isfinite(p).all():
+                return False
+    return True
 
 
 def parse_args():
@@ -76,6 +112,9 @@ def parse_args():
     parser.add_argument('--dropout', type=float, default=0.5)
     parser.add_argument('--num_workers', type=int, default=8)
     parser.add_argument('--resume', type=str, default=None)
+    parser.add_argument('--reset_best_val_on_resume', action='store_true',
+                        help='Ignore best_val_loss from checkpoint (use inf) so early-stopping compares '
+                             'to a fresh baseline after optimizer/code change')
     parser.add_argument('--wandb', action='store_true')
     parser.add_argument('--wandb_project', type=str, default='vqa-model-h')
     parser.add_argument('--wandb_run_name', type=str, default=None)
@@ -84,6 +123,10 @@ def parse_args():
     parser.add_argument('--save_legacy_alias', action='store_true')
     parser.add_argument('--no_mac_decoder', action='store_true',
                         help='Ablation: LSTM without MAC context at each step (smaller decoder)')
+    parser.add_argument('--num_layers', type=int, default=2,
+                        help='Decoder LSTM layers (init_* and LSTMDecoderG must match)')
+    parser.add_argument('--no_decoder_coverage', action='store_true',
+                        help='Disable MHCA coverage loss in LSTMDecoderG (match old checkpoints)')
     parser.add_argument('--num_mac_hops', type=int, default=3,
                         help='Number of MAC reasoning hops')
     # C: VQA v2.0 real + weighted sampling
@@ -108,13 +151,13 @@ def parse_args():
 
 
 def _ss_forward_h(model, questions, feats, dec_input, epsilon,
-                  grid_feats=None, img_mask=None, length_bin=None, label_tokens=None,
+                  grid_feats=None, grid_valid=None, img_mask=None, length_bin=None, label_tokens=None,
                   min_decode_len=0, end_idx=2):
     """Scheduled sampling for Model H (token-level). Optional min_decode_len matches inference EOS masking."""
     B = feats.size(0)
     max_len = dec_input.size(1)
-    memory, context, _qfeat, kb, _v_proj_raw, _ = model.encode(
-        questions, feats, grid_feats=grid_feats, img_mask=img_mask)
+    memory, context, _qfeat, kb, _v_proj_raw, mac_attn = model.encode(
+        questions, feats, grid_feats=grid_feats, img_mask=img_mask, grid_valid=grid_valid)
     h, c = model.init_decoder_hidden(memory)
     if length_bin is None:
         length_bin = feats.new_full((B,), 2, dtype=torch.long, device=feats.device)
@@ -140,7 +183,7 @@ def _ss_forward_h(model, questions, feats, dec_input, epsilon,
                 pick = logit.clone()
                 pick[:, end_idx] = torch.finfo(pick.dtype).min
             current_tok = dec_input[:, t + 1] if random.random() < epsilon else pick.detach().argmax(dim=-1)
-    return torch.stack(logits_list, dim=1)
+    return torch.stack(logits_list, dim=1), mac_attn
 
 
 def train_h(args):
@@ -310,6 +353,9 @@ def train_h(args):
                         print(f"[resume] warmup scheduler load skipped: {e}")
             else:
                 print("[resume] schedulers not loaded (optimizer state incompatible); cosine/warmup restart from current build")
+            if getattr(args, 'reset_best_val_on_resume', False):
+                best_val_loss = float('inf')
+                print("[resume] reset_best_val_on_resume: best_val_loss → inf (early stopping baseline fresh)")
 
     # FastText after resume so Phase 2 is not overwritten by Phase-1 CE weights when prev run had no FastText.
     if args.use_fasttext:
@@ -339,6 +385,7 @@ def train_h(args):
         ep_loss, ep_acc, ep_gnorm = 0.0, 0.0, 0.0
         ep_entropy = 0.0
         consec_nan = 0
+        train_aborted_nan = False
 
         train_pbar = tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs} [Train]")
         for step_idx, batch in enumerate(train_pbar):
@@ -347,7 +394,8 @@ def train_h(args):
             length_bin = batch.length_bins.to(DEVICE) if getattr(batch, 'length_bins', None) is not None else None
             label_tokens = batch.label_tokens.to(DEVICE) if getattr(batch, 'label_tokens', None) is not None else None
             grid_feats = batch.grid_feats.to(DEVICE) if getattr(batch, 'grid_feats', None) is not None else None
-            
+            grid_valid = batch.grid_valid.to(DEVICE) if getattr(batch, 'grid_valid', None) is not None else None
+
             dec_in, dec_tgt = targets[:, :-1], targets[:, 1:]
             
             optimizer.zero_grad(set_to_none=True)
@@ -358,19 +406,21 @@ def train_h(args):
                     epsilon = args.ss_k / (args.ss_k + math.exp(rel_ep / args.ss_k))
                     end_idx = a_vocab.word2idx.get('<end>', 2)
                     ss_min = max(0, getattr(args, 'min_decode_len', 0))
-                    logits = _ss_forward_h(
+                    logits, mac_attn_ss = _ss_forward_h(
                         model, questions, feats, dec_in, epsilon,
-                        grid_feats=grid_feats, img_mask=img_mask,
+                        grid_feats=grid_feats, grid_valid=grid_valid, img_mask=img_mask,
                         length_bin=length_bin, label_tokens=label_tokens,
                         min_decode_len=ss_min, end_idx=end_idx,
                     )
                     ce_loss = criterion(logits, dec_tgt)
-                    loss = ce_loss
-                    entropy_loss = torch.zeros((), device=DEVICE, dtype=torch.float32)
+                    entropy_loss = attention_entropy_penalty(
+                        mac_attn_ss, eps=1e-7, reference_device=DEVICE)
+                    cov_loss_scalar = torch.zeros((), device=DEVICE, dtype=torch.float32)
+                    loss = ce_loss + 0.5 * cov_loss_scalar + args.entropy_mac_coef * entropy_loss
                 else:
                     out, cov_loss_scalar = model.forward_with_cov(
                         questions, feats, dec_in, img_mask=img_mask, length_bin=length_bin,
-                        label_tokens=label_tokens, grid_feats=grid_feats,
+                        label_tokens=label_tokens, grid_feats=grid_feats, grid_valid=grid_valid,
                     )
                     if not torch.isfinite(out.logits).all():
                         loss = out.logits.new_tensor(float('nan'))
@@ -384,6 +434,7 @@ def train_h(args):
                             torch.cuda.empty_cache()
                         if consec_nan >= MAX_CONSEC_NAN:
                             print(f"[CRITICAL] {MAX_CONSEC_NAN} consecutive NaN outputs — aborting epoch {epoch+1}")
+                            train_aborted_nan = True
                             break
                         continue
                     ce_loss = criterion(out.logits, dec_tgt)
@@ -405,8 +456,7 @@ def train_h(args):
                 mask = dec_tgt != 0
                 acc = (preds[mask] == dec_tgt[mask]).float().mean().item()
                 ep_acc += acc
-                if not ss_on:
-                    ep_entropy += float(entropy_loss.detach().item())
+                ep_entropy += float(entropy_loss.detach().item())
 
                 if args.scst and args.phase == 4:
                     from training.scst import scst_step
@@ -431,7 +481,7 @@ def train_h(args):
                         meteor_weight=args.scst_meteor,
                         exact_match_weight=args.scst_exact_match,
                         ohp_weight=args.ohp_lambda, glove_embed=glove_embed, return_stats=True,
-                        grid_feats=grid_feats, img_mask=img_mask, label_tokens=label_tokens,
+                        grid_feats=grid_feats, grid_valid=grid_valid, img_mask=img_mask, label_tokens=label_tokens,
                         visual_labels_batch=lbl_names,
                     )
                     if rl_loss is not None:
@@ -448,6 +498,7 @@ def train_h(args):
                     torch.cuda.empty_cache()
                 if consec_nan >= MAX_CONSEC_NAN:
                     print(f"[CRITICAL] {MAX_CONSEC_NAN} consecutive NaN steps — aborting epoch {epoch+1}")
+                    train_aborted_nan = True
                     break
                 continue
             consec_nan = 0
@@ -473,13 +524,32 @@ def train_h(args):
             ep_loss += loss.item()
             global_step += 1
             train_pbar.set_postfix({'loss': f"{loss.item():.3f}", 'acc': f"{acc*100:.1f}%"})
-            if _wb and not ss_on and step_idx % 50 == 0:
+            if _wb and step_idx % 50 == 0:
                 try:
                     _wb.log({'train/entropy_mac': float(entropy_loss.detach().item()), 'train/step': global_step}, step=global_step)
                 except Exception:
                     pass
             if args.dry_run and step_idx >= 5:
                 return
+
+        if train_aborted_nan or not _model_params_all_finite(model):
+            print(
+                f"[CRITICAL] Train epoch {epoch+1} aborted or non-finite weights — "
+                "skipping val & checkpoint save (avoids poisoning resume.pth)."
+            )
+            if os.path.isfile(best_ckpt_path):
+                try:
+                    b = torch.load(best_ckpt_path, map_location='cpu', weights_only=False)
+                    bsd = _normalize_ckpt_state_dict(b['model_state_dict'], model)
+                    model.load_state_dict(bsd, strict=False)
+                    print(f"[recover] Reloaded weights from {best_ckpt_path}")
+                except Exception as e:
+                    print(f"[recover] Could not load best checkpoint: {e}")
+            else:
+                print("[recover] No best checkpoint on disk — consider retrain or resume from an older .pth")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            continue
 
         avg_loss, avg_acc = ep_loss / len(train_loader), ep_acc / len(train_loader)
         
@@ -491,9 +561,12 @@ def train_h(args):
                 v_feats, v_q, v_tgt = v_batch.feats.to(DEVICE), v_batch.questions.to(DEVICE), v_batch.targets.to(DEVICE)
                 v_mask = v_batch.img_mask.to(DEVICE) if v_batch.img_mask is not None else None
                 v_grid = v_batch.grid_feats.to(DEVICE) if getattr(v_batch, 'grid_feats', None) is not None else None
-                
+                v_grid_valid = v_batch.grid_valid.to(DEVICE) if getattr(v_batch, 'grid_valid', None) is not None else None
+
                 with autocast('cuda', dtype=amp_dtype):
-                    v_out, _ = model.forward_with_cov(v_q, v_feats, v_tgt[:, :-1], img_mask=v_mask, grid_feats=v_grid)
+                    v_out, _ = model.forward_with_cov(
+                        v_q, v_feats, v_tgt[:, :-1], img_mask=v_mask,
+                        grid_feats=v_grid, grid_valid=v_grid_valid)
                     v_loss = criterion(v_out.logits, v_tgt[:, 1:]).item()
                     val_loss += v_loss
                     v_preds = v_out.logits.argmax(dim=-1)
@@ -505,24 +578,39 @@ def train_h(args):
         avg_vacc = val_correct / max(val_tokens, 1)
         cur_lr = optimizer.param_groups[0]['lr']
         print(f"Epoch {epoch+1} | Trn_Loss: {avg_loss:.4f} | Val_Loss: {avg_val:.4f} | Trn_Acc: {avg_acc*100:.1f}% | Val_Acc: {avg_vacc*100:.1f}% | LR: {cur_lr:.2e}")
-        
-        history['train_loss'].append(avg_loss)
-        history['val_loss'].append(avg_val)
-        history['lr'].append(cur_lr)
-        with open(history_path, 'w') as f: json.dump(history, f, indent=2)
-            
-        if _wb:
+
+        metrics_ok = (
+            math.isfinite(avg_loss) and math.isfinite(avg_val)
+            and _model_params_all_finite(model)
+        )
+        if metrics_ok:
+            history['train_loss'].append(avg_loss)
+            history['val_loss'].append(avg_val)
+            history['lr'].append(cur_lr)
+            with open(history_path, 'w') as f:
+                json.dump(history, f, indent=2)
+
+        if _wb and metrics_ok:
             log_payload = {'train/loss': avg_loss, 'val/loss': avg_val, 'lr': cur_lr, 'epoch': epoch + 1,
                            'val/token_acc': avg_vacc}
             if ep_entropy > 0:
                 log_payload['train/entropy_mac_mean'] = ep_entropy / max(1, len(train_loader))
             _wb.log(log_payload)
-        
+
         # Warmup only for the first `warmup_epochs` of training (epoch index 0..warmup-1), not after resume.
         if args.warmup_epochs > 0 and epoch < args.warmup_epochs:
             warmup_sched.step()
         else:
             cosine_sched.step()
+
+        if not metrics_ok:
+            print("[WARN] Skipping checkpoint save (non-finite metrics or weights).")
+            epochs_no_improve += 1
+            print(f"[!] Patience: {epochs_no_improve}/{args.patience} (bad epoch)")
+            if args.patience > 0 and epochs_no_improve >= args.patience:
+                print(f"\n[CRITICAL] EARLY STOPPING ACTIVATED! Model H đã hội tụ.")
+                break
+            continue
 
         sd = {k: v.cpu() for k, v in _model_state_dict_for_save(model).items()}
         ckpt_meta = {
