@@ -13,7 +13,7 @@ from torch.utils.data import DataLoader, Subset, ConcatDataset
 
 from fasttext_utils import build_fasttext_matrix
 from models.vqa_model_h import ModelH
-from data.dataset import VQAGenerativeDataset, make_butd_loader
+from data.dataset import VQAGenerativeDataset, audit_butd_feature_dir, make_butd_loader
 from data.collate import make_collate_fn
 from data.samplers import (
     build_mixed_sampler,
@@ -68,6 +68,9 @@ def parse_args():
     parser.add_argument('--scheduled_sampling', action='store_true',
                         help='Phase 3: token-level scheduled sampling (inverse-sigmoid epsilon)')
     parser.add_argument('--ss_k', type=float, default=5.0, help='SS schedule constant k')
+    parser.add_argument('--min_decode_len', type=int, default=8,
+                        help='Phase 3 scheduled sampling: forbid <end> for first N generated steps (0=off). '
+                             'Match evaluate_h --min_decode_len for train/infer alignment.')
     parser.add_argument('--scst', action='store_true')
     parser.add_argument('--ohp_lambda', type=float, default=0.0)
     parser.add_argument('--dropout', type=float, default=0.5)
@@ -105,8 +108,9 @@ def parse_args():
 
 
 def _ss_forward_h(model, questions, feats, dec_input, epsilon,
-                  grid_feats=None, img_mask=None, length_bin=None, label_tokens=None):
-    """Scheduled sampling for Model H (token-level). Matches train.py / train_g pattern."""
+                  grid_feats=None, img_mask=None, length_bin=None, label_tokens=None,
+                  min_decode_len=0, end_idx=2):
+    """Scheduled sampling for Model H (token-level). Optional min_decode_len matches inference EOS masking."""
     B = feats.size(0)
     max_len = dec_input.size(1)
     memory, context, _qfeat, kb, _v_proj_raw, _ = model.encode(
@@ -131,7 +135,11 @@ def _ss_forward_h(model, questions, feats, dec_input, epsilon,
         )
         logits_list.append(logit)
         if t < max_len - 1:
-            current_tok = dec_input[:, t + 1] if random.random() < epsilon else logit.detach().argmax(dim=-1)
+            pick = logit
+            if min_decode_len > 0 and t < min_decode_len and 0 <= end_idx < logit.size(-1):
+                pick = logit.clone()
+                pick[:, end_idx] = torch.finfo(pick.dtype).min
+            current_tok = dec_input[:, t + 1] if random.random() < epsilon else pick.detach().argmax(dim=-1)
     return torch.stack(logits_list, dim=1)
 
 
@@ -213,10 +221,24 @@ def train_h(args):
     import glob
     feat_files = glob.glob(os.path.join(args.vg_feat_dir, '*.pt'))
     if feat_files:
-        sample = torch.load(feat_files[0], map_location='cpu', weights_only=False)
-        args.v_dim = sample['region_feat'].shape[1]
-        args.grid_dim = sample['grid_feat'].shape[0] if 'grid_feat' in sample else 2048
-    else: args.v_dim, args.grid_dim = 2055, 2048
+        rep = audit_butd_feature_dir(
+            args.vg_feat_dir,
+            max_files=min(512, len(feat_files)),
+            raise_on_mismatch=True,
+        )
+        for msg in rep.get("issues") or []:
+            print(f"[features] {msg}")
+        print(
+            f"[features] audited {rep['n_scanned']}/{rep['n_total']} .pt → "
+            f"region_dim={rep['region_dim']}, grid_dim={rep.get('grid_dim')}, "
+            f"formats={rep.get('format_counts')}"
+        )
+        args.v_dim = int(rep["region_dim"])
+        gd = rep.get("grid_dim")
+        args.grid_dim = int(gd) if gd is not None else 2048
+    else:
+        print("[features] WARNING: no .pt in vg_feat_dir — using defaults v_dim=2055, grid_dim=2048")
+        args.v_dim, args.grid_dim = 2055, 2048
         
     model = ModelH(len(q_vocab), len(a_vocab), args).to(DEVICE)
 
@@ -334,10 +356,13 @@ def train_h(args):
                 if ss_on:
                     rel_ep = epoch - start_epoch
                     epsilon = args.ss_k / (args.ss_k + math.exp(rel_ep / args.ss_k))
+                    end_idx = a_vocab.word2idx.get('<end>', 2)
+                    ss_min = max(0, getattr(args, 'min_decode_len', 0))
                     logits = _ss_forward_h(
                         model, questions, feats, dec_in, epsilon,
                         grid_feats=grid_feats, img_mask=img_mask,
                         length_bin=length_bin, label_tokens=label_tokens,
+                        min_decode_len=ss_min, end_idx=end_idx,
                     )
                     ce_loss = criterion(logits, dec_tgt)
                     loss = ce_loss

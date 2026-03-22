@@ -1,17 +1,20 @@
 """
-extract_vg_features.py — Model H Upgraded Extraction Script
-=============================================================
-Extracts Faster R-CNN RoI features AND Grid features from images.
-Specifically designed for Model H, utilizing deeper backbones (e.g., ResNet-152 
-or ResNeXt-101) pretrained extensively for richer semantic extraction.
+extract_features_model_h.py — Pre-extract visual features for Model H (VQA-H)
+==============================================================================
+Detectron2 Faster R-CNN (e.g. ResNeXt-101) RoI features + FPN grid + per-box labels.
 
-Output: data/vg_features/{image_id}.pt
-  Each file contains: 
-    - 'region_feat': Tensor(k, 2048 + 5 spatial dims)
-    - 'grid_feat': Tensor(2048, H', W') -> flat context
+Output: e.g. data/vg_features/{image_id}.pt
+  - 'region_feat': (k, 1029) = 1024-d box + 5 spatial (normalized xyxy + w*h)
+  - 'grid_feat': 1D (e.g. 256-d from FPN p5 pool)
+  - 'label_names': list[str] for PGN visual copy
+
+Do NOT mix this output folder with Model F extraction (extract_features_model_f.py):
+  different tensor width (1031) and keys ({'feat'} only).
+
+Former name: extract_vg_features.py
 
 Usage:
-  python src/scripts/extract_vg_features.py \
+  python src/scripts/extract_features_model_h.py \
       --image_dir data/images \
       --output_dir data/vg_features \
       --top_k 36

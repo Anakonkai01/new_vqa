@@ -12,7 +12,7 @@
 #   --focal      → Phases 1-3 ONLY (disabled in Phase 4 SCST)
 #
 # Prerequisites:
-#   python src/scripts/extract_butd_features.py \
+#   python src/scripts/extract_features_model_f.py \
 #       --image_dir data/raw --output_dir data/butd_features \
 #       --splits train2014 val2014
 #   python src/scripts/1_build_vocab.py

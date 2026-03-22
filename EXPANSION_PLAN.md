@@ -49,7 +49,7 @@
 - [x] Tier 3B  — Faster R-CNN BUTD encoder (Model F)
                   BUTDFeatureEncoder (encoder_cnn.py), VQAModelF (vqa_models.py),
                   BUTDDataset + butd_collate_fn (dataset.py),
-                  extract_butd_features.py (scripts/), --model F + --butd_feat_dir (train.py)
+                  extract_features_model_f.py (scripts/), --model F + --butd_feat_dir (train.py)
                   feat_dim=1029 (ResNet50 FPN 1024 + 5 spatial). Pre-extract then train.
 - [x] Tier 9   — ConceptNet + GNN (src/models/concept_gnn.py)
                   ConceptGNN: 2-layer GCN over ConceptNet/co-occurrence graph.

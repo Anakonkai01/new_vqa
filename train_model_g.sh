@@ -37,7 +37,7 @@
 #
 # Prerequisites:
 #   1. Pre-extract BUTD features with 7-dim spatial geometry (G1):
-#      python src/scripts/extract_butd_features.py --geo7 \
+#      python src/scripts/extract_features_model_f.py --geo7 \
 #          --output_dir data/features/butd_g1
 #   2. Build merged dataset JSON:
 #      python src/scripts/merge_sources.py \

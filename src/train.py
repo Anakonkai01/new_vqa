@@ -376,7 +376,7 @@ def train(model_type='A', epochs=10, lr=1e-3, batch_size=128, resume=None,
     # Tier 3B: Model F uses pre-extracted BUTD features instead of raw images
     if model_type == 'F':
         if butd_feat_dir is None:
-            raise ValueError("--model F requires --butd_feat_dir (run extract_butd_features.py first)")
+            raise ValueError("--model F requires --butd_feat_dir (run extract_features_model_f.py first)")
         from dataset import BUTDDataset, butd_collate_fn
         vqae_train_dataset = BUTDDataset(
             feat_dir=butd_feat_dir,

@@ -19,9 +19,7 @@ class ControlUnit(nn.Module):
         self.dim = dim
         self.control_question_proj = nn.Linear(dim * 2, dim)
         self.step_emb = nn.Embedding(num_hops, dim)
-        nn.init.normal_(self.step_emb.weight, std=0.01)
-        self.step_proj = nn.Linear(dim, dim, bias=False)
-        nn.init.zeros_(self.step_proj.weight)
+        nn.init.normal_(self.step_emb.weight, std=0.02)
         self.attn_proj = nn.Linear(dim, 1)
 
     def forward(self, step, context, question, control_state, q_mask=None):
@@ -29,7 +27,7 @@ class ControlUnit(nn.Module):
         cq = torch.cat([control_state, question], dim=1) # (B, 2D)
         cq_proj = self.control_question_proj(cq) # (B, D)
         step_t = torch.full((B,), step, dtype=torch.long, device=control_state.device)
-        cq_proj = cq_proj + self.step_proj(self.step_emb(step_t)) # additive step bias
+        cq_proj = cq_proj + self.step_emb(step_t)
         cq_proj = cq_proj.unsqueeze(1) # (B, 1, D)
         interaction = cq_proj * context # (B, L, D)
         attn_logits = self.attn_proj(interaction).squeeze(-1) # (B, L)

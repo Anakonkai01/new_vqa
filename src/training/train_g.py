@@ -247,7 +247,7 @@ def train_model_g(args) -> None:
     if butd_feat_dir is None:
         raise ValueError(
             "--butd_feat_dir required for Model G. "
-            "Run: python src/scripts/extract_butd_features.py first.")
+            "Run: python src/scripts/extract_features_model_f.py first.")
 
     # ── Vocabularies ─────────────────────────────────────────────────────────
     q_vocab = Vocabulary(); q_vocab.load(vocab_q_path)

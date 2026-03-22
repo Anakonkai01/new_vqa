@@ -248,7 +248,7 @@ class BUTDFeatureEncoder(nn.Module):
     Tier-3B: Bottom-Up Top-Down (BUTD) feature encoder.
 
     Does NOT run Faster R-CNN at training time.  Instead it projects
-    pre-extracted RoI features (saved to disk by extract_butd_features.py)
+    pre-extracted RoI features (saved to disk by extract_features_model_f.py)
     from feat_dim → output_size using a learnable projection.
 
     Input:  (B, k, feat_dim)  — pre-extracted features, variable k per image

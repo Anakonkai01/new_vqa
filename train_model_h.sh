@@ -129,6 +129,7 @@ python src/train_h.py \
     --use_fasttext \
     --scheduled_sampling \
     --ss_k 5 \
+    --min_decode_len 8 \
     --resume checkpoints/h/model_h_phase2_best.pth \
     --wandb \
     --wandb_project "vqa-model-h" \

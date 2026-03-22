@@ -52,7 +52,7 @@ sys.path.append(os.path.dirname(__file__))
 from vocab import Vocabulary
 from fasttext_utils import build_fasttext_matrix
 from models.vqa_model_h import ModelH
-from data.dataset import make_butd_loader
+from data.dataset import audit_butd_feature_dir, make_butd_loader
 from data.collate import make_collate_fn
 
 # ── Optional heavy deps ──────────────────────────────────────────────────────
@@ -230,7 +230,7 @@ def _labels_to_token_tensor(label_names_batch, a_vocab, device):
 # ── Greedy / Beam decode on Model H ─────────────────────────────────────────
 @torch.no_grad()
 def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_names, a_vocab, device, max_len=30,
-                        min_decode_len=3):
+                        min_decode_len=8):
     """Greedy decode — single best token at each step."""
     B = region_feat.size(0)
     sos = a_vocab.word2idx.get('<start>', 1)
@@ -307,7 +307,7 @@ def _repeat_ngram(tokens, next_tok, n):
 
 @torch.no_grad()
 def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_names, a_vocab, device,
-                      beam_width=3, max_len=30, no_repeat_ngram=3, min_decode_len=3):
+                      beam_width=3, max_len=30, no_repeat_ngram=3, min_decode_len=8):
     """
     Optimized beam search: encode ALL samples once (batched), then per-sample GPU-accelerated beam decode.
     Speedup: ~2-5x vs per-sample encoder loop (single encode pass).
@@ -657,10 +657,23 @@ def evaluate_h(args):
     # 3. Infer visual dims
     feat_files  = glob.glob(os.path.join(args.vg_feat_dir, '*.pt'))
     if feat_files:
-        sample      = torch.load(feat_files[0], map_location='cpu', weights_only=False)
-        v_dim       = sample['region_feat'].shape[1]
-        grid_dim    = sample['grid_feat'].shape[0] if 'grid_feat' in sample else 2048
+        rep = audit_butd_feature_dir(
+            args.vg_feat_dir,
+            max_files=min(512, len(feat_files)),
+            raise_on_mismatch=True,
+        )
+        for msg in rep.get("issues") or []:
+            print(f"[features] {msg}")
+        print(
+            f"[features] audited {rep['n_scanned']}/{rep['n_total']} .pt → "
+            f"region_dim={rep['region_dim']}, grid_dim={rep.get('grid_dim')}, "
+            f"formats={rep.get('format_counts')}"
+        )
+        v_dim = int(rep["region_dim"])
+        gd = rep.get("grid_dim")
+        grid_dim = int(gd) if gd is not None else 2048
     else:
+        print("[features] WARNING: no .pt in vg_feat_dir — using defaults region=2055, grid=2048")
         v_dim, grid_dim = 2055, 2048
     print(f"Visual dims: region={v_dim}, grid={grid_dim}")
 

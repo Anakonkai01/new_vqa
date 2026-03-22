@@ -28,7 +28,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # Extract train2014 (82,783 images)
 echo ">>> [1/2] Processing train2014 split..."
-python src/scripts/extract_vg_features.py \
+python src/scripts/extract_features_model_h.py \
     --image_dir data/images/train2014 \
     --output_dir data/vg_features \
     --batch_size 8 \
@@ -36,7 +36,7 @@ python src/scripts/extract_vg_features.py \
 
 # Extract val2014 (40,504 images)
 echo ">>> [2/2] Processing val2014 split..."
-python src/scripts/extract_vg_features.py \
+python src/scripts/extract_features_model_h.py \
     --image_dir data/images/val2014 \
     --output_dir data/vg_features \
     --batch_size 8 \

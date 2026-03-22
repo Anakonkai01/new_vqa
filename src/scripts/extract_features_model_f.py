@@ -1,16 +1,18 @@
 """
-extract_butd_features.py — Tier 3B pre-extraction script
-=========================================================
-Extracts Faster R-CNN RoI features from COCO images and saves them to disk.
-Must be run ONCE before training with --model F.
+extract_features_model_f.py — Pre-extract RoI features for Model F (BUTD / torchvision)
+========================================================================================
+Torchvision Faster R-CNN ResNet50-FPN; saves legacy {'feat'} tensors for train.py --model F.
 
 Output: data/butd_features/{image_id}.pt
-  Each file contains: {'feat': Tensor(k, 1029)}
-  feat_dim = 1024 (ResNet50 FPN box_head) + 5 (spatial: x1/W, y1/H, x2/W, y2/H, area)
-  k = number of proposals kept (top_k by objectness score, default 36)
+  {'feat': Tensor(k, 1031)}  — 1024 box + 7 spatial (x1,y1,x2,y2,w,h,area normalized)
+
+WARNING: Not for Model H. Use extract_features_model_h.py → data/vg_features/
+  (region_feat + grid + labels, D=1029).
+
+Former name: extract_butd_features.py
 
 Usage:
-  python src/scripts/extract_butd_features.py \\
+  python src/scripts/extract_features_model_f.py \\
       --splits train2014 val2014 \\
       --image_dir data/images \\
       --output_dir data/butd_features \\
@@ -61,8 +63,8 @@ def extract_one(model, img_tensor, top_k=36):
       3. Apply RoI pooling + box_head MLP on top proposals.
       4. Return top_k feature vectors + normalized spatial coordinates.
 
-    Returns: Tensor (k, 1029) on CPU
-      Columns: [box_features (1024), x1/W, y1/H, x2/W, y2/H, area/(W*H)]
+    Returns: Tensor (k, 1031) on CPU
+      Columns: [box_features (1024), x1/W, y1/H, x2/W, y2/H, w, h, area]
     """
     img_tensor = img_tensor.to(DEVICE)
     W = img_tensor.shape[2]

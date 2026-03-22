@@ -385,7 +385,7 @@ class VQAModelF(nn.Module):
     object-centric (semantically coherent regions) whereas CNN grid features are
     spatially uniform (may include background, partial objects).
 
-    Training requires pre-extracting features with extract_butd_features.py first.
+    Training requires pre-extracting features with extract_features_model_f.py first.
     --model F uses BUTDDataset + butd_collate_fn in train.py.
     """
     def __init__(self, vocab_size, answer_vocab_size,

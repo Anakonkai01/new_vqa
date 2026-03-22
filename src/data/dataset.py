@@ -27,7 +27,8 @@ from __future__ import annotations
 import json
 import os
 import random
-from typing import Callable, Dict, List, Optional, Tuple
+from collections import Counter
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 import torchvision.transforms.functional as TF
@@ -137,6 +138,180 @@ def make_image_loader(
     return _load
 
 
+def unpack_stored_visual_features(data: dict) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[List[str]], str]:
+    """
+    Normalize .pt payloads from:
+      - extract_features_model_h.py → keys region_feat, optional grid_feat, label_names
+      - extract_features_model_f.py → key feat only (Model F legacy), no grid / labels
+
+    Returns:
+        feat   : (k, D) region+spatial concatenated
+        grid   : 1D global vector or None
+        labels : per-RoI class names or None
+        fmt    : 'model_h_vg' | 'legacy_butd_feat'
+    """
+    labels = data.get("label_names", None)
+    if isinstance(data.get("region_feat"), torch.Tensor):
+        feat = data["region_feat"]
+        grid = data.get("grid_feat", None)
+        if feat.dim() != 2:
+            raise ValueError(f"region_feat must be 2D (k, D), got {tuple(feat.shape)}")
+        fmt = "model_h_vg"
+    elif isinstance(data.get("feat"), torch.Tensor):
+        feat = data["feat"]
+        grid = None
+        if feat.dim() != 2:
+            raise ValueError(f"feat must be 2D (k, D), got {tuple(feat.shape)}")
+        fmt = "legacy_butd_feat"
+    else:
+        raise KeyError(
+            "Feature .pt must contain tensor 'region_feat' (Model H) or 'feat' (legacy BUTD extract)"
+        )
+    return feat, grid, labels, fmt
+
+
+def audit_butd_feature_dir(
+    feat_dir: str,
+    *,
+    max_files: int = 512,
+    seed: int = 42,
+    raise_on_mismatch: bool = True,
+) -> Dict[str, Any]:
+    """
+    Sample .pt files under feat_dir and verify a single region feature width D and consistent grid layout.
+
+    Model H expects one D everywhere (e.g. 1029 = 1024 box + 5 spatial from extract_features_model_h).
+    Mixing with extract_features_model_f (1031 = 1024 + 7 spatial) in the same folder breaks Linear layers.
+
+    Uses weights_only=False for robust reading of dicts that may contain label_names (str lists).
+    """
+    import glob as _glob
+
+    paths = sorted(_glob.glob(os.path.join(feat_dir, "*.pt")))
+    n_total = len(paths)
+    if n_total == 0:
+        return {
+            "n_total": 0,
+            "n_scanned": 0,
+            "region_dim": None,
+            "grid_dim": None,
+            "format_counts": {},
+            "issues": [f"No .pt files in {feat_dir!r}"],
+        }
+
+    rng = random.Random(seed)
+    sample_paths = list(paths)
+    if len(sample_paths) > max_files:
+        rng.shuffle(sample_paths)
+        sample_paths = sample_paths[:max_files]
+
+    dim_counts: Counter = Counter()
+    grid_counts: Counter = Counter()
+    fmt_counts: Counter = Counter()
+    issues: List[str] = []
+    example_by_dim: Dict[int, str] = {}
+
+    for p in sample_paths:
+        try:
+            data = torch.load(p, map_location="cpu", weights_only=False)
+            if not isinstance(data, dict):
+                issues.append(f"Non-dict in {os.path.basename(p)}")
+                continue
+            feat, grid, _labels, fmt = unpack_stored_visual_features(data)
+            d = int(feat.shape[1])
+            dim_counts[d] += 1
+            if d not in example_by_dim:
+                example_by_dim[d] = os.path.basename(p)
+            fmt_counts[fmt] += 1
+            if grid is not None and grid.dim() >= 1:
+                grid_counts[int(grid.shape[0])] += 1
+            else:
+                grid_counts[None] += 1  # type: ignore[arg-type]
+        except Exception as e:
+            issues.append(f"{os.path.basename(p)}: {e}")
+
+    if not dim_counts:
+        msg = "No valid feature tensors parsed in sample (check .pt format and keys)."
+        issues.append(msg)
+        out = {
+            "n_total": n_total,
+            "n_scanned": len(sample_paths),
+            "region_dim": None,
+            "grid_dim": None,
+            "format_counts": dict(fmt_counts),
+            "dim_histogram": {},
+            "grid_histogram": {},
+            "issues": issues,
+        }
+        if raise_on_mismatch:
+            raise ValueError(msg)
+        return out
+
+    if len(dim_counts) > 1:
+        msg = (
+            f"Inconsistent region feature width D across sample: {dict(dim_counts)}. "
+            f"Examples: { {d: example_by_dim.get(d) for d in dim_counts} }. "
+            "Do not mix extract_features_model_h (typically D=1029) with extract_features_model_f (D=1031) "
+            "in the same directory."
+        )
+        issues.append(msg)
+        if raise_on_mismatch:
+            raise ValueError(msg)
+        return {
+            "n_total": n_total,
+            "n_scanned": len(sample_paths),
+            "region_dim": None,
+            "grid_dim": None,
+            "format_counts": dict(fmt_counts),
+            "dim_histogram": dict(dim_counts),
+            "grid_histogram": {str(k): v for k, v in grid_counts.items()},
+            "issues": issues,
+        }
+
+    nonnull_grid_dims = [g for g in grid_counts if g is not None]
+    if len(nonnull_grid_dims) > 1:
+        msg = f"Inconsistent grid_feat channel counts: {dict(grid_counts)}"
+        issues.append(msg)
+        if raise_on_mismatch:
+            raise ValueError(msg)
+        return {
+            "n_total": n_total,
+            "n_scanned": len(sample_paths),
+            "region_dim": int(dim_counts.most_common(1)[0][0]),
+            "grid_dim": None,
+            "format_counts": dict(fmt_counts),
+            "dim_histogram": dict(dim_counts),
+            "grid_histogram": {str(k): v for k, v in grid_counts.items()},
+            "issues": issues,
+        }
+
+    majority_dim = int(dim_counts.most_common(1)[0][0])
+    # grid_dim: prefer most common non-None; else None
+    gc_items = [(g, c) for g, c in grid_counts.items() if g is not None]
+    grid_dim: Optional[int] = None
+    if gc_items:
+        grid_dim = max(gc_items, key=lambda x: x[1])[0]
+
+    n_no_grid = int(grid_counts.get(None, 0))
+    n_with_grid = sum(c for g, c in grid_counts.items() if g is not None)
+    if n_no_grid > 0 and n_with_grid > 0:
+        issues.append(
+            f"Mixed files with and without grid_feat ({n_with_grid} with, {n_no_grid} without in sample). "
+            "Batches may be inconsistent; prefer a single extraction pipeline for Model H."
+        )
+
+    return {
+        "n_total": n_total,
+        "n_scanned": len(sample_paths),
+        "region_dim": majority_dim,
+        "grid_dim": grid_dim,
+        "format_counts": dict(fmt_counts),
+        "dim_histogram": dict(dim_counts),
+        "grid_histogram": {str(k): v for k, v in grid_counts.items()},
+        "issues": issues,
+    }
+
+
 def make_butd_loader(feat_dir: str) -> Callable[[int], Tuple[torch.Tensor, Optional[torch.Tensor], Optional[List[str]]]]:
     """
     Returns a callable f(img_id) → (feat_tensor, grid_feat, label_names_or_None).
@@ -150,16 +325,9 @@ def make_butd_loader(feat_dir: str) -> Callable[[int], Tuple[torch.Tensor, Optio
     def _load(img_id: int, q_text: str = "") -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[List[str]]]:
         feat_path = os.path.join(feat_dir, f"{img_id}.pt")
         data = torch.load(feat_path, map_location="cpu", weights_only=True)
-        
-        # Support legacy "feat" keys or new Model H strict extraction keys
-        if "feat" in data:
-            feat = data["feat"]
-            grid = None
-        else:
-            feat = data.get("region_feat", torch.empty((0, 2048)))
-            grid = data.get("grid_feat", None)
-            
-        labels = data.get("label_names", None)                 # List[str] or None
+        if not isinstance(data, dict):
+            raise TypeError(f"Expected dict in {feat_path}, got {type(data)}")
+        feat, grid, labels, _fmt = unpack_stored_visual_features(data)
         return feat, grid, labels
 
     return _load
