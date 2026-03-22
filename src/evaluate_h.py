@@ -247,7 +247,7 @@ def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label
     outputs   = [[] for _ in range(B)]
 
     # Encode once with Model H signature
-    memory, q_hidden, _, v_proj = model.encode(q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask)
+    memory, q_hidden, _, v_proj, _ = model.encode(q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask)
     h = memory.unsqueeze(0).repeat(model.decoder.num_layers, 1, 1)
     c = torch.zeros_like(h)
     coverage = None
@@ -319,7 +319,7 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, label_n
 
     # ─ Encode all B samples at once (batched on GPU) ╔════════════════════════
     # This is the key optimization: single forward pass for all B samples
-    memory, q_hidden, _, v_proj = model.encode(q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask)
+    memory, q_hidden, _, v_proj, _ = model.encode(q_ids, region_feat, grid_feats=grid_feat, img_mask=region_mask)
     # memory: (B, H), q_hidden: (B, H), v_proj: (B, R, H)
     
     alpha = 0.7  # length-penalty exponent

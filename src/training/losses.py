@@ -224,3 +224,28 @@ class _PlainCEWrapper(nn.Module):
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         # logits: (B,T,V) → permute to (B,V,T) for CrossEntropyLoss
         return self.ce(logits.permute(0, 2, 1), targets)
+
+
+
+
+
+def attention_entropy_penalty(mac_attn, eps=1e-9):
+    """
+    Tính toán Entropy của phân bố Attention trong MAC Network.
+    Mục tiêu là MINIMIZE giá trị này để ép attention sắc nét hơn.
+    
+    Args:
+        mac_attn: Tensor kích thước (B, num_hops, K) chứa attention weights.
+        eps: Hằng số nhỏ để tránh log(0).
+    Returns:
+        entropy_loss: Giá trị scalar.
+    """
+    if mac_attn is None:
+        return torch.tensor(0.0, device='cuda' if torch.cuda.is_available() else 'cpu')
+        
+    # Công thức Entropy: H(X) = - sum(p * log(p))
+    # mac_attn đã đi qua softmax nên tổng theo chiều K (dim=-1) bằng 1.0
+    entropy = - torch.sum(mac_attn * torch.log(mac_attn + eps), dim=-1) # Kích thước: (B, num_hops)
+    
+    # Lấy trung bình trên tất cả các bước nhảy (hops) và các mẫu trong batch
+    return entropy.mean()

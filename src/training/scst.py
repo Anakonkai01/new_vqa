@@ -412,7 +412,7 @@ def _greedy_decode(model, model_type, imgs, questions, vocab,
             end_idx   = vocab.word2idx.get('<end>', 2)
             start_idx = vocab.word2idx.get('<start>', 1)
 
-            memory, Q_H, _, V = model.encode(questions, imgs, grid_feats=None, img_mask=None)
+            memory, Q_H, _, V, _ = model.encode(questions, imgs, grid_feats=None, img_mask=None)
             h = memory.unsqueeze(0).repeat(model.decoder.num_layers, 1, 1)
             c = torch.zeros_like(h)
             
@@ -535,7 +535,7 @@ def _sampling_decode(model, model_type, imgs, questions, vocab,
 
     elif model_type == 'H':
         with torch.no_grad():
-            memory, Q_H, _, V = model.encode(questions, imgs, grid_feats=None, img_mask=None)
+            memory, Q_H, _, V, _ = model.encode(questions, imgs, grid_feats=None, img_mask=None)
             h = memory.unsqueeze(0).repeat(model.decoder.num_layers, 1, 1)
             c = torch.zeros_like(h)
 

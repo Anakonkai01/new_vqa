@@ -1,9 +1,9 @@
 """
 Dataset class:
   Input : index
-  Output: 1 sample (image_tensor, question_tensor, answer_tensor)
+  Output: 1 sample (image_tensor/feat_tensor, question_tensor, answer_tensor, length_bin_tensor)
 
-Loads raw images and encodes questions/answers to index tensors.
+Loads raw images/features and encodes questions/answers to index tensors.
 
 Changes (D1):
   - Horizontal flip guard: skips flip for spatial questions (left/right/etc.)
@@ -13,8 +13,12 @@ Changes (D1):
 
 Changes (D2):
   - build_mixed_sampler(): WeightedRandomSampler mixing VQA v2.0 and VQA-E
-    at a configurable ratio (default 70/30) to prevent length bias during
-    Phase 1 pretraining.
+    at a configurable ratio (default 70/30) to prevent length bias.
+
+Changes (G5 FIX):
+  - Explicitly calculate `length_bin` dynamically inside `__getitem__` based on 
+    the final numericalized `a_tensor` sequence length.
+  - 0: SHORT (<=5), 1: MEDIUM (6-14), 2: LONG (>=15).
 """
 
 import random
@@ -27,24 +31,26 @@ from torchvision import transforms
 import json
 import os
 
-
 # Words that indicate spatial orientation — flipping would change the answer
 SPATIAL_KEYWORDS = {
     'left', 'right', 'east', 'west', 'leftmost', 'rightmost',
     'lefthand', 'righthand', 'clockwise', 'counterclockwise',
 }
 
-
 def vqa_collate_fn(batch):
     """
     Handle batches with variable-length sequences.
     pad_sequence finds the longest sequence in the batch and zero-pads shorter ones.
+    NOW UNPACKS 4 ELEMENTS (including length_bins).
     """
-    imgs, questions, answers = zip(*batch)
-    imgs_stacked     = torch.stack(imgs, dim=0)
-    questions_padded = pad_sequence(questions, batch_first=True)
-    answer_padded    = pad_sequence(answers,   batch_first=True)
-    return imgs_stacked, questions_padded, answer_padded
+    imgs, questions, answers, length_bins = zip(*batch)
+    
+    imgs_stacked        = torch.stack(imgs, dim=0)
+    questions_padded    = pad_sequence(questions, batch_first=True)
+    answer_padded       = pad_sequence(answers,   batch_first=True)
+    length_bins_stacked = torch.stack(length_bins, dim=0) # (B,)
+    
+    return imgs_stacked, questions_padded, answer_padded, length_bins_stacked
 
 
 def _build_transforms(augment):
@@ -126,6 +132,16 @@ class VQAEDataset(Dataset):
         q_tensor = torch.tensor(self.vocab.numericalize(q_text), dtype=torch.long)
         a_tensor = torch.tensor(self.vocab.numericalize(a_text), dtype=torch.long)
 
+        # --- G5 FIX: TÍNH TOÁN LENGTH BIN ĐỘNG ---
+        seq_len = a_tensor.size(0)
+        if seq_len <= 5:
+            len_bin = 0    # SHORT
+        elif seq_len <= 14:
+            len_bin = 1    # MEDIUM
+        else:
+            len_bin = 2    # LONG
+        len_bin_tensor = torch.tensor(len_bin, dtype=torch.long)
+
         img_name  = f"COCO_{self.split}_{img_id:012d}.jpg"
         img_path  = os.path.join(self.image_dir, img_name)
         image     = Image.open(img_path).convert("RGB")
@@ -134,18 +150,14 @@ class VQAEDataset(Dataset):
         image     = _apply_flip_guard(image, q_text, self.augment)
         img_tensor = self.transform(image)
 
-        return img_tensor, q_tensor, a_tensor
+        # RETURN 4 ELEMENTS
+        return img_tensor, q_tensor, a_tensor, len_bin_tensor
 
 
 class VQADataset(Dataset):
     def __init__(self, image_dir, question_json_path,
                  annotations_json_path, vocab,
                  split='train2014', max_samples=None, augment=False):
-        """
-        split      : 'train2014' or 'val2014'
-        max_samples: limit samples (useful for fast pipeline testing)
-        augment    : if True, apply augmentation (train only — NOT for val/test)
-        """
         self.image_dir = image_dir
         self.vocab     = vocab
         self.split     = split
@@ -161,7 +173,7 @@ class VQADataset(Dataset):
         with open(annotations_json_path, 'r') as f:
             annotations = json.load(f)['annotations']
 
-        # D1: store all 10 annotations per question (not just multiple_choice_answer)
+        # D1: store all 10 annotations per question
         self.qid2answers = {
             ann['question_id']: [a['answer'] for a in ann.get('answers', [])]
                                  or [ann['multiple_choice_answer']]
@@ -184,18 +196,26 @@ class VQADataset(Dataset):
         a_text  = random.choice(answers) if answers else ''
         a_tensor = torch.tensor(self.vocab.numericalize(a_text), dtype=torch.long)
 
+        # --- G5 FIX: TÍNH TOÁN LENGTH BIN ĐỘNG ---
+        seq_len = a_tensor.size(0)
+        if seq_len <= 5:
+            len_bin = 0    # SHORT (Hầu hết VQA v2.0 sẽ rơi vào đây)
+        elif seq_len <= 14:
+            len_bin = 1    # MEDIUM
+        else:
+            len_bin = 2    # LONG
+        len_bin_tensor = torch.tensor(len_bin, dtype=torch.long)
+
         img_name   = f"COCO_{self.split}_{img_id:012d}.jpg"
         img_path   = os.path.join(self.image_dir, img_name)
         image      = Image.open(img_path).convert("RGB")
 
-        # D1: spatial-aware flip guard
         image      = _apply_flip_guard(image, q_text, self.augment)
         img_tensor = self.transform(image)
 
-        return img_tensor, q_tensor, a_tensor
+        # RETURN 4 ELEMENTS
+        return img_tensor, q_tensor, a_tensor, len_bin_tensor
 
-
-# ── Tier D2: Mixed-Ratio Pretraining ───────────────────────────────────────────
 
 def build_mixed_sampler(vqa_v2_dataset: Dataset, vqae_dataset: Dataset,
                         vqa_fraction: float = 0.7,
@@ -203,38 +223,6 @@ def build_mixed_sampler(vqa_v2_dataset: Dataset, vqae_dataset: Dataset,
     """
     Build a ConcatDataset + WeightedRandomSampler that mixes VQA v2.0 and VQA-E
     at a controlled ratio to prevent length bias during Phase 1 pretraining.
-
-    THE LENGTH BIAS PROBLEM
-    -----------------------
-    VQA v2.0 answers are 1-3 tokens long.  Training ONLY on VQA v2.0 teaches the
-    LSTM decoder to emit <end> after 1-3 tokens, creating a strong "early termination"
-    prior that contradicts VQA-E's 5-20 token explanation objective.
-
-    THE FIX
-    -------
-    Mix VQA v2.0 and VQA-E in each batch.  VQA v2.0 provides vocabulary breadth
-    (larger answer space, factual diversity) while VQA-E anchors the decoder's
-    length distribution toward long-form explanations.
-
-    Default: 70% VQA v2.0 / 30% VQA-E.
-    VQA v2.0 (~444K) and VQA-E (~181K) have a 2.45:1 natural ratio, so VQA-E would
-    naturally occupy ~29% of a combined dataset anyway. The 70/30 weighted sampler
-    gives VQA-E exactly 30% of each batch — a marginal 1.05× oversample vs. natural
-    frequency. The real benefit is VOCABULARY BREADTH (VQA v2.0 exposes the model
-    to more factual diversity), not oversampling. Length bias from VQA v2.0's 87%
-    single-token answers (59% of each batch) is mitigated by context-conditioning:
-    MHCA reads question tokens at every decode step, so the model learns that
-    "why/how" questions require long explanations.
-
-    Args:
-        vqa_v2_dataset : VQADataset  (short answers, VQA v2.0)
-        vqae_dataset   : VQAEDataset (long answer + explanation)
-        vqa_fraction   : fraction of each batch from VQA v2.0 (default 0.7)
-        num_samples    : total samples drawn per epoch; defaults to len(concat_dataset)
-
-    Returns:
-        concat_dataset : ConcatDataset([vqa_v2_dataset, vqae_dataset])
-        sampler        : WeightedRandomSampler with per-sample weights
     """
     assert 0.0 < vqa_fraction < 1.0, "vqa_fraction must be in (0, 1)"
     vqae_fraction = 1.0 - vqa_fraction
@@ -242,12 +230,9 @@ def build_mixed_sampler(vqa_v2_dataset: Dataset, vqae_dataset: Dataset,
     n_vqa  = len(vqa_v2_dataset)
     n_vqae = len(vqae_dataset)
 
-    # Weight per sample = desired_fraction / dataset_size
-    # All samples within the same source share the same weight.
     w_vqa  = vqa_fraction  / n_vqa
     w_vqae = vqae_fraction / n_vqae
 
-    # Build weight vector: VQA v2.0 first (ConcatDataset preserves order)
     weights = [w_vqa]  * n_vqa + [w_vqae] * n_vqae
 
     total = num_samples or (n_vqa + n_vqae)
@@ -255,26 +240,18 @@ def build_mixed_sampler(vqa_v2_dataset: Dataset, vqae_dataset: Dataset,
     sampler = WeightedRandomSampler(
         weights=weights,
         num_samples=total,
-        replacement=True,   # replacement needed for oversampling VQA-E
+        replacement=True,
     )
     return concat, sampler
 
 
-# ── Tier 3B: BUTD Faster R-CNN feature dataset ─────────────────────────────────
-
 class BUTDDataset(VQAEDataset):
     """
     Tier-3B: Dataset that loads pre-extracted Faster R-CNN RoI features from disk
-    instead of raw images. Features are extracted offline by extract_butd_features.py.
-
-    Each .pt file contains {'feat': Tensor(k, feat_dim)} where:
-      feat_dim = box_head_dim (1024 for ResNet50 FPN) + 5 spatial dims = 1029
-      spatial: [x1/W, y1/H, x2/W, y2/H, area/(W*H)]
-      k = number of region proposals kept (up to top_k in extraction, default 36)
+    instead of raw images.
     """
     def __init__(self, feat_dir, vqa_e_json_path, vocab,
                  split='train2014', max_samples=None):
-        # Call parent but skip augment/image loading — we load .pt features instead
         super().__init__(image_dir='', vqa_e_json_path=vqa_e_json_path,
                          vocab=vocab, split=split,
                          max_samples=max_samples, augment=False)
@@ -285,7 +262,6 @@ class BUTDDataset(VQAEDataset):
         img_id = ann['img_id']
         q_text = ann['question']
 
-        # Load pre-extracted RoI features
         feat_path = os.path.join(self.feat_dir, f"{img_id}.pt")
         data      = torch.load(feat_path, map_location='cpu', weights_only=True)
         feat_tensor = data['feat']   # (k, feat_dim)
@@ -298,30 +274,34 @@ class BUTDDataset(VQAEDataset):
 
         q_tensor = torch.tensor(self.vocab.numericalize(q_text), dtype=torch.long)
         a_tensor = torch.tensor(self.vocab.numericalize(a_text), dtype=torch.long)
-        return feat_tensor, q_tensor, a_tensor
+        
+        # --- G5 FIX: TÍNH TOÁN LENGTH BIN ĐỘNG ---
+        seq_len = a_tensor.size(0)
+        if seq_len <= 5:
+            len_bin = 0    # SHORT
+        elif seq_len <= 14:
+            len_bin = 1    # MEDIUM
+        else:
+            len_bin = 2    # LONG
+        len_bin_tensor = torch.tensor(len_bin, dtype=torch.long)
+
+        # RETURN 4 ELEMENTS
+        return feat_tensor, q_tensor, a_tensor, len_bin_tensor
 
 
 def butd_collate_fn(batch):
     """
     Collate for BUTDDataset. Pads the region (k) dimension across the batch.
-    feat shape per sample: (k_i, feat_dim) — k_i may vary across images.
-    pad_sequence pads k dimension: output (B, max_k, feat_dim).
-
-    Returns a 4-tuple: (feats_padded, q_padded, a_padded, img_mask)
-      img_mask : (B, max_k) bool — True = valid region, False = zero-padding.
-
-    The mask is required downstream to prevent two bugs:
-      1. Attention leakage: softmax assigns probability mass to padding zeros
-         in MultiHeadCrossAttention unless those positions are masked to -inf.
-      2. Global feature dilution: mean(dim=1) averages over padding zeros,
-         deflating the magnitude by a factor of max_k / actual_k.
-    Both are fixed by threading img_mask through the decoder.
+    NOW UNPACKS 4 ELEMENTS (including length_bins).
     """
-    feats, questions, answers = zip(*batch)
+    feats, questions, answers, length_bins = zip(*batch)
+    
     feats_padded = pad_sequence(feats,     batch_first=True)  # (B, max_k, feat_dim)
     q_padded     = pad_sequence(questions, batch_first=True)
     a_padded     = pad_sequence(answers,   batch_first=True)
-    # True where the feature vector is non-zero (i.e., a real region, not padding).
-    # abs().sum(-1) > 0 is robust to the L2-normalised features in VQAModelF.forward.
+    
     img_mask = feats_padded.abs().sum(dim=-1) > 0             # (B, max_k) bool
-    return feats_padded, q_padded, a_padded, img_mask
+    length_bins_stacked = torch.stack(length_bins, dim=0)     # (B,)
+    
+    # TRẢ VỀ 5 ELEMENTS
+    return feats_padded, q_padded, a_padded, img_mask, length_bins_stacked

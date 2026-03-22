@@ -1,156 +1,146 @@
 #!/bin/bash
-# train_model_h.sh - Advanced CLI Launcher for VQA Model H
+# ==============================================================================
+# Script: run_master_pipeline_h.sh
+# Trạng thái: PRODUCTION-READY (Auto-Convergence Pipeline)
+# Cấu trúc Curriculum: Phase 1 -> Eval -> Phase 2 -> Eval -> Phase 4 -> Eval
+# Phần cứng mục tiêu: NVIDIA RTX 5070 Ti (16GB VRAM)
+# ==============================================================================
 
-# Default configurations
-PHASE="all"
-RESUME_CKPT=""
-WANDB_FLAG=""
-FEAT_DIR="data/features/vg_h1"
+# Dừng script ngay lập tức nếu có bất kỳ lệnh nào trả về mã lỗi (non-zero exit code)
+set -e
+
+export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
+export CUDA_VISIBLE_DEVICES=0
+export TORCH_CUDNN_V8_API_ENABLED=1
+
+# --- CẤU HÌNH ĐƯỜNG DẪN ---
+VG_FEAT_DIR="data/vg_features/"
 MERGED_JSON="data/processed/merged_train_filtered.json"
+VOCAB_Q="data/processed/vocab_questions.json"
+VOCAB_A="data/processed/vocab_answers.json"
 
-# Parse arguments
-while [[ "$#" -gt 0 ]]; do
-    case $1 in
-        --phase) PHASE="$2"; shift ;;
-        --resume) RESUME_CKPT="--resume $2"; shift ;;
-        --wandb) WANDB_FLAG="--wandb" ;;
-        --feat_dir) FEAT_DIR="$2"; shift ;;
-        --json) MERGED_JSON="$2"; shift ;;
-        -h|--help)
-            echo "Usage: ./train_model_h.sh [options]"
-            echo "Options:"
-            echo "  --phase <extract|1|2|3|4|all> Select phase to run (default: all)"
-            echo "  --resume <path>               Path to checkpoint (e.g., checkpoints/h/...pth)"
-            echo "  --wandb                  Enable W&B logging"
-            echo "  --feat_dir <path>        Custom VG features directory (default: data/features/vg_h1)"
-            echo "  --json <path>            Merged dataset JSON (default: data/processed/merged_train_filtered.json)"
-            exit 0
-            ;;
-        *) echo "Unknown parameter: $1"; exit 1 ;;
-    esac
-    shift
-done
+# --- CẤU HÌNH PHẦN CỨNG (GIÁO SƯ ĐÃ TỐI ƯU) ---
+WORKERS=8
+BASE_BATCH=128       # Batch size cho Cross-Entropy (Train Phase 1 & 2)
+RL_BATCH=64          # Batch size cho SCST Sampling (Train Phase 4)
+EVAL_BATCH=128       # [QUAN TRỌNG] Chặn đứng lỗi OOM khi Beam Search (3 beams * 128 = 384 sequence song song)
+DROPOUT=0.5
+PATIENCE=15
 
-echo "========================================================"
-echo "🚀 VQA Model H - Ultimate LSTM Architecture Pipeline 🚀"
-echo "========================================================"
-echo "[Config] Phase: $PHASE | W&B: ${WANDB_FLAG:-OFF} | Resume: ${RESUME_CKPT:-None}"
 
-# Define execution blocks
-run_extract() {
-    echo "=== Phase 0: Feature Extraction (ResNeXt-101-32x8d + Grid) ==="
-    echo "This step extracts Visual Genome features natively via Detectron2."
-    
-    # Check for train2014
-    if [ -d "data/images/train2014" ]; then
-        echo "Extracting train2014 images..."
-        python src/scripts/extract_vg_features.py --image_dir data/images/train2014 --output_dir "$FEAT_DIR" --batch_size 10
-    else
-        echo "[WARN] Directory data/images/train2014 not found. Skipping."
-    fi
+echo "======================================================================"
+echo "🚀 KHỞI ĐỘNG MASTER PIPELINE: GENERATIVE VQA MODEL H"
+echo "======================================================================"
 
-    # Check for val2014
-    if [ -d "data/images/val2014" ]; then
-        echo "Extracting val2014 images..."
-        python src/scripts/extract_vg_features.py --image_dir data/images/val2014 --output_dir "$FEAT_DIR" --batch_size 10
-    else
-        echo "[WARN] Directory data/images/val2014 not found. Skipping."
-    fi
+# ==============================================================================
+# PHASE 1: ALIGNMENT WARM-UP
+# ==============================================================================
+echo -e "\n\n>>> [PHASE 1] BẮT ĐẦU HUẤN LUYỆN ALIGNMENT..."
+python src/train_h.py \
+    --phase 1 \
+    --epochs 50 \
+    --patience ${PATIENCE} \
+    --lr 1e-3 \
+    --warmup_epochs 2 \
+    --batch_size ${BASE_BATCH} \
+    --dropout ${DROPOUT} \
+    --num_workers ${WORKERS} \
+    --vg_feat_dir ${VG_FEAT_DIR} \
+    --merged_json ${MERGED_JSON} \
+    --vocab_q_path ${VOCAB_Q} \
+    --vocab_a_path ${VOCAB_A} \
+    --infonce \
+    --wandb \
+    --wandb_project "vqa-model-h" \
+    --wandb_run_name "model_h_phase1_auto" \
+    --save_legacy_alias
 
-    # Check for test2015
-    if [ -d "data/images/test2015" ]; then
-        echo "Extracting test2015 images..."
-        python src/scripts/extract_vg_features.py --image_dir data/images/test2015 --output_dir "$FEAT_DIR" --batch_size 10
-    else
-        echo "[WARN] Directory data/images/test2015 not found. Skipping."
-    fi
-    
-    echo "--------------------------------------------------------"
-    echo "Feature Extraction Hoàn tất. Sẵn sàng cho Phase 1."
-}
+echo ">>> [EVAL 1] ĐÁNH GIÁ PHASE 1..."
+python src/evaluate_h.py \
+    --checkpoint checkpoints/h/model_h_phase1_best.pth \
+    --vg_feat_dir ${VG_FEAT_DIR} \
+    --vocab_q_path ${VOCAB_Q} \
+    --vocab_a_path ${VOCAB_A} \
+    --datasets vqa_e vqa_x aokvqa \
+    --beam_width 5 \
+    --batch_size ${EVAL_BATCH} \
+    --num_workers ${WORKERS} \
 
-run_phase_1() {
-    echo "=== Phase 1: Alignment (MAC Network) (Max 50 Epochs - Early Stop) ==="
-    python src/train_h.py --phase 1 --epochs 50 --patience 3 \
-        --lr 0.001 --warmup_epochs 2 --batch_size 256 \
-        --vg_feat_dir "$FEAT_DIR" \
-        --merged_json "$MERGED_JSON" \
-        --use_fasttext --infonce --save_legacy_alias $WANDB_FLAG $RESUME_CKPT
-    
-    echo "--------------------------------------------------------"
-    echo "Phase 1 Hoàn tất. KHUYẾN NGHỊ: Mở wandb hoặc chạy src/evaluate.py để kiểm tra trước."
-}
+# ==============================================================================
+# PHASE 2: MASTERY & FASTTEXT INTEGRATION
+# ==============================================================================
+echo -e "\n\n>>> [PHASE 2] BẮT ĐẦU HUẤN LUYỆN MASTERY (FASTTEXT)..."
+python src/train_h.py \
+    --phase 2 \
+    --epochs 50 \
+    --patience ${PATIENCE} \
+    --lr 1e-4 \
+    --warmup_epochs 1 \
+    --batch_size ${BASE_BATCH} \
+    --dropout ${DROPOUT} \
+    --num_workers ${WORKERS} \
+    --vg_feat_dir ${VG_FEAT_DIR} \
+    --merged_json ${MERGED_JSON} \
+    --vocab_q_path ${VOCAB_Q} \
+    --vocab_a_path ${VOCAB_A} \
+    --infonce \
+    --use_fasttext \
+    --resume checkpoints/h/model_h_phase1_best.pth \
+    --wandb \
+    --wandb_project "vqa-model-h" \
+    --wandb_run_name "model_h_phase2_auto" \
+    --save_legacy_alias
 
-run_phase_2() {
-    echo "=== Phase 2: Mastery (Max 50 Epochs - Early Stop) ==="
-    # If resuming a specific phase from CLI, use the user's resume flag. 
-    # Otherwise (in 'all' mode), automatically resume from Phase 1's output.
-    local LOCAL_RESUME=$RESUME_CKPT
-    if [ -z "$LOCAL_RESUME" ] && [ "$PHASE" == "all" ]; then
-        LOCAL_RESUME="--resume checkpoints/h/model_h_phase1_resume.pth"
-    fi
+echo ">>> [EVAL 2] ĐÁNH GIÁ PHASE 2..."
+python src/evaluate_h.py \
+    --checkpoint checkpoints/h/model_h_phase2_best.pth \
+    --vg_feat_dir ${VG_FEAT_DIR} \
+    --vocab_q_path ${VOCAB_Q} \
+    --vocab_a_path ${VOCAB_A} \
+    --datasets vqa_e vqa_x aokvqa \
+    --use_fasttext \
+    --beam_width 5 \
+    --batch_size ${EVAL_BATCH} \
+    --num_workers ${WORKERS} \
 
-    python src/train_h.py --phase 2 --epochs 50 --patience 3 \
-        --lr 0.0005 --batch_size 256 \
-        --vg_feat_dir "$FEAT_DIR" \
-        --merged_json "$MERGED_JSON" \
-        --use_fasttext --infonce --save_legacy_alias $WANDB_FLAG $LOCAL_RESUME
-        
-    echo "--------------------------------------------------------"
-    echo "Phase 2 Hoàn tất. KHUYẾN NGHỊ: Đảm bảo model đã bắt đầu sinh ra câu giải thích dài."
-}
+# ==============================================================================
+# PHASE 4: SELF-CRITICAL SEQUENCE TRAINING (RL)
+# ==============================================================================
+echo -e "\n\n>>> [PHASE 4] BẮT ĐẦU HUẤN LUYỆN SCST (CIDER REWARD)..."
+python src/train_h.py \
+    --phase 4 \
+    --epochs 50 \
+    --patience ${PATIENCE} \
+    --lr 5e-6 \
+    --warmup_epochs 0 \
+    --batch_size ${RL_BATCH} \
+    --dropout ${DROPOUT} \
+    --num_workers ${WORKERS} \
+    --vg_feat_dir ${VG_FEAT_DIR} \
+    --merged_json ${MERGED_JSON} \
+    --vocab_q_path ${VOCAB_Q} \
+    --vocab_a_path ${VOCAB_A} \
+    --use_fasttext \
+    --scst \
+    --ohp_lambda 0.1 \
+    --resume checkpoints/h/model_h_phase2_best.pth \
+    --wandb \
+    --wandb_project "vqa-model-h" \
+    --wandb_run_name "model_h_phase4_scst_auto" \
+    --save_legacy_alias
 
-run_phase_3() {
-    echo "=== Phase 3: Correction (Scheduled Sampling) (Max 30 Epochs - Early Stop) ==="
-    local LOCAL_RESUME=$RESUME_CKPT
-    if [ -z "$LOCAL_RESUME" ] && [ "$PHASE" == "all" ]; then
-        LOCAL_RESUME="--resume checkpoints/h/model_h_phase2_resume.pth"
-    fi
+echo ">>> [EVAL 4] ĐÁNH GIÁ PHASE 4 (FINAL)..."
+python src/evaluate_h.py \
+    --checkpoint checkpoints/h/model_h_phase4_best.pth \
+    --vg_feat_dir ${VG_FEAT_DIR} \
+    --vocab_q_path ${VOCAB_Q} \
+    --vocab_a_path ${VOCAB_A} \
+    --datasets vqa_e vqa_x aokvqa \
+    --use_fasttext \
+    --beam_width 5 \
+    --batch_size ${EVAL_BATCH} \
+    --num_workers ${WORKERS}
 
-    python src/train_h.py --phase 3 --epochs 30 --patience 3 \
-        --lr 0.0002 --batch_size 256 \
-        --vg_feat_dir "$FEAT_DIR" \
-        --merged_json "$MERGED_JSON" \
-        --use_fasttext --infonce --scheduled_sampling --save_legacy_alias $WANDB_FLAG $LOCAL_RESUME
-        
-    echo "--------------------------------------------------------"
-    echo "Phase 3 Hoàn tất. Sẵn sàng cho quá trình khó nhất: Đào tạo tăng cường (RL)."
-}
-
-run_phase_4() {
-    echo "=== Phase 4: Optimization (SCST Exact Match) (Max 15 Epochs - Early Stop) ==="
-    local LOCAL_RESUME=$RESUME_CKPT
-    if [ -z "$LOCAL_RESUME" ] && [ "$PHASE" == "all" ]; then
-        LOCAL_RESUME="--resume checkpoints/h/model_h_phase3_resume.pth"
-    fi
-
-    python src/train_h.py --phase 4 --epochs 15 --patience 2 \
-        --lr 0.00005 --batch_size 64 \
-        --vg_feat_dir "$FEAT_DIR" \
-        --merged_json "$MERGED_JSON" \
-        --use_fasttext --infonce --scst --save_legacy_alias $WANDB_FLAG $LOCAL_RESUME
-        
-    echo "--------------------------------------------------------"
-    echo "Phase 4 Hoàn tất. Model H đạt SOTA."
-}
-
-# Execution Logic
-case $PHASE in
-    extract) run_extract ;;
-    1) run_phase_1 ;;
-    2) run_phase_2 ;;
-    3) run_phase_3 ;;
-    4) run_phase_4 ;;
-    all)
-        run_extract
-        read -p "Nhấn [Enter] để tự tin đi tiếp sang Phase 1..."
-        run_phase_1
-        read -p "Nhấn [Enter] để tự tin đi tiếp sang Phase 2..."
-        run_phase_2
-        read -p "Nhấn [Enter] để đi tiếp sang Phase 3 (Scheduled Sampling)..."
-        run_phase_3
-        read -p "Nhấn [Enter] để khởi động Phase 4..."
-        run_phase_4
-        ;;
-    *) echo "Invalid Phase: $PHASE. Must be 1, 2, 3, 4, or all."; exit 1 ;;
-esac
+echo -e "\n======================================================================"
+echo "🎉 MASTER PIPELINE HOÀN TẤT. VUI LÒNG KIỂM TRA BÁO CÁO TRÊN WANDB."
+echo "======================================================================"
