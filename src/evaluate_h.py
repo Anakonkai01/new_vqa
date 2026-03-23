@@ -55,6 +55,13 @@ from fasttext_utils import build_fasttext_matrix
 from models.vqa_model_h import ModelH
 from data.dataset import audit_butd_feature_dir, make_butd_loader
 from data.collate import make_collate_fn
+from inference_policy import build_length_bin_tensor, resolve_min_decode_len
+from text_contract import (
+    normalize_text,
+    split_answer_explanation,
+    split_answer_explanations,
+    strip_empty_explanations,
+)
 
 # ── Optional heavy deps ──────────────────────────────────────────────────────
 try:
@@ -244,12 +251,13 @@ def _labels_to_token_tensor(label_names_batch, a_vocab, device):
 # ── Greedy / Beam decode on Model H ─────────────────────────────────────────
 @torch.no_grad()
 def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, grid_valid, label_names, a_vocab, device, max_len=30,
-                        min_decode_len=8):
+                        min_decode_len=None, dataset_name=None, length_bin_policy='auto'):
     """Greedy decode — single best token at each step."""
     B = region_feat.size(0)
     sos = a_vocab.word2idx.get('<start>', 1)
     eos = a_vocab.word2idx.get('<end>', 2)
     pad = a_vocab.word2idx.get('<pad>', 0)
+    min_decode_len = resolve_min_decode_len(min_decode_len, dataset_name)
 
     region_feat = region_feat.to(device)
     region_mask = region_mask.to(device)
@@ -268,7 +276,7 @@ def greedy_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, grid_
     h, c = model.init_decoder_hidden(memory)
     mm = None if getattr(model.args, 'no_mac_decoder', False) else memory
     coverage = None
-    length_bin = torch.full((B,), 2, dtype=torch.long, device=device)  # LONG bin at inference
+    length_bin = build_length_bin_tensor(B, device, length_policy=length_bin_policy, dataset_name=dataset_name)
 
     for _ in range(max_len):
         logit, h, c, _, coverage = model.decode_step(
@@ -323,7 +331,8 @@ def _repeat_ngram(tokens, next_tok, n):
 
 @torch.no_grad()
 def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, grid_valid, label_names, a_vocab, device,
-                      beam_width=3, max_len=30, no_repeat_ngram=3, min_decode_len=8):
+                      beam_width=3, max_len=30, no_repeat_ngram=3, min_decode_len=None,
+                      dataset_name=None, length_bin_policy='auto'):
     """
     Optimized beam search: encode ALL samples once (batched), then per-sample GPU-accelerated beam decode.
     Speedup: ~2-5x vs per-sample encoder loop (single encode pass).
@@ -331,8 +340,10 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, grid_va
     """
     if beam_width == 1:
         return greedy_decode_batch(
-            model, region_feat, region_mask, q_ids, grid_feat, label_names, a_vocab, device, max_len,
+            model, region_feat, region_mask, q_ids, grid_feat, grid_valid, label_names, a_vocab, device, max_len,
             min_decode_len=min_decode_len,
+            dataset_name=dataset_name,
+            length_bin_policy=length_bin_policy,
         )
 
     B = region_feat.size(0)
@@ -347,6 +358,7 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, grid_va
     grid_feat   = grid_feat.to(device) if grid_feat is not None else None
     grid_valid_d = grid_valid.to(device) if grid_valid is not None else None
     label_tokens_batch = _labels_to_token_tensor(label_names, a_vocab, device)
+    min_decode_len = resolve_min_decode_len(min_decode_len, dataset_name)
 
     # ─ Encode all B samples at once (batched on GPU) ╔════════════════════════
     # This is the key optimization: single forward pass for all B samples
@@ -370,7 +382,7 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, grid_va
 
         # Initialize hidden states (match training init_h1..c2)
         h0, c0 = model.init_decoder_hidden(m_b)
-        len_bin = torch.full((1,), 2, dtype=torch.long, device=device)
+        len_bin = build_length_bin_tensor(1, device, length_policy=length_bin_policy, dataset_name=dataset_name)
 
         # Beam search for this sample
         beams = [(0.0, [sos], h0, c0, None, False)]  # (score, tokens, h, c, coverage, is_finished)
@@ -429,7 +441,7 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, grid_va
 
             for i, (score, toks, _, _, _, _) in enumerate(active):
                 log_probs = log_probs_all[i].clone()
-                # Chặn <end> quá sớm (khớp LONG-bin / train distribution hơn)
+                # Keep EOS blocked briefly so decoding can emit the answer prefix and rationale cue.
                 if len(toks) - 1 < min_decode_len:
                     log_probs[eos] = float('-inf')
                 topv, topi = torch.topk(log_probs, min(beam_width, V))
@@ -525,16 +537,19 @@ def compute_metrics(preds, gt_expls_list, gt_answers, dataset_name=''):
     n = len(preds)
     print(f"\n[{dataset_name}] Computing metrics on {n} samples ...")
 
+    pred_answers, pred_expls = split_answer_explanations(preds)
+    pred_answers = [normalize_text(x).lower() for x in pred_answers]
+    pred_expls = strip_empty_explanations(pred_expls)
+
     # ── Answer Accuracy ──────────────────────────────────────────────────────
-    # VQA Accuracy: min(#human_annotations_matching / 3, 1.0) — approximated here
-    # as Exact Match since we have a single GT answer per sample
+    # VQA Accuracy is approximated here as exact match on the answer segment.
     ans_exact = sum(
-        p.strip().lower() == a.strip().lower()
-        for p, a in zip(preds, gt_answers)
+        p == normalize_text(a).lower()
+        for p, a in zip(pred_answers, gt_answers)
     ) / n
 
     # ── Explanation Metrics (parallel) ──────────────────────────────────────
-    pairs     = list(zip(preds, gt_expls_list))
+    pairs     = list(zip(pred_expls, gt_expls_list))
     n_workers = min(mp.cpu_count(), 16)
     chunk_sz  = max(1, n // n_workers)
     chunks    = [pairs[i:i+chunk_sz] for i in range(0, n, chunk_sz)]
@@ -551,7 +566,7 @@ def compute_metrics(preds, gt_expls_list, gt_answers, dataset_name=''):
     if HAS_CIDER:
         try:
             gts = {str(i): refs for i, refs in enumerate(gt_expls_list)}
-            res = {str(i): [p]   for i, p  in enumerate(preds)}
+            res = {str(i): [p]   for i, p  in enumerate(pred_expls)}
             cider, _ = Cider().compute_score(gts, res)
         except Exception as e:
             print(f"[WARN] CIDEr failed: {e}")
@@ -579,7 +594,7 @@ def compute_metrics(preds, gt_expls_list, gt_answers, dataset_name=''):
                     '--add-opens=java.base/java.util.concurrent.locks=ALL-UNNAMED',
                 ])
             gts = {str(i): refs for i, refs in enumerate(gt_expls_list)}
-            res = {str(i): [p]   for i, p  in enumerate(preds)}
+            res = {str(i): [p]   for i, p  in enumerate(pred_expls)}
             spice_scorer = Spice()
             spice, _ = spice_scorer.compute_score(gts, res)
         except Exception as e:
@@ -592,19 +607,19 @@ def compute_metrics(preds, gt_expls_list, gt_answers, dataset_name=''):
             print("  Computing BERTScore (may take a few minutes)...")
             # bert_score: refs as list[list[str]] → per-candidate best F1 over references
             multi_refs = [list(r) if r else [''] for r in gt_expls_list]
-            _, _, F1 = _bertscore_fn(preds, multi_refs, lang='en', verbose=False)
+            _, _, F1 = _bertscore_fn(pred_expls, multi_refs, lang='en', verbose=False)
             bertscore_f1 = float(F1.mean())
         except Exception as e:
             print(f"[WARN] BERTScore failed: {e}")
 
     # ── Diversity / Length stats ─────────────────────────────────────────────
-    total_tokens = sum(len(p.split()) for p in preds)
-    unk_tokens   = sum(p.split().count('<unk>') for p in preds)
+    total_tokens = sum(len(p.split()) for p in pred_expls)
+    unk_tokens   = sum(p.split().count('<unk>') for p in pred_expls)
     avg_len      = total_tokens / max(n, 1)
     oov_rate     = unk_tokens   / max(total_tokens, 1)
-    all_tokens   = [t for p in preds for t in p.split()]
+    all_tokens   = [t for p in pred_expls for t in p.split()]
     unigram_set  = set(all_tokens)
-    bigrams      = [tuple(ts[i:i+2]) for p in preds for ts in [p.split()] for i in range(max(0, len(ts)-1))]
+    bigrams      = [tuple(ts[i:i+2]) for p in pred_expls for ts in [p.split()] for i in range(max(0, len(ts)-1))]
     distinct1    = len(unigram_set) / max(1, len(all_tokens))
     distinct2    = len(set(bigrams)) / max(1, len(bigrams))
 
@@ -762,6 +777,7 @@ def evaluate_h(args):
     amp_dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
 
     all_results = []
+    dataset_samples = []
 
     # 6. Evaluate each requested dataset
     for ds_name in args.datasets:
@@ -811,6 +827,8 @@ def evaluate_h(args):
                         max_len=args.max_len,
                         no_repeat_ngram=args.no_repeat_ngram,
                         min_decode_len=args.min_decode_len,
+                        dataset_name=ds_name,
+                        length_bin_policy=args.infer_length_bin,
                     )
 
             all_preds.extend(preds)
@@ -821,13 +839,41 @@ def evaluate_h(args):
 
         result = compute_metrics(all_preds, all_gt_expls, all_gt_answers, dataset_name=ds_name.upper())
         all_results.append(result)
+        pred_answers, pred_expls = split_answer_explanations(all_preds[:100])
+        dataset_samples.append({
+            'dataset': result['dataset'],
+            'samples': [
+                {
+                    'prediction': p,
+                    'prediction_answer': pa,
+                    'prediction_explanation': pe,
+                    'references': rf,
+                    'answer': a,
+                    'question': q,
+                    'img_id': img_id,
+                }
+                for p, pa, pe, rf, a, q, img_id in zip(
+                    all_preds[:100], pred_answers, pred_expls,
+                    all_gt_expls[:100], all_gt_answers[:100], all_questions[:100], all_img_ids[:100],
+                )
+            ],
+        })
 
         # Save sample predictions for qualitative analysis
         if args.save_predictions:
             out_file = f"checkpoints/h/eval_{ds_name}_predictions.json"
             samples = []
-            for p, refs, ans in zip(all_preds[:200], all_gt_expls[:200], all_gt_answers[:200]):
-                samples.append({'prediction': p, 'references': refs, 'gt_answer': ans})
+            pred_answers_200, pred_expls_200 = split_answer_explanations(all_preds[:200])
+            for p, pa, pe, refs, ans in zip(
+                all_preds[:200], pred_answers_200, pred_expls_200, all_gt_expls[:200], all_gt_answers[:200]
+            ):
+                samples.append({
+                    'prediction': p,
+                    'prediction_answer': pa,
+                    'prediction_explanation': pe,
+                    'references': refs,
+                    'gt_answer': ans,
+                })
             with open(out_file, 'w') as f:
                 json.dump(samples, f, indent=2)
             print(f"  Saved 200 sample predictions → {out_file}")
@@ -856,6 +902,7 @@ def evaluate_h(args):
             'num_workers': args.num_workers,
             'max_len': args.max_len,
             'min_decode_len': args.min_decode_len,
+            'infer_length_bin': args.infer_length_bin,
             'no_repeat_ngram': args.no_repeat_ngram,
             'datasets': args.datasets,
             'use_fasttext': args.use_fasttext,
@@ -881,22 +928,13 @@ def evaluate_h(args):
     output = {
         'meta': run_metadata,
         'results': all_results,
-        'sample_predictions': [
-            {
-                'dataset': r['dataset'],
-                'samples': [
-                    {'prediction': p, 'references': rf, 'answer': a, 'question': q, 'img_id': img_id}
-                    for p, rf, a, q, img_id in zip(all_preds[:100], all_gt_expls[:100], all_gt_answers[:100], all_questions[:100], all_img_ids[:100])
-                ]
-            }
-            for r in all_results
-        ],
+        'sample_predictions': dataset_samples,
     }
     
     with open(out_json, 'w') as f:
         json.dump(output, f, indent=2)
     print(f"\nAll results saved → {out_json}")
-    print(f"  📊 Metadata + {sum(len(r['results']) if 'results' in r else 0 for r in output['sample_predictions'])} sample predictions included")
+    print(f"  📊 Metadata + {sum(len(r.get('samples', [])) for r in output['sample_predictions'])} sample predictions included")
 
     return all_results
 
@@ -914,12 +952,15 @@ def parse_args():
                         help='Datasets to evaluate on')
     parser.add_argument('--beam_width',  type=int, default=3,
                         help='Beam search width (1=greedy)')
+    parser.add_argument('--infer_length_bin', type=str, default='auto',
+                        choices=['auto', 'dataset_mode', 'short', 'medium', 'long'],
+                        help='Inference-time length bin. auto/dataset_mode uses official val priors.')
     parser.add_argument('--no_repeat_ngram', type=int, default=3,
                         help='Block repeated n-grams (0=disabled)')
     parser.add_argument('--max_len',     type=int, default=30,
                         help='Maximum explanation generation length')
-    parser.add_argument('--min_decode_len', type=int, default=8,
-                        help='Minimum content tokens before allowing <end> (greedy/beam)')
+    parser.add_argument('--min_decode_len', type=int, default=None,
+                        help='Minimum content tokens before allowing <end>; default uses dataset prior.')
     parser.add_argument('--batch_size',  type=int, default=64)
     parser.add_argument('--num_workers', type=int, default=8)
     parser.add_argument('--max_samples', type=int, default=None,

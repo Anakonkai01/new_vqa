@@ -7,9 +7,9 @@ set -e
 # Defaults
 PHASE="phase1"
 CKPT_MODE="both"         # best | resume | both
-BEAMS="1,3"              # comma-separated, e.g. 1 or 3 or 1,3
+BEAMS="3"                # comma-separated, e.g. 1 or 3 or 1,3
 DATASETS="vqa_e vqa_x aokvqa"
-BATCH_SIZE=2048
+BATCH_SIZE=256
 NUM_WORKERS=16
 CHECKPOINTS_DIR="checkpoints/h"
 EXTRA_ARGS=()
@@ -28,10 +28,10 @@ Options:
   --phase PHASE            Phase name. Default: phase1
                            Example: phase1, phase2
   --ckpt MODE              Checkpoint type: best | resume | both (default: both)
-  --beam LIST              Comma list of beam widths. Default: 1,3
+  --beam LIST              Comma list of beam widths. Default: 3
                            Example: --beam 1 or --beam 3 or --beam 1,3
   --datasets "LIST"        Space-separated dataset list. Default: "vqa_e vqa_x aokvqa"
-  --batch_size N           Batch size. Default: 2048
+  --batch_size N           Batch size. Default: 256
   --num_workers N          DataLoader workers. Default: 16
   --max_samples N          Optional cap for quick testing
   --use_fasttext           Pass through to evaluate_h.py

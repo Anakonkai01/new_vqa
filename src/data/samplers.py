@@ -9,7 +9,7 @@ Data mix per phase (from Architecture_Specification_v2.md):
   Phase 1: 40% VQA v2.0 + 30% VQA-E + 30% A-OKVQA  → 3-source mixed sampler
   Phase 2: 100% explanation + 20% VQA v2.0 replay    → replay sampler
   Phase 3: same as Phase 2 + scheduled sampling      → replay sampler
-  Phase 4: VQA-E + VQA-X only (CIDEr requires refs)  → standard DataLoader, no sampler
+  Phase 4: VQA-E + VQA-X + A-OKVQA (all have refs)   → standard DataLoader, no sampler
 
 CurriculumSampler integration: the existing src/training/curriculum.py
 CurriculumSampler is a separate concern (reorders by complexity within a source).
@@ -174,16 +174,16 @@ def build_phase4_sources(
     allowed_sources: Optional[List[str]] = None,
 ) -> Dataset:
     """
-    Phase 4 (SCST RL) uses only VQA-E + VQA-X because CIDEr-D requires
-    reference sentences. A-OKVQA rationales are excluded (see Data Strategy §6.4).
+    Phase 4 (SCST RL) uses all explanation datasets that provide rationale refs:
+    VQA-E, VQA-X, and A-OKVQA.
 
     If merged_dataset is a VQAGenerativeDataset, use its filter_by_source().
     Otherwise returns merged_dataset unchanged.
 
-    Default allowed_sources = ['vqa_e', 'vqa_x']
+    Default allowed_sources = ['vqa_e', 'vqa_x', 'aokvqa']
     """
     if allowed_sources is None:
-        allowed_sources = ["vqa_e", "vqa_x"]
+        allowed_sources = ["vqa_e", "vqa_x", "aokvqa"]
 
     if hasattr(merged_dataset, "filter_by_source"):
         return merged_dataset.filter_by_source(allowed_sources)

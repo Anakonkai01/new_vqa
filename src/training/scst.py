@@ -52,6 +52,8 @@ import numpy as np
 from typing import List, Optional, Tuple
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
+from text_contract import split_answer_explanations, strip_empty_explanations
+
 
 # ── BLEU-4 ─────────────────────────────────────────────────────────────────────
 
@@ -703,7 +705,8 @@ def scst_step(model, model_type: str, imgs: torch.Tensor, questions: torch.Tenso
         model_type           : 'A'/'B'/'C'/'D'/'E'/'F'/'G'
         imgs                 : (B, 3, H, W) or (B, k, feat_dim) for Model F/G
         questions            : (B, q_len)
-        target_texts         : list[str] ground-truth answer texts
+        target_texts         : list[str] ground-truth full targets
+                               ('answer because explanation')
         vocab                : answer Vocabulary
         max_len              : max decode length
         device               : torch device
@@ -712,6 +715,7 @@ def scst_step(model, model_type: str, imgs: torch.Tensor, questions: torch.Tenso
         meteor_weight        : METEOR reward coefficient (default 0.5)
         length_bonus_weight  : LengthBonus coefficient (default 0.0)
         ohp_weight           : G4 OHP penalty coefficient (default 0.0 = disabled)
+        exact_match_weight   : answer-segment exact-match reward coefficient
         visual_labels_batch  : G4 list[list[str]] — BUTD label names per sample
         glove_embed          : G4 dict[str, np.ndarray] — GloVe vectors for OHP
         ohp_threshold        : G4 delta for max(0, delta - cos_sim) (default 0.5)
@@ -732,34 +736,45 @@ def scst_step(model, model_type: str, imgs: torch.Tensor, questions: torch.Tenso
         grid_feats=grid_feats, grid_valid=grid_valid, img_mask=img_mask, label_tokens=label_tokens,
     )
 
+    target_answers, target_expls = split_answer_explanations(target_texts)
+    greedy_answers, greedy_expls = split_answer_explanations(greedy_texts)
+    sample_answers, sample_expls = split_answer_explanations(sample_texts)
+    target_expls = strip_empty_explanations(target_expls)
+    greedy_expls = strip_empty_explanations(greedy_expls)
+    sample_expls = strip_empty_explanations(sample_expls)
+
     # 3. G4: pre-compute OHP for sample (greedy OHP not needed — same visual labels)
     ohp_sample = None
     if ohp_weight > 0.0 and visual_labels_batch is not None and glove_embed is not None:
         ohp_sample = compute_ohp_rewards(
-            sample_texts, visual_labels_batch, glove_embed, ohp_threshold).to(device)
+            sample_expls, visual_labels_batch, glove_embed, ohp_threshold).to(device)
 
     # 4. Composite rewards
     r_greedy = compute_rewards(
-        greedy_texts, target_texts,
+        greedy_expls, target_expls,
         bleu_weight=bleu_weight,
         meteor_weight=meteor_weight,
         length_bonus_weight=length_bonus_weight,
         ohp_weight=ohp_weight,
         ohp_tensor=None,
         cider_weight=cider_weight,
-        exact_match_weight=exact_match_weight,
+        exact_match_weight=0.0,
     ).to(device)
+    if exact_match_weight > 0.0:
+        r_greedy = r_greedy + exact_match_weight * compute_exact_match(greedy_answers, target_answers).to(device)
 
     r_sample = compute_rewards(
-        sample_texts, target_texts,
+        sample_expls, target_expls,
         bleu_weight=bleu_weight,
         meteor_weight=meteor_weight,
         length_bonus_weight=length_bonus_weight,
         ohp_weight=ohp_weight,
         ohp_tensor=ohp_sample,
         cider_weight=cider_weight,
-        exact_match_weight=exact_match_weight,
+        exact_match_weight=0.0,
     ).to(device)
+    if exact_match_weight > 0.0:
+        r_sample = r_sample + exact_match_weight * compute_exact_match(sample_answers, target_answers).to(device)
 
     # 5. REINFORCE: L = -mean(advantage * log_prob_sum)
     advantage = (r_sample - r_greedy).detach()   # (B,) — no grad through reward

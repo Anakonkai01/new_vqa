@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 import argparse
+import gc
 import math
 import os
 import random
 import re
 import json
+from typing import Optional
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -86,6 +88,94 @@ def _model_params_all_finite(model) -> bool:
     return True
 
 
+def _subset_by_source(subset: Subset, source: str) -> Optional[Subset]:
+    base = subset.dataset
+    if not hasattr(base, "annotations"):
+        return None
+    keep = [idx for idx in subset.indices if base.annotations[idx].get("source") == source]
+    if not keep:
+        return None
+    return Subset(base, keep)
+
+
+def _build_source_balanced_mix(
+    replay_dataset,
+    expl_subset: Subset,
+    replay_fraction: float,
+    source_weights: dict,
+):
+    datasets = []
+    fractions = []
+
+    if replay_dataset is not None and replay_fraction > 0.0:
+        datasets.append(replay_dataset)
+        fractions.append(replay_fraction)
+
+    src_parts = []
+    for src in ("vqa_e", "vqa_x", "aokvqa"):
+        part = _subset_by_source(expl_subset, src)
+        if part is not None and len(part) > 0:
+            src_parts.append((src, part))
+
+    if not src_parts:
+        if replay_dataset is None:
+            return expl_subset, None
+        return build_mixed_sampler([replay_dataset, expl_subset], [replay_fraction, 1.0 - replay_fraction])
+
+    expl_fraction = max(0.0, 1.0 - replay_fraction)
+    w_sum = sum(float(source_weights.get(src, 1.0)) for src, _ in src_parts)
+    for src, part in src_parts:
+        datasets.append(part)
+        fractions.append(expl_fraction * float(source_weights.get(src, 1.0)) / max(w_sum, 1e-8))
+
+    if replay_dataset is None:
+        datasets = [part for _, part in src_parts]
+        fractions = [float(source_weights.get(src, 1.0)) / max(w_sum, 1e-8) for src, _ in src_parts]
+
+    return build_mixed_sampler(datasets, fractions)
+
+
+def _clear_runtime_memory():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
+def _reload_best_training_state(best_ckpt_path, model, optimizer, scaler, cosine_sched, warmup_sched):
+    if not os.path.isfile(best_ckpt_path):
+        print("[recover] No best checkpoint on disk — consider retrain or resume from an older .pth")
+        return
+
+    try:
+        b = torch.load(best_ckpt_path, map_location='cpu', weights_only=False)
+        bsd = _normalize_ckpt_state_dict(b['model_state_dict'], model)
+        model.load_state_dict(bsd, strict=False)
+        if b.get('optimizer_state_dict') is not None:
+            try:
+                optimizer.load_state_dict(b['optimizer_state_dict'])
+            except Exception as e:
+                print(f"[recover] optimizer reload skipped: {e}")
+        if b.get('scaler_state_dict') is not None:
+            try:
+                scaler.load_state_dict(b['scaler_state_dict'])
+            except Exception as e:
+                print(f"[recover] scaler reload skipped: {e}")
+        if b.get('cosine_sched_state_dict') is not None:
+            try:
+                cosine_sched.load_state_dict(b['cosine_sched_state_dict'])
+            except Exception as e:
+                print(f"[recover] cosine scheduler reload skipped: {e}")
+        if warmup_sched is not None and b.get('warmup_sched_state_dict') is not None:
+            try:
+                warmup_sched.load_state_dict(b['warmup_sched_state_dict'])
+            except Exception as e:
+                print(f"[recover] warmup scheduler reload skipped: {e}")
+        optimizer.zero_grad(set_to_none=True)
+        print(f"[recover] Reloaded weights/optimizer from {best_ckpt_path}")
+    except Exception as e:
+        print(f"[recover] Could not load best checkpoint: {e}")
+
+
 def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--phase', type=int, default=1)
@@ -147,6 +237,23 @@ def parse_args():
     parser.add_argument('--scst_meteor', type=float, default=0.3)
     parser.add_argument('--scst_exact_match', type=float, default=0.0)
     parser.add_argument('--no_compile', action='store_true', help='Disable torch.compile (debug RL/SCST)')
+    parser.add_argument('--select_on_official_val', action='store_true',
+                        help='Select best checkpoint using lightweight official-val benchmark instead of only internal CE val')
+    parser.add_argument('--official_val_datasets', nargs='+', default=['vqa_e', 'vqa_x', 'aokvqa'],
+                        choices=['vqa_e', 'vqa_x', 'aokvqa'],
+                        help='Official val datasets used for checkpoint selection')
+    parser.add_argument('--official_val_max_samples', type=int, default=2048,
+                        help='Cap per-dataset official val samples for checkpoint selection (None/<=0 = full set)')
+    parser.add_argument('--official_val_batch_size', type=int, default=64)
+    parser.add_argument('--official_val_num_workers', type=int, default=4)
+    parser.add_argument('--official_val_every', type=int, default=1,
+                        help='Run official val selector every N epochs')
+    parser.add_argument('--official_val_max_len', type=int, default=30)
+    parser.add_argument('--official_val_min_decode_len', type=int, default=None,
+                        help='Minimum decode length for official selector; default uses dataset prior')
+    parser.add_argument('--official_val_length_bin', type=str, default='auto',
+                        choices=['auto', 'dataset_mode', 'short', 'medium', 'long'],
+                        help='Inference-time length bin used by official selector')
     return parser.parse_args()
 
 
@@ -210,12 +317,21 @@ def train_h(args):
     ds_expl = VQAGenerativeDataset.from_merged_json(args.merged_json, q_vocab, a_vocab, feature_loader=h1_loader, use_butd=True)
     if args.phase == 4:
         ds_expl = build_phase4_sources(ds_expl)
+    ds_expl_val = VQAGenerativeDataset(
+        annotations=ds_expl.annotations,
+        q_vocab=q_vocab,
+        a_vocab=a_vocab,
+        feature_loader=h1_loader,
+        use_butd=True,
+        always_long=ds_expl.always_long,
+        explanation_mode='first',
+    )
 
     n_val = max(int(0.05 * len(ds_expl)), 1000)
     indices = list(range(len(ds_expl)))
     random.Random(42).shuffle(indices)
 
-    ds_val = Subset(ds_expl, indices[:n_val])
+    ds_val = Subset(ds_expl_val, indices[:n_val])
     ds_expl_train = Subset(ds_expl, indices[n_val:])
 
     ds_vqa_v2_real = None
@@ -236,7 +352,9 @@ def train_h(args):
 
     if args.phase == 1:
         if vqa_mix is not None:
-            train_dataset, train_sampler = build_mixed_sampler([vqa_mix, ds_expl_train], [0.4, 0.6])
+            train_dataset, train_sampler = _build_source_balanced_mix(
+                vqa_mix, ds_expl_train, replay_fraction=0.4, source_weights=sw,
+            )
         elif args.weighted_sampling:
             train_dataset, train_sampler = build_subset_weighted_sampler(
                 ds_expl_train, sw, quality_gamma=args.quality_gamma,
@@ -245,7 +363,9 @@ def train_h(args):
             train_dataset, train_sampler = ds_expl_train, None
     elif args.phase in (2, 3):
         if vqa_mix is not None:
-            train_dataset, train_sampler = build_replay_sampler(ds_expl_train, vqa_mix, replay_fraction=0.2)
+            train_dataset, train_sampler = _build_source_balanced_mix(
+                vqa_mix, ds_expl_train, replay_fraction=0.2, source_weights=sw,
+            )
         elif args.weighted_sampling:
             train_dataset, train_sampler = build_subset_weighted_sampler(
                 ds_expl_train, sw, quality_gamma=args.quality_gamma,
@@ -317,7 +437,7 @@ def train_h(args):
     use_scaler = torch.cuda.is_available() and amp_dtype == torch.float16
     scaler = GradScaler('cuda', enabled=use_scaler)
 
-    start_epoch, best_val_loss, epochs_no_improve = 0, float('inf'), 0
+    start_epoch, best_val_loss, best_select_score, epochs_no_improve = 0, float('inf'), float('-inf'), 0
     history = {'train_loss': [], 'val_loss': [], 'lr': []}
 
     ckpt = None
@@ -332,6 +452,7 @@ def train_h(args):
         if ckpt.get('args', {}).get('phase', args.phase) == args.phase:
             start_epoch = ckpt.get('epoch', 0)
             best_val_loss = ckpt.get('best_val_loss', float('inf'))
+            best_select_score = ckpt.get('best_select_score', float('-inf'))
             history = ckpt.get('history', history)
             optimizer_loaded = False
             try:
@@ -355,6 +476,7 @@ def train_h(args):
                 print("[resume] schedulers not loaded (optimizer state incompatible); cosine/warmup restart from current build")
             if getattr(args, 'reset_best_val_on_resume', False):
                 best_val_loss = float('inf')
+                best_select_score = float('-inf')
                 print("[resume] reset_best_val_on_resume: best_val_loss → inf (early stopping baseline fresh)")
 
     # FastText after resume so Phase 2 is not overwritten by Phase-1 CE weights when prev run had no FastText.
@@ -397,133 +519,139 @@ def train_h(args):
             grid_valid = batch.grid_valid.to(DEVICE) if getattr(batch, 'grid_valid', None) is not None else None
 
             dec_in, dec_tgt = targets[:, :-1], targets[:, 1:]
-            
-            optimizer.zero_grad(set_to_none=True)
-            with autocast('cuda', dtype=amp_dtype):
-                ss_on = getattr(args, 'scheduled_sampling', False) and args.phase == 3
-                if ss_on:
-                    rel_ep = epoch - start_epoch
-                    epsilon = args.ss_k / (args.ss_k + math.exp(rel_ep / args.ss_k))
-                    end_idx = a_vocab.word2idx.get('<end>', 2)
-                    ss_min = max(0, getattr(args, 'min_decode_len', 0))
-                    logits, mac_attn_ss = _ss_forward_h(
-                        model, questions, feats, dec_in, epsilon,
-                        grid_feats=grid_feats, grid_valid=grid_valid, img_mask=img_mask,
-                        length_bin=length_bin, label_tokens=label_tokens,
-                        min_decode_len=ss_min, end_idx=end_idx,
-                    )
-                    ce_loss = criterion(logits, dec_tgt)
-                    entropy_loss = attention_entropy_penalty(
-                        mac_attn_ss, eps=1e-7, reference_device=DEVICE)
-                    cov_loss_scalar = torch.zeros((), device=DEVICE, dtype=torch.float32)
-                    loss = ce_loss + 0.5 * cov_loss_scalar + args.entropy_mac_coef * entropy_loss
-                else:
-                    out, cov_loss_scalar = model.forward_with_cov(
-                        questions, feats, dec_in, img_mask=img_mask, length_bin=length_bin,
-                        label_tokens=label_tokens, grid_feats=grid_feats, grid_valid=grid_valid,
-                    )
-                    if not torch.isfinite(out.logits).all():
-                        loss = out.logits.new_tensor(float('nan'))
-                        consec_nan += 1
-                        if consec_nan <= 3 or consec_nan % 20 == 0:
-                            print(f"[WARN] NaN in model output at epoch {epoch+1} step {step_idx} (consec={consec_nan})")
-                        optimizer.zero_grad(set_to_none=True)
-                        if use_scaler:
-                            scaler.update()
-                        if consec_nan % 10 == 0:
-                            torch.cuda.empty_cache()
-                        if consec_nan >= MAX_CONSEC_NAN:
-                            print(f"[CRITICAL] {MAX_CONSEC_NAN} consecutive NaN outputs — aborting epoch {epoch+1}")
-                            train_aborted_nan = True
-                            break
-                        continue
-                    ce_loss = criterion(out.logits, dec_tgt)
-                    mac_attn = getattr(out, 'mac_attn', None)
-                    entropy_loss = attention_entropy_penalty(mac_attn, eps=1e-7, reference_device=DEVICE)
-                    loss = ce_loss + 0.5 * cov_loss_scalar + args.entropy_mac_coef * entropy_loss
-
-                if args.infonce and not ss_on:
-                    ifo = getattr(out, 'infonce_loss', None)
-                    if ifo is not None:
-                        loss = loss + args.infonce_beta * ifo
-
-                if ss_on:
-                    with torch.no_grad():
-                        preds = logits.argmax(dim=-1)
-                else:
-                    with torch.no_grad():
-                        preds = out.logits.argmax(dim=-1)
-                mask = dec_tgt != 0
-                acc = (preds[mask] == dec_tgt[mask]).float().mean().item()
-                ep_acc += acc
-                ep_entropy += float(entropy_loss.detach().item())
-
-                if args.scst and args.phase == 4:
-                    from training.scst import scst_step
-                    target_texts = []
-                    for row in dec_tgt:
-                        words = []
-                        for tid in row.tolist():
-                            if tid in (0, 2):
-                                break
-                            w = a_vocab.idx2word.get(tid, '<unk>') if hasattr(a_vocab, 'idx2word') else a_vocab.idx_to_word.get(tid, '<unk>')
-                            words.append(w)
-                        target_texts.append(' '.join(words))
-
-                    lbl_names = getattr(batch, 'label_names', None)
-                    if lbl_names is not None:
-                        lbl_names = [list(x) if x is not None else [] for x in lbl_names]
-                    rl_loss, _ = scst_step(
-                        model, 'H', feats, questions, target_texts, a_vocab,
-                        device=DEVICE, max_len=dec_in.size(1),
-                        cider_weight=1.0,
-                        bleu_weight=args.scst_bleu,
-                        meteor_weight=args.scst_meteor,
-                        exact_match_weight=args.scst_exact_match,
-                        ohp_weight=args.ohp_lambda, glove_embed=glove_embed, return_stats=True,
-                        grid_feats=grid_feats, grid_valid=grid_valid, img_mask=img_mask, label_tokens=label_tokens,
-                        visual_labels_batch=lbl_names,
-                    )
-                    if rl_loss is not None:
-                        loss = loss * 0.5 + rl_loss * 0.5
-
-            if not torch.isfinite(loss).item():
-                consec_nan += 1
-                if consec_nan <= 3 or consec_nan % 20 == 0:
-                    print(f"[WARN] non-finite loss at epoch {epoch+1} step {step_idx} — skipping step (consec={consec_nan})")
+            try:
                 optimizer.zero_grad(set_to_none=True)
+                with autocast('cuda', dtype=amp_dtype):
+                    ss_on = getattr(args, 'scheduled_sampling', False) and args.phase == 3
+                    if ss_on:
+                        rel_ep = epoch - start_epoch
+                        epsilon = args.ss_k / (args.ss_k + math.exp(rel_ep / args.ss_k))
+                        end_idx = a_vocab.word2idx.get('<end>', 2)
+                        ss_min = max(0, getattr(args, 'min_decode_len', 0))
+                        logits, mac_attn_ss = _ss_forward_h(
+                            model, questions, feats, dec_in, epsilon,
+                            grid_feats=grid_feats, grid_valid=grid_valid, img_mask=img_mask,
+                            length_bin=length_bin, label_tokens=label_tokens,
+                            min_decode_len=ss_min, end_idx=end_idx,
+                        )
+                        ce_loss = criterion(logits, dec_tgt)
+                        entropy_loss = attention_entropy_penalty(
+                            mac_attn_ss, eps=1e-7, reference_device=DEVICE)
+                        cov_loss_scalar = torch.zeros((), device=DEVICE, dtype=torch.float32)
+                        loss = ce_loss + 0.5 * cov_loss_scalar + args.entropy_mac_coef * entropy_loss
+                    else:
+                        out, cov_loss_scalar = model.forward_with_cov(
+                            questions, feats, dec_in, img_mask=img_mask, length_bin=length_bin,
+                            label_tokens=label_tokens, grid_feats=grid_feats, grid_valid=grid_valid,
+                        )
+                        if not torch.isfinite(out.logits).all():
+                            loss = out.logits.new_tensor(float('nan'))
+                            consec_nan += 1
+                            if consec_nan <= 3 or consec_nan % 20 == 0:
+                                print(f"[WARN] NaN in model output at epoch {epoch+1} step {step_idx} (consec={consec_nan})")
+                            optimizer.zero_grad(set_to_none=True)
+                            if use_scaler:
+                                scaler.update()
+                            if consec_nan % 10 == 0:
+                                _clear_runtime_memory()
+                            if consec_nan >= MAX_CONSEC_NAN:
+                                print(f"[CRITICAL] {MAX_CONSEC_NAN} consecutive NaN outputs — aborting epoch {epoch+1}")
+                                train_aborted_nan = True
+                                break
+                            continue
+                        ce_loss = criterion(out.logits, dec_tgt)
+                        mac_attn = getattr(out, 'mac_attn', None)
+                        entropy_loss = attention_entropy_penalty(mac_attn, eps=1e-7, reference_device=DEVICE)
+                        loss = ce_loss + 0.5 * cov_loss_scalar + args.entropy_mac_coef * entropy_loss
+
+                    if args.infonce and not ss_on:
+                        ifo = getattr(out, 'infonce_loss', None)
+                        if ifo is not None:
+                            loss = loss + args.infonce_beta * ifo
+
+                    if ss_on:
+                        with torch.no_grad():
+                            preds = logits.argmax(dim=-1)
+                    else:
+                        with torch.no_grad():
+                            preds = out.logits.argmax(dim=-1)
+                    mask = dec_tgt != 0
+                    acc = (preds[mask] == dec_tgt[mask]).float().mean().item()
+                    ep_acc += acc
+                    ep_entropy += float(entropy_loss.detach().item())
+
+                    if args.scst and args.phase == 4:
+                        from training.scst import scst_step
+                        target_texts = []
+                        for row in dec_tgt:
+                            words = []
+                            for tid in row.tolist():
+                                if tid in (0, 2):
+                                    break
+                                w = a_vocab.idx2word.get(tid, '<unk>') if hasattr(a_vocab, 'idx2word') else a_vocab.idx_to_word.get(tid, '<unk>')
+                                words.append(w)
+                            target_texts.append(' '.join(words))
+
+                        lbl_names = getattr(batch, 'label_names', None)
+                        if lbl_names is not None:
+                            lbl_names = [list(x) if x is not None else [] for x in lbl_names]
+                        rl_loss, _ = scst_step(
+                            model, 'H', feats, questions, target_texts, a_vocab,
+                            device=DEVICE, max_len=dec_in.size(1),
+                            cider_weight=1.0,
+                            bleu_weight=args.scst_bleu,
+                            meteor_weight=args.scst_meteor,
+                            exact_match_weight=args.scst_exact_match,
+                            ohp_weight=args.ohp_lambda, glove_embed=glove_embed, return_stats=True,
+                            grid_feats=grid_feats, grid_valid=grid_valid, img_mask=img_mask, label_tokens=label_tokens,
+                            visual_labels_batch=lbl_names,
+                        )
+                        if rl_loss is not None:
+                            loss = loss * 0.5 + rl_loss * 0.5
+
+                if not torch.isfinite(loss).item():
+                    consec_nan += 1
+                    if consec_nan <= 3 or consec_nan % 20 == 0:
+                        print(f"[WARN] non-finite loss at epoch {epoch+1} step {step_idx} — skipping step (consec={consec_nan})")
+                    optimizer.zero_grad(set_to_none=True)
+                    if use_scaler:
+                        scaler.update()
+                    if consec_nan % 10 == 0:
+                        _clear_runtime_memory()
+                    if consec_nan >= MAX_CONSEC_NAN:
+                        print(f"[CRITICAL] {MAX_CONSEC_NAN} consecutive NaN steps — aborting epoch {epoch+1}")
+                        train_aborted_nan = True
+                        break
+                    continue
+                consec_nan = 0
+
                 if use_scaler:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                else:
+                    loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+                g_norm = 0.0
+                for p in model.parameters():
+                    if p.grad is not None:
+                        g_norm += p.grad.detach().data.norm(2).item() ** 2
+                ep_gnorm += g_norm ** 0.5
+
+                if use_scaler:
+                    scaler.step(optimizer)
                     scaler.update()
-                if consec_nan % 10 == 0:
-                    torch.cuda.empty_cache()
-                if consec_nan >= MAX_CONSEC_NAN:
-                    print(f"[CRITICAL] {MAX_CONSEC_NAN} consecutive NaN steps — aborting epoch {epoch+1}")
-                    train_aborted_nan = True
-                    break
-                continue
-            consec_nan = 0
-
-            if use_scaler:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-            else:
-                loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-
-            g_norm = 0.0
-            for p in model.parameters():
-                if p.grad is not None:
-                    g_norm += p.grad.detach().data.norm(2).item() ** 2
-            ep_gnorm += g_norm ** 0.5
-
-            if use_scaler:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-            ep_loss += loss.item()
-            global_step += 1
-            train_pbar.set_postfix({'loss': f"{loss.item():.3f}", 'acc': f"{acc*100:.1f}%"})
+                else:
+                    optimizer.step()
+                ep_loss += loss.item()
+                global_step += 1
+                train_pbar.set_postfix({'loss': f"{loss.item():.3f}", 'acc': f"{acc*100:.1f}%"})
+            except torch.OutOfMemoryError as e:
+                print(f"[OOM] epoch {epoch+1} step {step_idx}: {e}")
+                optimizer.zero_grad(set_to_none=True)
+                train_aborted_nan = True
+                _clear_runtime_memory()
+                break
             if _wb and step_idx % 50 == 0:
                 try:
                     _wb.log({'train/entropy_mac': float(entropy_loss.detach().item()), 'train/step': global_step}, step=global_step)
@@ -537,18 +665,9 @@ def train_h(args):
                 f"[CRITICAL] Train epoch {epoch+1} aborted or non-finite weights — "
                 "skipping val & checkpoint save (avoids poisoning resume.pth)."
             )
-            if os.path.isfile(best_ckpt_path):
-                try:
-                    b = torch.load(best_ckpt_path, map_location='cpu', weights_only=False)
-                    bsd = _normalize_ckpt_state_dict(b['model_state_dict'], model)
-                    model.load_state_dict(bsd, strict=False)
-                    print(f"[recover] Reloaded weights from {best_ckpt_path}")
-                except Exception as e:
-                    print(f"[recover] Could not load best checkpoint: {e}")
-            else:
-                print("[recover] No best checkpoint on disk — consider retrain or resume from an older .pth")
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            _reload_best_training_state(best_ckpt_path, model, optimizer, scaler, cosine_sched, warmup_sched)
+            consec_nan = 0
+            _clear_runtime_memory()
             continue
 
         avg_loss, avg_acc = ep_loss / len(train_loader), ep_acc / len(train_loader)
@@ -560,12 +679,15 @@ def train_h(args):
             for v_batch in val_pbar:
                 v_feats, v_q, v_tgt = v_batch.feats.to(DEVICE), v_batch.questions.to(DEVICE), v_batch.targets.to(DEVICE)
                 v_mask = v_batch.img_mask.to(DEVICE) if v_batch.img_mask is not None else None
+                v_len_bin = v_batch.length_bins.to(DEVICE) if getattr(v_batch, 'length_bins', None) is not None else None
+                v_label_tokens = v_batch.label_tokens.to(DEVICE) if getattr(v_batch, 'label_tokens', None) is not None else None
                 v_grid = v_batch.grid_feats.to(DEVICE) if getattr(v_batch, 'grid_feats', None) is not None else None
                 v_grid_valid = v_batch.grid_valid.to(DEVICE) if getattr(v_batch, 'grid_valid', None) is not None else None
 
                 with autocast('cuda', dtype=amp_dtype):
                     v_out, _ = model.forward_with_cov(
                         v_q, v_feats, v_tgt[:, :-1], img_mask=v_mask,
+                        length_bin=v_len_bin, label_tokens=v_label_tokens,
                         grid_feats=v_grid, grid_valid=v_grid_valid)
                     v_loss = criterion(v_out.logits, v_tgt[:, 1:]).item()
                     val_loss += v_loss
@@ -573,6 +695,7 @@ def train_h(args):
                     v_m = v_tgt[:, 1:] != 0
                     val_correct += (v_preds[v_m] == v_tgt[:, 1:][v_m]).sum().item()
                     val_tokens += int(v_m.sum().item())
+        _clear_runtime_memory()
 
         avg_val = val_loss / max(1, len(val_loader))
         avg_vacc = val_correct / max(val_tokens, 1)
@@ -597,6 +720,54 @@ def train_h(args):
                 log_payload['train/entropy_mac_mean'] = ep_entropy / max(1, len(train_loader))
             _wb.log(log_payload)
 
+        selection_summary = None
+        current_select_score = None
+        if (
+            metrics_ok
+            and getattr(args, 'select_on_official_val', False)
+            and ((epoch + 1) % max(1, args.official_val_every) == 0)
+        ):
+            from model_h_selection import evaluate_official_val_selection
+
+            selection_summary = evaluate_official_val_selection(
+                model,
+                q_vocab,
+                a_vocab,
+                h1_loader,
+                DEVICE,
+                args.official_val_datasets,
+                batch_size=args.official_val_batch_size,
+                num_workers=args.official_val_num_workers,
+                max_len=args.official_val_max_len,
+                min_decode_len=args.official_val_min_decode_len,
+                length_bin_policy=args.official_val_length_bin,
+                max_samples=(None if args.official_val_max_samples <= 0 else args.official_val_max_samples),
+            )
+            current_select_score = float(selection_summary.get('macro_score', 0.0))
+            ds_lines = []
+            for ds_res in selection_summary.get('datasets', []):
+                ds_lines.append(
+                    f"{ds_res['dataset']}: score={ds_res['selection_score']:.4f} "
+                    f"(ans={ds_res['ans_exact']:.4f}, b4={ds_res['bleu4']:.4f}, m={ds_res['meteor']:.4f})"
+                )
+            print(
+                f"[official-val] macro_score={current_select_score:.4f}"
+                + (f" | {' | '.join(ds_lines)}" if ds_lines else "")
+            )
+            history.setdefault('official_macro', []).append(current_select_score)
+            with open(history_path, 'w') as f:
+                json.dump(history, f, indent=2)
+            if _wb:
+                log_payload = {'official_val/macro_score': current_select_score, 'epoch': epoch + 1}
+                for ds_res in selection_summary.get('datasets', []):
+                    ds_name = ds_res['dataset']
+                    log_payload[f'official_val/{ds_name}_score'] = ds_res['selection_score']
+                    log_payload[f'official_val/{ds_name}_ans_exact'] = ds_res['ans_exact']
+                    log_payload[f'official_val/{ds_name}_bleu4'] = ds_res['bleu4']
+                    log_payload[f'official_val/{ds_name}_meteor'] = ds_res['meteor']
+                _wb.log(log_payload)
+            _clear_runtime_memory()
+
         # Warmup only for the first `warmup_epochs` of training (epoch index 0..warmup-1), not after resume.
         if args.warmup_epochs > 0 and epoch < args.warmup_epochs:
             warmup_sched.step()
@@ -619,25 +790,49 @@ def train_h(args):
             'optimizer_state_dict': optimizer.state_dict(),
             'scaler_state_dict': scaler.state_dict(),
             'best_val_loss': best_val_loss,
+            'best_select_score': best_select_score,
             'history': history,
             'args': vars(args),
             'cosine_sched_state_dict': cosine_sched.state_dict(),
         }
+        if selection_summary is not None:
+            ckpt_meta['selection_summary'] = selection_summary
         if warmup_sched is not None:
             ckpt_meta['warmup_sched_state_dict'] = warmup_sched.state_dict()
-        torch.save(ckpt_meta, resume_ckpt_path)
 
-        if avg_val < best_val_loss:
-            best_val_loss, epochs_no_improve = avg_val, 0
+        if current_select_score is not None:
+            improved = current_select_score > best_select_score
+        else:
+            improved = avg_val < best_val_loss
+
+        if improved:
+            best_val_loss = min(best_val_loss, avg_val)
+            if current_select_score is not None:
+                best_select_score = current_select_score
             ckpt_meta['best_val_loss'] = best_val_loss
+            ckpt_meta['best_select_score'] = best_select_score
+            epochs_no_improve = 0
             torch.save(ckpt_meta, best_ckpt_path)
-            print("[*] New Best Validation Loss - Checkpoint Saved!")
+            if current_select_score is not None:
+                print("[*] New Best Official-Val Score - Checkpoint Saved!")
+            else:
+                print("[*] New Best Validation Loss - Checkpoint Saved!")
         else:
             epochs_no_improve += 1
-            print(f"[!] Validation Loss did not improve. Patience: {epochs_no_improve}/{args.patience}")
+            if current_select_score is not None:
+                print(f"[!] Official-Val score did not improve. Patience: {epochs_no_improve}/{args.patience}")
+            else:
+                print(f"[!] Validation Loss did not improve. Patience: {epochs_no_improve}/{args.patience}")
             if args.patience > 0 and epochs_no_improve >= args.patience:
                 print(f"\n[CRITICAL] EARLY STOPPING ACTIVATED! Model H đã hội tụ.")
+                ckpt_meta['best_val_loss'] = best_val_loss
+                ckpt_meta['best_select_score'] = best_select_score
+                torch.save(ckpt_meta, resume_ckpt_path)
                 break
+
+        ckpt_meta['best_val_loss'] = best_val_loss
+        ckpt_meta['best_select_score'] = best_select_score
+        torch.save(ckpt_meta, resume_ckpt_path)
 
     if _wb: _wb.finish()
 

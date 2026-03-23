@@ -376,6 +376,7 @@ class VQAGenerativeDataset(Dataset):
         use_butd: bool = False,
         max_samples: Optional[int] = None,
         always_long: bool = False,
+        explanation_mode: str = "random",
     ):
         self.annotations = annotations
         if max_samples is not None:
@@ -386,6 +387,7 @@ class VQAGenerativeDataset(Dataset):
         self.feature_loader = feature_loader
         self.use_butd = use_butd
         self.always_long = always_long
+        self.explanation_mode = explanation_mode
 
     # -----------------------------------------------------------------------
     # Standard Dataset interface
@@ -422,7 +424,12 @@ class VQAGenerativeDataset(Dataset):
             # Pick explanation — randomly sample from list (A-OKVQA has 3 rationales)
             exp_list = ann.get("explanation", [])
             valid_exps = [e for e in exp_list if isinstance(e, str) and e.strip()]
-            explanation = random.choice(valid_exps) if valid_exps else ""
+            if not valid_exps:
+                explanation = ""
+            elif self.explanation_mode == "first":
+                explanation = valid_exps[0]
+            else:
+                explanation = random.choice(valid_exps)
 
             # Build target text
             a_text = f"{answer} because {explanation}" if explanation else answer
@@ -490,6 +497,7 @@ class VQAGenerativeDataset(Dataset):
             use_butd=use_butd,
             max_samples=max_samples,
             always_long=always_long,
+            explanation_mode="random",
         )
 
     @classmethod
@@ -549,6 +557,7 @@ class VQAGenerativeDataset(Dataset):
             use_butd=use_butd,
             max_samples=max_samples,
             always_long=False,
+            explanation_mode="random",
         )
 
     @classmethod
@@ -589,6 +598,7 @@ class VQAGenerativeDataset(Dataset):
             feature_loader=feature_loader,
             use_butd=use_butd,
             max_samples=max_samples,
+            explanation_mode="random",
         )
 
     # -----------------------------------------------------------------------
@@ -604,6 +614,7 @@ class VQAGenerativeDataset(Dataset):
             feature_loader=self.feature_loader,
             use_butd=self.use_butd,
             always_long=self.always_long,
+            explanation_mode=self.explanation_mode,
         )
 
     def filter_by_source(self, sources: List[str]) -> "VQAGenerativeDataset":
@@ -615,6 +626,7 @@ class VQAGenerativeDataset(Dataset):
             feature_loader=self.feature_loader,
             use_butd=self.use_butd,
             always_long=self.always_long,
+            explanation_mode=self.explanation_mode,
         )
 
     def source_counts(self) -> Dict[str, int]:

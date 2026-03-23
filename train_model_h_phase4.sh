@@ -3,6 +3,7 @@
 set -e
 cd "$(dirname "$0")"
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 VG="data/vg_features/"
 MERGED="data/processed/merged_train_filtered.json"
@@ -15,7 +16,7 @@ python src/train_h.py \
     --patience 15 \
     --lr 1e-5 \
     --warmup_epochs 0 \
-    --batch_size 64 \
+    --batch_size 48 \
     --dropout 0.5 \
     --num_workers 8 \
     --vg_feat_dir "${VG}" \
@@ -26,6 +27,10 @@ python src/train_h.py \
     --infonce \
     --scst \
     --ohp_lambda 0.1 \
+    --select_on_official_val \
+    --official_val_max_samples 2048 \
+    --official_val_batch_size 64 \
+    --official_val_num_workers 4 \
     --resume checkpoints/h/model_h_phase3_best.pth \
     --wandb \
     --wandb_project "vqa-model-h" \

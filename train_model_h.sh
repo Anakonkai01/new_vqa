@@ -11,6 +11,7 @@ cd "$(dirname "$0")"
 export PYTHONPATH="$(pwd)/src:$PYTHONPATH"
 export CUDA_VISIBLE_DEVICES=0
 export TORCH_CUDNN_V8_API_ENABLED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # torch.compile + long backward kernels can trigger cudaErrorLaunchTimeout on some setups (esp. GPU shared with display).
 # --no_compile below avoids that; re-enable compile only if you train headless and never see timeouts.
 
@@ -19,12 +20,14 @@ VG_FEAT_DIR="data/vg_features/"
 MERGED_JSON="data/processed/merged_train_filtered.json"
 VOCAB_Q="data/processed/vocab_questions.json"
 VOCAB_A="data/processed/vocab_answers.json"
+VQA2_Q="data/annotations/vqa_v2/v2_OpenEnded_mscoco_train2014_questions.json"
+VQA2_A="data/annotations/vqa_v2/v2_mscoco_train2014_annotations.json"
 
 # --- CẤU HÌNH PHẦN CỨNG (GIÁO SƯ ĐÃ TỐI ƯU) ---
 WORKERS=8
-BASE_BATCH=128       # Batch size cho Cross-Entropy (Train Phase 1 & 2)
-RL_BATCH=64          # Batch size cho SCST Sampling (Train Phase 4)
-EVAL_BATCH=128       # [QUAN TRỌNG] Chặn đứng lỗi OOM khi Beam Search (3 beams * 128 = 384 sequence song song)
+BASE_BATCH=96        # 15GB VRAM-safe baseline for CE phases
+RL_BATCH=48          # Safer SCST batch on 15GB VRAM
+EVAL_BATCH=64        # Official-val / eval selector batch to avoid VRAM spikes
 DROPOUT=0.5
 PATIENCE=15
 
@@ -41,8 +44,8 @@ python src/train_h.py \
     --phase 1 \
     --epochs 50 \
     --patience ${PATIENCE} \
-    --lr 1e-3 \
-    --warmup_epochs 2 \
+    --lr 5e-4 \
+    --warmup_epochs 4 \
     --batch_size ${BASE_BATCH} \
     --dropout ${DROPOUT} \
     --num_workers ${WORKERS} \
@@ -50,8 +53,14 @@ python src/train_h.py \
     --merged_json ${MERGED_JSON} \
     --vocab_q_path ${VOCAB_Q} \
     --vocab_a_path ${VOCAB_A} \
+    --vqa_v2_questions ${VQA2_Q} \
+    --vqa_v2_annotations ${VQA2_A} \
     --infonce \
     --use_fasttext \
+    --select_on_official_val \
+    --official_val_max_samples 2048 \
+    --official_val_batch_size ${EVAL_BATCH} \
+    --official_val_num_workers ${WORKERS} \
     --wandb \
     --wandb_project "vqa-model-h" \
     --wandb_run_name "model_h_phase1_auto" \
@@ -79,7 +88,7 @@ python src/train_h.py \
     --epochs 50 \
     --patience ${PATIENCE} \
     --lr 1e-4 \
-    --warmup_epochs 1 \
+    --warmup_epochs 2 \
     --batch_size ${BASE_BATCH} \
     --dropout ${DROPOUT} \
     --num_workers ${WORKERS} \
@@ -87,8 +96,14 @@ python src/train_h.py \
     --merged_json ${MERGED_JSON} \
     --vocab_q_path ${VOCAB_Q} \
     --vocab_a_path ${VOCAB_A} \
+    --vqa_v2_questions ${VQA2_Q} \
+    --vqa_v2_annotations ${VQA2_A} \
     --infonce \
     --use_fasttext \
+    --select_on_official_val \
+    --official_val_max_samples 2048 \
+    --official_val_batch_size ${EVAL_BATCH} \
+    --official_val_num_workers ${WORKERS} \
     --resume checkpoints/h/model_h_phase1_best.pth \
     --wandb \
     --wandb_project "vqa-model-h" \
@@ -116,7 +131,7 @@ python src/train_h.py \
     --phase 3 \
     --epochs 30 \
     --patience ${PATIENCE} \
-    --lr 2e-4 \
+    --lr 1.5e-4 \
     --warmup_epochs 0 \
     --batch_size ${BASE_BATCH} \
     --dropout ${DROPOUT} \
@@ -125,11 +140,17 @@ python src/train_h.py \
     --merged_json ${MERGED_JSON} \
     --vocab_q_path ${VOCAB_Q} \
     --vocab_a_path ${VOCAB_A} \
+    --vqa_v2_questions ${VQA2_Q} \
+    --vqa_v2_annotations ${VQA2_A} \
     --infonce \
     --use_fasttext \
     --scheduled_sampling \
     --ss_k 5 \
     --min_decode_len 8 \
+    --select_on_official_val \
+    --official_val_max_samples 2048 \
+    --official_val_batch_size ${EVAL_BATCH} \
+    --official_val_num_workers ${WORKERS} \
     --resume checkpoints/h/model_h_phase2_best.pth \
     --wandb \
     --wandb_project "vqa-model-h" \
@@ -170,6 +191,10 @@ python src/train_h.py \
     --infonce \
     --scst \
     --ohp_lambda 0.1 \
+    --select_on_official_val \
+    --official_val_max_samples 2048 \
+    --official_val_batch_size ${EVAL_BATCH} \
+    --official_val_num_workers ${WORKERS} \
     --resume checkpoints/h/model_h_phase3_best.pth \
     --wandb \
     --wandb_project "vqa-model-h" \

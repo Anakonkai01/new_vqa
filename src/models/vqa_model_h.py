@@ -171,8 +171,15 @@ class ModelH(nn.Module):
         
     def encode(self, q_seq, v_feats, grid_feats=None, img_mask=None, grid_valid=None):
         B = q_seq.size(0)
-        q_embs = self.q_emb(q_seq) 
-        lstm_out, (hn, cn) = self.lstm(q_embs)
+        q_embs = self.q_emb(q_seq)
+        q_lens = q_seq.ne(0).sum(dim=1).clamp(min=1).cpu()
+        packed = nn.utils.rnn.pack_padded_sequence(
+            q_embs, q_lens, batch_first=True, enforce_sorted=False
+        )
+        packed_out, (hn, cn) = self.lstm(packed)
+        lstm_out, _ = nn.utils.rnn.pad_packed_sequence(
+            packed_out, batch_first=True, total_length=q_seq.size(1)
+        )
         context = lstm_out
         q_feat = torch.cat([hn[0], hn[1]], dim=-1)
         
