@@ -49,10 +49,42 @@ Usage in train.py
 import torch
 import torch.nn.functional as F
 import numpy as np
+import multiprocessing as mp
+import atexit
 from typing import List, Optional, Tuple
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 
 from text_contract import split_answer_explanations, strip_empty_explanations
+
+# ---------------------------------------------------------------------------
+# Persistent worker pool for CPU-bound reward computation.
+# Using 'fork' so workers inherit all imports (NLTK, etc.) without re-loading.
+# Workers never call CUDA so fork-after-CUDA-init is safe here.
+# ---------------------------------------------------------------------------
+_REWARD_POOL: Optional[mp.Pool] = None
+_REWARD_N_WORKERS = min(8, mp.cpu_count())
+_REWARD_POOL_MIN_BATCH = 4   # below this, overhead > gain → fall back to sequential
+
+
+def _get_reward_pool() -> mp.Pool:
+    global _REWARD_POOL
+    if _REWARD_POOL is None:
+        ctx = mp.get_context('fork')
+        _REWARD_POOL = ctx.Pool(processes=_REWARD_N_WORKERS, maxtasksperchild=2000)
+        atexit.register(_REWARD_POOL.terminate)
+    return _REWARD_POOL
+
+
+def _bleu4_meteor_worker(args: tuple) -> tuple:
+    """Compute BLEU-4 + METEOR for one (hyp, ref) pair. Called in worker process."""
+    h_str, r_str = args
+    h = h_str.split()
+    r = r_str.split()
+    smooth = SmoothingFunction().method1
+    b = sentence_bleu([r], h, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=smooth)
+    from nltk.translate.meteor_score import single_meteor_score
+    m = float(single_meteor_score(r, h))
+    return b, m
 
 
 # ── BLEU-4 ─────────────────────────────────────────────────────────────────────
@@ -73,11 +105,13 @@ def compute_bleu4_rewards(hypotheses: List[str], references: List[str]) -> torch
     references : list[str] of space-tokenized ground truth text
     returns    : (B,) float tensor of BLEU-4 scores in [0,1]
     """
-    rewards = [
-        _bleu4(h.split(), r.split())
-        for h, r in zip(hypotheses, references)
-    ]
-    return torch.tensor(rewards, dtype=torch.float32)
+    if len(hypotheses) < _REWARD_POOL_MIN_BATCH:
+        rewards = [_bleu4(h.split(), r.split()) for h, r in zip(hypotheses, references)]
+        return torch.tensor(rewards, dtype=torch.float32)
+    pool = _get_reward_pool()
+    # chunksize=4: each worker handles 4 pairs per task — reduces IPC overhead
+    results = pool.map(_bleu4_meteor_worker, list(zip(hypotheses, references)), chunksize=4)
+    return torch.tensor([b for b, _ in results], dtype=torch.float32)
 
 
 # ── METEOR ──────────────────────────────────────────────────────────────────────
@@ -126,11 +160,12 @@ def compute_meteor_rewards(hypotheses: List[str], references: List[str]) -> torc
     references : list[str] of space-tokenized ground truth text
     returns    : (B,) float tensor of METEOR scores in [0,1]
     """
-    rewards = [
-        _meteor(h.split(), r.split())
-        for h, r in zip(hypotheses, references)
-    ]
-    return torch.tensor(rewards, dtype=torch.float32)
+    if len(hypotheses) < _REWARD_POOL_MIN_BATCH:
+        rewards = [_meteor(h.split(), r.split()) for h, r in zip(hypotheses, references)]
+        return torch.tensor(rewards, dtype=torch.float32)
+    pool = _get_reward_pool()
+    results = pool.map(_bleu4_meteor_worker, list(zip(hypotheses, references)), chunksize=4)
+    return torch.tensor([m for _, m in results], dtype=torch.float32)
 
 
 # ── Length Bonus ────────────────────────────────────────────────────────────────
@@ -321,11 +356,18 @@ def compute_rewards(
     """
     r = torch.zeros(len(hypotheses))
 
-    if bleu_weight > 0.0:
-        r = r + bleu_weight * compute_bleu4_rewards(hypotheses, references)
-
-    if meteor_weight > 0.0:
-        r = r + meteor_weight * compute_meteor_rewards(hypotheses, references)
+    # Compute BLEU and METEOR in a single parallel pool.map call to avoid
+    # spawning two separate pool.map rounds (each has IPC overhead).
+    if bleu_weight > 0.0 and meteor_weight > 0.0 and len(hypotheses) >= _REWARD_POOL_MIN_BATCH:
+        pool = _get_reward_pool()
+        bm_results = pool.map(_bleu4_meteor_worker, list(zip(hypotheses, references)), chunksize=4)
+        r = r + bleu_weight  * torch.tensor([b for b, _ in bm_results], dtype=torch.float32)
+        r = r + meteor_weight * torch.tensor([m for _, m in bm_results], dtype=torch.float32)
+    else:
+        if bleu_weight > 0.0:
+            r = r + bleu_weight * compute_bleu4_rewards(hypotheses, references)
+        if meteor_weight > 0.0:
+            r = r + meteor_weight * compute_meteor_rewards(hypotheses, references)
 
     if length_bonus_weight > 0.0:
         r = r + length_bonus_weight * compute_length_bonus(hypotheses)
@@ -523,10 +565,10 @@ def _sampling_decode(model, model_type, imgs, questions, vocab,
             )
             if temperature != 1.0:
                 logit = logit / temperature
-            probs   = F.softmax(logit, dim=-1)
+            # logit is log-probs from ThreeWayPGNHead.blend_3way — use .exp() directly
+            probs   = logit.float().exp()                              # (B, V) in float32
             sampled = torch.multinomial(probs, num_samples=1).squeeze(1)
-            log_p   = F.log_softmax(logit, dim=-1)
-            step_lp = log_p.gather(1, sampled.unsqueeze(1)).squeeze(1)
+            step_lp = logit.gather(1, sampled.unsqueeze(1)).squeeze(1) # log-prob of sampled token
             log_prob_sums = log_prob_sums + step_lp * (~done).float()
             for b in range(B):
                 if not done[b]:
@@ -576,10 +618,10 @@ def _sampling_decode(model, model_type, imgs, questions, vocab,
             )
             if temperature != 1.0:
                 logit = logit / temperature
-            probs   = F.softmax(logit, dim=-1)
+            # logit is log-probs from ThreeWayPGNHead.blend_3way — use .exp() directly
+            probs   = logit.float().exp()                              # (B, V) in float32
             sampled = torch.multinomial(probs, num_samples=1).squeeze(1)
-            log_p   = F.log_softmax(logit, dim=-1)
-            step_lp = log_p.gather(1, sampled.unsqueeze(1)).squeeze(1)
+            step_lp = logit.gather(1, sampled.unsqueeze(1)).squeeze(1) # log-prob of sampled token
             log_prob_sums = log_prob_sums + step_lp * (~done).float()
             for b in range(B):
                 if not done[b]:

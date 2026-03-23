@@ -129,7 +129,7 @@ python src/evaluate_h.py \
 echo -e "\n\n>>> [PHASE 3] BẮT ĐẦU SCHEDULED SAMPLING..."
 python src/train_h.py \
     --phase 3 \
-    --epochs 30 \
+    --epochs 50 \
     --patience ${PATIENCE} \
     --lr 1.5e-4 \
     --warmup_epochs 0 \
@@ -177,8 +177,8 @@ echo -e "\n\n>>> [PHASE 4] BẮT ĐẦU HUẤN LUYỆN SCST (CIDER REWARD)..."
 python src/train_h.py \
     --phase 4 \
     --epochs 50 \
-    --patience ${PATIENCE} \
-    --lr 1e-5 \
+    --patience 20 \
+    --lr 5e-5 \
     --warmup_epochs 0 \
     --batch_size ${RL_BATCH} \
     --dropout ${DROPOUT} \
@@ -187,10 +187,15 @@ python src/train_h.py \
     --merged_json ${MERGED_JSON} \
     --vocab_q_path ${VOCAB_Q} \
     --vocab_a_path ${VOCAB_A} \
+    --vqa_v2_questions ${VQA2_Q} \
+    --vqa_v2_annotations ${VQA2_A} \
     --use_fasttext \
     --infonce \
     --scst \
+    --scst_bleu 0.3 \
+    --scst_meteor 0.3 \
     --ohp_lambda 0.1 \
+    --entropy_mac_coef 0.05 \
     --select_on_official_val \
     --official_val_max_samples 2048 \
     --official_val_batch_size ${EVAL_BATCH} \

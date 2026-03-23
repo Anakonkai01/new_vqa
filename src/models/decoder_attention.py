@@ -313,7 +313,7 @@ class LSTMDecoderWithAttention(nn.Module):
         # Coverage vector: (B, S) — cumulative img attention across steps
         coverage = img_features.new_zeros(batch, num_regions) \
                    if self.use_coverage else None
-        cov_loss = img_features.new_zeros(1)
+        cov_loss = img_features.new_zeros(batch)  # (B,) per-sample accumulator
 
         logits_list = []
 
@@ -328,11 +328,9 @@ class LSTMDecoderWithAttention(nn.Module):
             # Question cross-attention (q_alpha → PGN copy distribution)
             q_context, q_alpha = self.q_mhca(h_top, q_hidden_states)
 
-            # Coverage: accumulate + compute penalty
+            # Coverage: accumulate + compute penalty (per-sample, no premature .mean())
             if self.use_coverage:
-                # Penalize re-attending to already-attended regions
-                # (same formulation as v1: Σ_t min(α_t, coverage_t))
-                cov_loss = cov_loss + torch.min(img_alpha, coverage).sum(dim=1).mean()
+                cov_loss = cov_loss + torch.min(img_alpha, coverage).sum(dim=1)  # (B,)
                 coverage = coverage + img_alpha
 
             # LSTM step: input = concat(embed_t, img_context, q_context)
@@ -351,8 +349,13 @@ class LSTMDecoderWithAttention(nn.Module):
 
             logits_list.append(logit)
 
-        logits       = torch.stack(logits_list, dim=1)               # (B, max_len, V)
-        coverage_loss = cov_loss / max_len if self.use_coverage else cov_loss.squeeze()
+        logits = torch.stack(logits_list, dim=1)                      # (B, max_len, V)
+        if self.use_coverage:
+            # Per-sample normalization by actual (non-pad) token count
+            T_actual = (target_seq != 0).float().sum(dim=1).clamp(min=1.0)  # (B,)
+            coverage_loss = (cov_loss / T_actual).mean()
+        else:
+            coverage_loss = cov_loss.new_zeros(())
         return logits, coverage_loss
 
     # ── Autoregressive decode step (inference) ─────────────────────────────────

@@ -87,12 +87,12 @@ class MACNetwork(nn.Module):
         super().__init__()
         self.num_hops = num_hops
         self.cell = MACCell(dim, max_seq_len, num_hops=num_hops)
-        # Small init avoids saturating LayerNorm/tanh in early hops (randn ~ N(0,1) → ||·|| ~ O(√D))
-        self.control_init = nn.Parameter(torch.zeros(1, dim))
-        self.memory_init = nn.Parameter(torch.zeros(1, dim))
+        # Small random init breaks symmetry at hop 0 without saturating LayerNorm/tanh
+        self.control_init = nn.Parameter(0.02 * torch.randn(1, dim))
+        self.memory_init = nn.Parameter(0.02 * torch.randn(1, dim))
         self.memory_norm = nn.LayerNorm(dim)
-        # Gated hop update (Phase B): blend new vs old memory instead of fixed residual add
-        self.hop_gate = nn.Linear(dim * 2, dim)
+        # Per-hop gated update: each hop gets its own gate to allow disentangled blend depth
+        self.hop_gates = nn.ModuleList([nn.Linear(dim * 2, dim) for _ in range(num_hops)])
 
     def forward(self, context, question, kb, kb_mask=None, q_mask=None):
         B = question.size(0)
@@ -101,7 +101,7 @@ class MACNetwork(nn.Module):
         all_attn_weights = []
         for step in range(self.num_hops):
             control, new_memory, attn_weights = self.cell(step, context, question, kb, control, memory, kb_mask, q_mask)
-            g = torch.sigmoid(self.hop_gate(torch.cat([memory, new_memory], dim=-1)))
+            g = torch.sigmoid(self.hop_gates[step](torch.cat([memory, new_memory], dim=-1)))
             memory = self.memory_norm(g * new_memory + (1.0 - g) * memory)
             all_attn_weights.append(attn_weights)
         return memory, torch.stack(all_attn_weights, dim=1)

@@ -14,7 +14,7 @@ VQA2A="data/annotations/vqa_v2/v2_mscoco_train2014_annotations.json"
 
 python src/train_h.py \
     --phase 3 \
-    --epochs 30 \
+    --epochs 50 \
     --patience 15 \
     --lr 1.5e-4 \
     --warmup_epochs 0 \

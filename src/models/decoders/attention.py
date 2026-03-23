@@ -198,7 +198,7 @@ class LSTMDecoderG(nn.Module):
         num_regions = img_features.size(1)
         coverage    = img_features.new_zeros(batch, num_regions) \
                       if self.use_coverage else None
-        cov_loss    = img_features.new_zeros(1)
+        cov_loss    = img_features.new_zeros(batch)  # (B,) per-sample accumulator
 
         logits_list = []
 
@@ -213,9 +213,9 @@ class LSTMDecoderG(nn.Module):
             # Question cross-attention
             q_context, q_alpha = self.q_mhca(h_top, q_hidden_states)
 
-            # Coverage update
+            # Coverage update (per-sample accumulation — no premature .mean())
             if self.use_coverage:
-                cov_loss = cov_loss + torch.min(img_alpha, coverage).sum(dim=1).mean()
+                cov_loss = cov_loss + torch.min(img_alpha, coverage).sum(dim=1)  # (B,)
                 coverage = coverage + img_alpha
 
             # G5 (+ optional MAC context for Model H)
@@ -238,8 +238,13 @@ class LSTMDecoderG(nn.Module):
             )
             logits_list.append(logit)
 
-        logits       = torch.stack(logits_list, dim=1)            # (B, T, V)
-        coverage_loss = cov_loss / max_len if self.use_coverage else cov_loss.squeeze()
+        logits = torch.stack(logits_list, dim=1)                   # (B, T, V)
+        if self.use_coverage:
+            # Per-sample normalization by actual (non-pad) token count
+            T_actual = (target_seq != 0).float().sum(dim=1).clamp(min=1.0)  # (B,)
+            coverage_loss = (cov_loss / T_actual).mean()
+        else:
+            coverage_loss = cov_loss.new_zeros(())
         return logits, coverage_loss
 
     # ── Single autoregressive step (inference) ─────────────────────────────

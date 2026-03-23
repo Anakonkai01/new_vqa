@@ -32,21 +32,41 @@ _LEGACY_INIT_RE = re.compile(r"^init_(h|c)(\d+)\.(.+)$")
 
 
 def _remap_model_h_legacy_decoder_inits(ckpt_sd: dict) -> dict:
-    """Map init_h1.weight → init_h.0.weight (old flat names → ModuleList)."""
+    """
+    Map legacy checkpoint keys to current architecture:
+      - init_h1.weight → init_h.0.weight  (old flat names → ModuleList)
+      - mac.hop_gate.weight → mac.hop_gates.{i}.weight  (shared → per-hop gates)
+    """
+    # --- init_h/init_c flat → ModuleList migration ---
     has_new = any(k.startswith("init_h.") or k.startswith("init_c.") for k in ckpt_sd)
-    if has_new:
-        return ckpt_sd
     out = {}
     remapped_any = False
-    for k, v in ckpt_sd.items():
-        m = _LEGACY_INIT_RE.match(k)
-        if m:
-            remapped_any = True
-            kind, idx_s, rest = m.group(1), int(m.group(2)), m.group(3)
-            out[f"init_{kind}.{idx_s - 1}.{rest}"] = v
-        else:
-            out[k] = v
-    return out if remapped_any else ckpt_sd
+    if not has_new:
+        for k, v in ckpt_sd.items():
+            m = _LEGACY_INIT_RE.match(k)
+            if m:
+                remapped_any = True
+                kind, idx_s, rest = m.group(1), int(m.group(2)), m.group(3)
+                out[f"init_{kind}.{idx_s - 1}.{rest}"] = v
+            else:
+                out[k] = v
+        if not remapped_any:
+            out = dict(ckpt_sd)
+    else:
+        out = dict(ckpt_sd)
+
+    # --- hop_gate (shared) → hop_gates (per-hop ModuleList) migration ---
+    if "mac.hop_gate.weight" in out and "mac.hop_gates.0.weight" not in out:
+        # Infer num_hops from the number of hop_gates keys expected; default 3
+        num_hops = 3
+        for i in range(num_hops):
+            out[f"mac.hop_gates.{i}.weight"] = out["mac.hop_gate.weight"].clone()
+            out[f"mac.hop_gates.{i}.bias"]   = out["mac.hop_gate.bias"].clone()
+        del out["mac.hop_gate.weight"]
+        del out["mac.hop_gate.bias"]
+        print(f"[ckpt migration] hop_gate → hop_gates (x{num_hops} per-hop gates)")
+
+    return out
 
 
 def _normalize_ckpt_state_dict(ckpt_sd, model):
@@ -149,7 +169,11 @@ def _reload_best_training_state(best_ckpt_path, model, optimizer, scaler, cosine
     try:
         b = torch.load(best_ckpt_path, map_location='cpu', weights_only=False)
         bsd = _normalize_ckpt_state_dict(b['model_state_dict'], model)
-        model.load_state_dict(bsd, strict=False)
+        _bmiss, _bunexp = model.load_state_dict(bsd, strict=False)
+        if _bmiss:
+            print(f"[recover] WARNING: missing keys ({len(_bmiss)}): {_bmiss[:8]}{'...' if len(_bmiss) > 8 else ''}")
+        if _bunexp:
+            print(f"[recover] unexpected keys ({len(_bunexp)}): {_bunexp[:8]}{'...' if len(_bunexp) > 8 else ''}")
         if b.get('optimizer_state_dict') is not None:
             try:
                 optimizer.load_state_dict(b['optimizer_state_dict'])
@@ -550,8 +574,9 @@ def train_h(args):
                             if consec_nan <= 3 or consec_nan % 20 == 0:
                                 print(f"[WARN] NaN in model output at epoch {epoch+1} step {step_idx} (consec={consec_nan})")
                             optimizer.zero_grad(set_to_none=True)
-                            if use_scaler:
-                                scaler.update()
+                            # Do NOT call scaler.update() here — no backward was run, so
+                            # _found_inf_per_device is empty and update() would incorrectly
+                            # grow the scale factor on a skipped step.
                             if consec_nan % 10 == 0:
                                 _clear_runtime_memory()
                             if consec_nan >= MAX_CONSEC_NAN:
@@ -607,15 +632,23 @@ def train_h(args):
                             visual_labels_batch=lbl_names,
                         )
                         if rl_loss is not None:
-                            loss = loss * 0.5 + rl_loss * 0.5
+                            # Keep auxiliary losses (coverage, entropy, InfoNCE) at full weight;
+                            # only blend CE ↔ RL to avoid discounting them 50% in SCST phase.
+                            _aux = 0.5 * cov_loss_scalar + args.entropy_mac_coef * entropy_loss
+                            if args.infonce and not ss_on:
+                                _ifo = getattr(out, 'infonce_loss', None)
+                                if _ifo is not None:
+                                    _aux = _aux + args.infonce_beta * _ifo
+                            loss = ce_loss * 0.5 + rl_loss * 0.5 + _aux
 
                 if not torch.isfinite(loss).item():
                     consec_nan += 1
                     if consec_nan <= 3 or consec_nan % 20 == 0:
                         print(f"[WARN] non-finite loss at epoch {epoch+1} step {step_idx} — skipping step (consec={consec_nan})")
                     optimizer.zero_grad(set_to_none=True)
-                    if use_scaler:
-                        scaler.update()
+                    # Do NOT call scaler.update() here — no backward was run, so
+                    # _found_inf_per_device is empty and update() would incorrectly
+                    # grow the scale factor on a skipped step.
                     if consec_nan % 10 == 0:
                         _clear_runtime_memory()
                     if consec_nan >= MAX_CONSEC_NAN:

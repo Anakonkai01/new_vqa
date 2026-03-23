@@ -434,10 +434,8 @@ def beam_decode_batch(model, region_feat, region_mask, q_ids, grid_feat, grid_va
                 mac_memory=mac_rep,
             )
 
-            if logit.dim() == 3:
-                log_probs_all = F.log_softmax(logit.squeeze(1), dim=-1)  # (K, V)
-            else:
-                log_probs_all = F.log_softmax(logit, dim=-1)
+            # logit is already log-probs from ThreeWayPGNHead.blend_3way — no re-normalization needed
+            log_probs_all = logit.squeeze(1) if logit.dim() == 3 else logit  # (K, V)
 
             for i, (score, toks, _, _, _, _) in enumerate(active):
                 log_probs = log_probs_all[i].clone()
@@ -763,7 +761,18 @@ def evaluate_h(args):
     # Strip torch.compile prefix if present
     state = {k.replace('_orig_mod.', ''): v for k, v in state.items()}
     state = _remap_model_h_legacy_decoder_inits(state)
-    model.load_state_dict(state, strict=False)
+    _miss, _unexp = model.load_state_dict(state, strict=False)
+    if _miss:
+        print(f"[WARN] Missing keys ({len(_miss)}): {_miss[:10]}{'...' if len(_miss) > 10 else ''}")
+        _critical = [k for k in _miss if any(k.startswith(p) for p in
+                     ('decoder.', 'mac.', 'init_h.', 'init_c.', 'v_proj.', 'grid_proj.', 'q_emb.', 'lstm.'))]
+        if _critical:
+            raise RuntimeError(
+                f"CRITICAL: {len(_critical)} essential weight(s) missing — architecture mismatch? "
+                f"Missing: {_critical[:5]}"
+            )
+    if _unexp:
+        print(f"[INFO] Unexpected keys ({len(_unexp)}): {_unexp[:10]}{'...' if len(_unexp) > 10 else ''}")
     print(f"Loaded checkpoint: {args.checkpoint}")
 
     if torch.cuda.is_available():
